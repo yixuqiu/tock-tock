@@ -23,6 +23,7 @@ use kernel::platform::{KernelResources, SyscallDriverLookup};
 use kernel::scheduler::round_robin::RoundRobinSched;
 use kernel::{create_capability, debug, static_init};
 
+use stm32f401cc::chip_specs::Stm32f401Specs;
 use stm32f401cc::interrupt_service::Stm32f401ccDefaultPeripherals;
 
 /// Support routines for debugging I/O.
@@ -37,10 +38,12 @@ static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS]
 
 static mut CHIP: Option<&'static stm32f401cc::chip::Stm32f4xx<Stm32f401ccDefaultPeripherals>> =
     None;
-static mut PROCESS_PRINTER: Option<&'static kernel::process::ProcessPrinterText> = None;
+static mut PROCESS_PRINTER: Option<&'static capsules_system::process_printer::ProcessPrinterText> =
+    None;
 
 // How should the kernel respond when a process faults.
-const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
+const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
+    capsules_system::process_policies::PanicFaultPolicy {};
 
 /// Dummy buffer that causes the linker to reserve enough space for the stack.
 #[no_mangle]
@@ -222,20 +225,24 @@ unsafe fn create_peripherals() -> (
 ) {
     // We use the default HSI 16Mhz clock
     let rcc = static_init!(stm32f401cc::rcc::Rcc, stm32f401cc::rcc::Rcc::new());
+    let clocks = static_init!(
+        stm32f401cc::clocks::Clocks<Stm32f401Specs>,
+        stm32f401cc::clocks::Clocks::new(rcc)
+    );
     let syscfg = static_init!(
         stm32f401cc::syscfg::Syscfg,
-        stm32f401cc::syscfg::Syscfg::new(rcc)
+        stm32f401cc::syscfg::Syscfg::new(clocks)
     );
     let exti = static_init!(
         stm32f401cc::exti::Exti,
         stm32f401cc::exti::Exti::new(syscfg)
     );
-    let dma1 = static_init!(stm32f401cc::dma::Dma1, stm32f401cc::dma::Dma1::new(rcc));
-    let dma2 = static_init!(stm32f401cc::dma::Dma2, stm32f401cc::dma::Dma2::new(rcc));
+    let dma1 = static_init!(stm32f401cc::dma::Dma1, stm32f401cc::dma::Dma1::new(clocks));
+    let dma2 = static_init!(stm32f401cc::dma::Dma2, stm32f401cc::dma::Dma2::new(clocks));
 
     let peripherals = static_init!(
         Stm32f401ccDefaultPeripherals,
-        Stm32f401ccDefaultPeripherals::new(rcc, exti, dma1, dma2)
+        Stm32f401ccDefaultPeripherals::new(clocks, exti, dma1, dma2)
     );
     (peripherals, syscfg, dma1)
 }
