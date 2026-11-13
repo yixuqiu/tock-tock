@@ -7,10 +7,10 @@
 use core::cell::Cell;
 use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
+use kernel::ErrorCode;
 use kernel::hil::i2c;
 use kernel::hil::time::{self, Alarm, ConvertTicks};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 pub static BASE_ADDR: u8 = 0x44;
 
@@ -66,7 +66,7 @@ fn crc8(data: &[u8]) -> u8 {
     crc
 }
 
-pub struct SHT4x<'a, A: Alarm<'a>, I: i2c::I2CDevice> {
+pub struct SHT4x<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> {
     i2c: &'a I,
     humidity_client: OptionalCell<&'a dyn kernel::hil::sensors::HumidityClient>,
     temperature_client: OptionalCell<&'a dyn kernel::hil::sensors::TemperatureClient>,
@@ -77,17 +77,17 @@ pub struct SHT4x<'a, A: Alarm<'a>, I: i2c::I2CDevice> {
     alarm: &'a A,
 }
 
-impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> SHT4x<'a, A, I> {
+impl<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> SHT4x<'a, A, I> {
     pub fn new(i2c: &'a I, buffer: &'static mut [u8], alarm: &'a A) -> SHT4x<'a, A, I> {
         SHT4x {
-            i2c: i2c,
+            i2c,
             humidity_client: OptionalCell::empty(),
             temperature_client: OptionalCell::empty(),
             state: Cell::new(State::Idle),
             buffer: TakeCell::new(buffer),
             read_temp: Cell::new(false),
             read_hum: Cell::new(false),
-            alarm: alarm,
+            alarm,
         }
     }
 
@@ -146,7 +146,7 @@ impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> SHT4x<'a, A, I> {
     }
 }
 
-impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> time::AlarmClient for SHT4x<'a, A, I> {
+impl<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> time::AlarmClient for SHT4x<'a, A, I> {
     fn alarm(&self) {
         let state = self.state.get();
         match state {
@@ -164,7 +164,7 @@ impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> time::AlarmClient for SHT4x<'a, A, I> 
     }
 }
 
-impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> i2c::I2CClient for SHT4x<'a, A, I> {
+impl<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> i2c::I2CClient for SHT4x<'a, A, I> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         match status {
             Ok(()) => {
@@ -239,7 +239,7 @@ impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> i2c::I2CClient for SHT4x<'a, A, I> {
     }
 }
 
-impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> kernel::hil::sensors::HumidityDriver<'a>
+impl<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> kernel::hil::sensors::HumidityDriver<'a>
     for SHT4x<'a, A, I>
 {
     fn set_client(&self, client: &'a dyn kernel::hil::sensors::HumidityClient) {
@@ -251,7 +251,7 @@ impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> kernel::hil::sensors::HumidityDriver<'
     }
 }
 
-impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> kernel::hil::sensors::TemperatureDriver<'a>
+impl<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> kernel::hil::sensors::TemperatureDriver<'a>
     for SHT4x<'a, A, I>
 {
     fn set_client(&self, client: &'a dyn kernel::hil::sensors::TemperatureClient) {

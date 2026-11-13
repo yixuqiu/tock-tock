@@ -26,15 +26,15 @@
 //! assert_eq!(pin_from_id as *const _, pin_from_port as *const _);
 //! ```
 
-use cortexm7::support::atomic;
+use cortexm7::support::with_interrupts_disabled;
 use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
 use kernel::hil;
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
 use kernel::utilities::registers::{ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
 
 use crate::ccm;
 
@@ -98,8 +98,8 @@ enum_from_primitive! {
 
 /// Creates a GPIO ID
 ///
-/// Low 6 bits are the GPIO offset; the '17' in GPIO2[17]
-/// Next 3 bits are the GPIO port; the '2' in GPIO2[17] (base 0 index, 2 -> 1)
+/// Low 6 bits are the GPIO offset; the '17' in `GPIO2[17]`
+/// Next 3 bits are the GPIO port; the '2' in `GPIO2[17]` (base 0 index, 2 -> 1)
 const fn gpio_id(port: GpioPort, offset: u16) -> u16 {
     ((port as u16) << 6) | offset & 0x3F
 }
@@ -332,13 +332,11 @@ impl<'a, const N: usize> Port<'a, N> {
         // changed due to an external interrupt. `ISR` is a read/clear write
         // 1 register (`rc_w1`). So, we only clear bits whose value has been
         // transferred to `isr`.
-        let isr_val = unsafe {
-            atomic(|| {
-                let isr_val = self.registers.isr.get();
-                self.registers.isr.set(isr_val);
-                isr_val
-            })
-        };
+        let isr_val = with_interrupts_disabled(|| {
+            let isr_val = self.registers.isr.get();
+            self.registers.isr.set(isr_val);
+            isr_val
+        });
 
         BitOffsets(isr_val)
             // Did we enable this interrupt?
@@ -555,7 +553,7 @@ pub struct Pin<'a> {
 trait U32Ext {
     fn set_bit(self, offset: usize) -> Self;
     fn clear_bit(self, offset: usize) -> Self;
-    fn is_bit_set(self, offset: usize) -> bool;
+    fn is_bit_set(&self, offset: usize) -> bool;
 }
 
 impl U32Ext for u32 {
@@ -568,12 +566,12 @@ impl U32Ext for u32 {
         self & !(1 << offset)
     }
     #[inline(always)]
-    fn is_bit_set(self, offset: usize) -> bool {
+    fn is_bit_set(&self, offset: usize) -> bool {
         (self & (1 << offset)) != 0
     }
 }
 
-impl<'a> Pin<'a> {
+impl Pin<'_> {
     /// Fabricate a new `Pin` from a `PinId`
     pub fn from_pin_id(pin_id: PinId) -> Self {
         Self::new(
@@ -746,25 +744,21 @@ impl hil::gpio::Input for Pin<'_> {
 
 impl<'a> hil::gpio::Interrupt<'a> for Pin<'a> {
     fn enable_interrupts(&self, mode: hil::gpio::InterruptEdge) {
-        unsafe {
-            atomic(|| {
-                // disable the interrupt
-                self.mask_interrupt();
-                self.clear_pending();
-                self.set_edge_sensitive(mode);
+        with_interrupts_disabled(|| {
+            // disable the interrupt
+            self.mask_interrupt();
+            self.clear_pending();
+            self.set_edge_sensitive(mode);
 
-                self.unmask_interrupt();
-            });
-        }
+            self.unmask_interrupt();
+        });
     }
 
     fn disable_interrupts(&self) {
-        unsafe {
-            atomic(|| {
-                self.mask_interrupt();
-                self.clear_pending();
-            });
-        }
+        with_interrupts_disabled(|| {
+            self.mask_interrupt();
+            self.clear_pending();
+        });
     }
 
     fn set_client(&self, client: &'a dyn hil::gpio::Client) {
@@ -818,9 +812,9 @@ mod tests {
         }
 
         check(0, core::iter::empty());
-        check(u32::max_value(), 0..32);
-        check(u32::max_value() >> 1, 0..31);
-        check(u32::max_value() << 1, 1..32);
+        check(u32::MAX, 0..32);
+        check(u32::MAX >> 1, 0..31);
+        check(u32::MAX << 1, 1..32);
         check(0x5555_5555, (0..32).step_by(2));
         check(0xAAAA_AAAA, (0..32).skip(1).step_by(2));
     }

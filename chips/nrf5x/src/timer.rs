@@ -26,24 +26,16 @@
 //! * Philip Levis <pal@cs.stanford.edu>
 //! * Date: August 18, 2016
 
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::hil::time::{Alarm, Ticks, Time};
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
-
-const INSTANCES: [StaticRef<TimerRegisters>; 3] = unsafe {
-    [
-        StaticRef::new(0x40008000 as *const TimerRegisters),
-        StaticRef::new(0x40009000 as *const TimerRegisters),
-        StaticRef::new(0x4000A000 as *const TimerRegisters),
-    ]
-};
+use kernel::utilities::registers::{ReadWrite, WriteOnly, register_bitfields};
 
 #[repr(C)]
-struct TimerRegisters {
+pub struct TimerRegisters {
     /// Start Timer
     tasks_start: WriteOnly<u32, Task::Register>,
     /// Stop Timer
@@ -220,9 +212,9 @@ pub struct Timer {
 }
 
 impl Timer {
-    pub const fn new(instance: usize) -> Timer {
+    pub const fn new(registers: StaticRef<TimerRegisters>) -> Timer {
         Timer {
-            registers: INSTANCES[instance],
+            registers,
             client: OptionalCell::empty(),
         }
     }
@@ -234,7 +226,6 @@ impl Timer {
     /// When an interrupt occurs, check if any of the 4 compares have
     /// created an event, and if so, add it to the bitmask of triggered
     /// events that is passed to the client.
-
     pub fn handle_interrupt(&self) {
         self.client.map(|client| {
             let mut val = 0;
@@ -272,9 +263,9 @@ const CC_CAPTURE: usize = 0;
 const CC_COMPARE: usize = 1;
 
 impl<'a> TimerAlarm<'a> {
-    pub const fn new(instance: usize) -> TimerAlarm<'a> {
+    pub const fn new(registers: StaticRef<TimerRegisters>) -> TimerAlarm<'a> {
         TimerAlarm {
-            registers: INSTANCES[instance],
+            registers,
             client: OptionalCell::empty(),
         }
     }

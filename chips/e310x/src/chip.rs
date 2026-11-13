@@ -10,8 +10,8 @@ use kernel::debug;
 use kernel::platform::chip::Chip;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
 use rv32i::csr;
-use rv32i::csr::{mcause, mie::mie, mip::mip, CSR};
-use rv32i::pmp::{simple::SimplePMP, PMPUserMPU};
+use rv32i::csr::{CSR, mcause, mie::mie, mip::mip};
+use rv32i::pmp::{PMPUserMPU, simple::SimplePMP};
 
 use crate::plic::PLIC;
 use kernel::hil::time::Freq32KHz;
@@ -40,7 +40,7 @@ pub struct E310xDefaultPeripherals<'a> {
     pub watchdog: sifive::watchdog::Watchdog,
 }
 
-impl<'a> E310xDefaultPeripherals<'a> {
+impl E310xDefaultPeripherals<'_> {
     pub fn new(clock_frequency: u32) -> Self {
         Self {
             uart0: sifive::uart::Uart::new(crate::uart::UART0_BASE, clock_frequency),
@@ -62,8 +62,8 @@ impl<'a> E310xDefaultPeripherals<'a> {
     }
 }
 
-impl<'a> InterruptService for E310xDefaultPeripherals<'a> {
-    unsafe fn service_interrupt(&self, _interrupt: u32) -> bool {
+impl InterruptService for E310xDefaultPeripherals<'_> {
+    fn service_interrupt(&self, _interrupt: u32) -> bool {
         false
     }
 }
@@ -105,7 +105,7 @@ impl<'a, I: InterruptService + 'a> E310x<'a, I> {
             if !self.plic_interrupt_service.service_interrupt(interrupt) {
                 debug!("Pidx {}", interrupt);
             }
-            self.atomic(|| {
+            self.with_interrupts_disabled(|| {
                 self.plic.complete(interrupt);
             });
         }
@@ -115,6 +115,9 @@ impl<'a, I: InterruptService + 'a> E310x<'a, I> {
 impl<'a, I: InterruptService + 'a> kernel::platform::chip::Chip for E310x<'a, I> {
     type MPU = PMPUserMPU<4, SimplePMP<8>>;
     type UserspaceKernelBoundary = rv32i::syscall::SysCall;
+    type ThreadIdProvider = rv32i::thread_id::RiscvThreadIdProvider;
+
+    fn init() {}
 
     fn mpu(&self) -> &Self::MPU {
         &self.pmp
@@ -167,14 +170,14 @@ impl<'a, I: InterruptService + 'a> kernel::platform::chip::Chip for E310x<'a, I>
         }
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        rv32i::support::atomic(f)
+        rv32i::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, writer: &mut dyn Write) {
+    unsafe fn print_state(_this: Option<&Self>, writer: &mut dyn Write) {
         rv32i::print_riscv_state(writer);
     }
 }
@@ -228,12 +231,12 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             // Once claimed this interrupt won't fire until it's completed
             // NOTE: The interrupt is no longer pending in the PLIC
             loop {
-                let interrupt = PLIC.next_pending();
+                let interrupt = (*addr_of!(PLIC)).next_pending();
 
                 match interrupt {
                     Some(irq) => {
                         // Safe as interrupts are disabled
-                        PLIC.save_interrupt(irq);
+                        (*addr_of!(PLIC)).save_interrupt(irq);
                     }
                     None => {
                         // Enable generic interrupts
@@ -245,7 +248,7 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             }
         }
 
-        mcause::Interrupt::Unknown => {
+        mcause::Interrupt::Unknown(_) => {
             panic!("interrupt of unknown cause");
         }
     }
@@ -255,7 +258,7 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
 ///
 /// For the e310 this gets called when an interrupt occurs while the chip is
 /// in kernel mode.
-#[export_name = "_start_trap_rust_from_kernel"]
+#[export_name = "start_trap_rust_from_kernel"]
 pub unsafe extern "C" fn start_trap_rust() {
     match mcause::Trap::from(CSR.mcause.extract()) {
         mcause::Trap::Interrupt(interrupt) => {
@@ -268,6 +271,7 @@ pub unsafe extern "C" fn start_trap_rust() {
 }
 
 /// Function that gets called if an interrupt occurs while an app was running.
+///
 /// mcause is passed in, and this function should correctly handle disabling the
 /// interrupt that fired so that it does not trigger again.
 #[export_name = "_disable_interrupt_trap_rust_from_app"]
@@ -281,3 +285,11 @@ pub unsafe extern "C" fn disable_interrupt_trap_handler(mcause_val: u32) {
         }
     }
 }
+
+/// Array used to track the "trap handler active" state per hart.
+///
+/// The `riscv` crate requires chip crates to allocate an array to
+/// track whether any given hart is currently in a trap handler. The
+/// array must be zero-initialized.
+#[export_name = "_trap_handler_active"]
+static mut TRAP_HANDLER_ACTIVE: [usize; 1] = [0; 1];

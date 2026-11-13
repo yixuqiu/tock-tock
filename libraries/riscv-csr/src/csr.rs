@@ -153,10 +153,14 @@ impl<R: RegisterLongName, const V: usize> ReadWriteRiscvCsr<usize, R, V> {
         use core::arch::asm;
         let r: usize;
         unsafe {
-            asm!("csrrw {rd}, {csr}, {rs1}",
-                 rd = out(reg) r,
-                 csr = const V,
-                 rs1 = in(reg) val_to_set);
+            asm!(
+                "
+    csrrw {rd}, {csr}, {rs1}
+                ",
+                rd = out(reg) r,
+                csr = const V,
+                rs1 = in(reg) val_to_set,
+            );
         }
         r
     }
@@ -193,10 +197,14 @@ impl<R: RegisterLongName, const V: usize> ReadWriteRiscvCsr<usize, R, V> {
         use core::arch::asm;
         let r: usize;
         unsafe {
-            asm!("csrrs {rd}, {csr}, {rs1}",
-                 rd = out(reg) r,
-                 csr = const V,
-                 rs1 = in(reg) bitmask);
+            asm!(
+                "
+    csrrs {rd}, {csr}, {rs1}
+                ",
+                rd = out(reg) r,
+                csr = const V,
+                rs1 = in(reg) bitmask
+            );
         }
         r
     }
@@ -233,10 +241,14 @@ impl<R: RegisterLongName, const V: usize> ReadWriteRiscvCsr<usize, R, V> {
         use core::arch::asm;
         let r: usize;
         unsafe {
-            asm!("csrrc {rd}, {csr}, {rs1}",
-                 rd = out(reg) r,
-                 csr = const V,
-                 rs1 = in(reg) bitmask);
+            asm!(
+                "
+    csrrc {rd}, {csr}, {rs1}
+                ",
+                rd = out(reg) r,
+                csr = const V,
+                rs1 = in(reg) bitmask,
+            );
         }
         r
     }

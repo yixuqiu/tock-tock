@@ -4,171 +4,220 @@
 
 //! Generic support for all Cortex-M platforms.
 
-#![crate_name = "cortexv7m"]
-#![crate_type = "rlib"]
 #![no_std]
 
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-use core::arch::global_asm;
+// The `cortexm` crate is only referenced through `sym` operands in our asm
+// blocks, which are compiled only for ARM targets. On host (non-ARM) builds
+// those blocks are cfg'd out, so the dependency appears unused and cargo
+// reports `cargo::unused_dependencies`. To avoid that, we explicitly use the
+// crate here.
+use cortexm as _;
 
-// These constants are defined in the linker script.
-extern "C" {
-    static _estack: u8;
-    static _sstack: u8;
-}
-
+/// ARMv7-M systick handler function.
+///
+/// For documentation of this function, please see
+/// `CortexMVariant::SYSTICK_HANDLER`.
+///
+/// # Safety
+///
+/// - INPUTS:
+///   - This reads the `lr`, which is part of the calling convention.
+/// - OUTPUTS:
+///   - This writes to `r0`, a caller-saved register.
+/// - This does not fall-through, it branches at the end.
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-extern "C" {
-    /// ARMv7-M systick handler function.
-    ///
-    /// For documentation of this function, please see
-    /// [`CortexMVariant::SYSTICK_HANDLER`].
-    pub fn systick_handler_arm_v7m();
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-global_asm!(
-    "
-    .section .systick_handler_arm_v7m, \"ax\"
-    .global systick_handler_arm_v7m
-    .thumb_func
-  systick_handler_arm_v7m:
+#[unsafe(naked)]
+pub unsafe extern "C" fn systick_handler_arm_v7m() {
+    use core::arch::naked_asm;
+    naked_asm!(
+        "
     // Use the CONTROL register to set the thread mode to privileged to switch
     // back to kernel mode.
     //
-    // CONTROL[1]: Stack status
-    //   0 = Default stack (MSP) is used
-    //   1 = Alternate stack is used
-    // CONTROL[0]: Mode
-    //   0 = Privileged in thread mode
+    // CONTROL[2]: FPCA (Floating-Point Context Active)
+    //   0 = No active floating-point context
+    //   1 = Floating-point context active (FPU registers saved on exception entry)
+    // CONTROL[1]: SPSEL (Stack Pointer Select)
+    //   0 = Main Stack Pointer (MSP) is used
+    //   1 = Process Stack Pointer (PSP) is used
+    // CONTROL[0]: nPriv (Priviledged Mode?)
+    //   0 = Privileged in thread mode <--------- set to this here
     //   1 = User state in thread mode
-    mov r0, #0                        // r0 = 0
-    msr CONTROL, r0                   // CONTROL = 0
+    //
+    // Do not change other CONTROL bits.
+    mrs r0, CONTROL                   // r0 = CONTROL
+    bic r0, r0, #1                    // r0 = r0 & ~0x1
+    msr CONTROL, r0                   // CONTROL.nPriv = 0
     // CONTROL writes must be followed by an Instruction Synchronization Barrier
     // (ISB). https://developer.arm.com/documentation/dai0321/latest
     isb                               // synchronization barrier
 
-    // Set the link register to the special EXC_RETURN value of 0xFFFFFFF9 which
-    // instructs the CPU to run in thread mode with the main (kernel) stack.
-    ldr lr, =0xFFFFFFF9               // LR = 0xFFFFFFF9
+    // The link register is set to the `EXC_RETURN` value on exception entry. To
+    // ensure we continue executing in the kernel we ensure the SPSEL bit is set
+    // to 0 to use the main (kernel) stack.
+    bfc lr, #2, #1                    // LR = LR & !(0x1<<2)
 
     // This will resume in the switch_to_user function where application state
     // is saved and the scheduler can choose what to do next.
     bx lr
-    "
-);
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-extern "C" {
-    /// Handler of `svc` instructions on ARMv7-M.
-    ///
-    /// For documentation of this function, please see
-    /// [`CortexMVariant::SVC_HANDLER`].
-    pub fn svc_handler_arm_v7m();
+        "
+    );
 }
 
+/// Handler of `svc` instructions on ARMv7-M.
+///
+/// For documentation of this function, please see
+/// `CortexMVariant::SVC_HANDLER`.
+///
+/// # Safety
+///
+/// - INPUTS:
+///   - This reads the `lr`, which is part of the calling convention.
+/// - OUTPUTS:
+///   - This writes to `r0`, a caller-saved register.
+///   - This writes to `r1`, a caller-saved register.
+///   - This writes to `r2`, a caller-saved register.
+///   - This writes to `r3`, a caller-saved register.
+/// - This does not fall-through, it branches in both arms of the branch.
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-global_asm!(
-    "
-    .section .svc_handler_arm_v7m, \"ax\"
-    .global svc_handler_arm_v7m
-    .thumb_func
-  svc_handler_arm_v7m:
-    // First check to see which direction we are going in. If the link register
-    // is something other than 0xFFFFFFF9, then we are coming from an app which
-    // has called a syscall.
-    cmp lr, #0xFFFFFFF9               // LR ≟ 0xFFFFFFF9
-    bne 100f // to_kernel             // if LR != 0xFFFFFFF9, jump to to_kernel
+#[unsafe(naked)]
+pub unsafe extern "C" fn svc_handler_arm_v7m() {
+    use core::arch::naked_asm;
+    naked_asm!(
+        "
+    // First check to see which direction we are going in.
+    //
+    // We use `SVC_SWITCH_TO_APP`, which is set by the `switch_to_user` code,
+    // to reliably determine if we should switch from kernel to user, or if this
+    // is an `svc` issued from a userspace app. Upon switching to an app, we're
+    // responsible for clearing `SVC_SWITCH_TO_APP`.
+    //
+    // This used to use the link register (containing EXC_RETURN)'s SPSEL bit,
+    // but that turns out to be unreliable with tail-chained exception handlers.
+    // See the doc comment on `SVC_SWITCH_TO_APP` for more information.
+    ldr r0, ={svc_switch_to_app}      // r0 = &SVC_SWITCH_TO_APP
+    ldr r1, [r0]                      // r1 = SVC_SWITCH_TO_APP
+    cmp r1, #0                        // r1 == 0 (coming from app)
+    beq 100f // to_kernel
 
     // If we get here, then this is a context switch from the kernel to the
-    // application. Use the CONTROL register to set the thread mode to
-    // unprivileged to run the application.
+    // application. We must clear `SVC_SWITCH_TO_APP`, such that we reliably
+    // recognize the next `svc` as coming from an app.
+    mov r1, #0                        // r1 = 0 (coming from app)
+    str r1, [r0]                      // *&SVC_SWITCH_TO_APP = 0
+
+    // Use the CONTROL register to set the thread mode to unprivileged to run
+    // the application.
     //
-    // CONTROL[1]: Stack status
-    //   0 = Default stack (MSP) is used
-    //   1 = Alternate stack is used
-    // CONTROL[0]: Mode
+    // CONTROL[2]: FPCA (Floating-Point Context Active)
+    //   0 = No active floating-point context
+    //   1 = Floating-point context active (FPU registers saved on exception entry)
+    // CONTROL[1]: SPSEL (Stack Pointer Select)
+    //   0 = Main Stack Pointer (MSP) is used
+    //   1 = Process Stack Pointer (PSP) is used
+    // CONTROL[0]: nPriv (Priviledged Mode?)
     //   0 = Privileged in thread mode
-    //   1 = User state in thread mode
-    mov r0, #1                        // r0 = 1
-    msr CONTROL, r0                   // CONTROL = 1
+    //   1 = User state in thread mode <--------- set to this here
+    //
+    // Do not change other CONTROL bits.
+    mrs r0, CONTROL                   // r0 = CONTROL
+    orr r0, #1                        // r0 = r0 | 0x1
+    msr CONTROL, r0                   // CONTROL.nPriv = 1
     // CONTROL writes must be followed by an Instruction Synchronization Barrier
     // (ISB). https://developer.arm.com/documentation/dai0321/latest
     isb
 
-    // Set the link register to the special EXC_RETURN value of 0xFFFFFFFD which
-    // instructs the CPU to run in thread mode with the process stack.
-    ldr lr, =0xFFFFFFFD               // LR = 0xFFFFFFFD
+    // The link register is set to the `EXC_RETURN` value on exception entry. To
+    // ensure we execute using the process stack we set the SPSEL bit to 1
+    // to use the alternate (process) stack.
+    orr lr, lr, #4                    // LR = LR | 0b100
 
     // Switch to the app.
     bx lr
 
-  100: // to_kernel
+100: // to_kernel
     // An application called a syscall. We mark this in the global variable
     // `SYSCALL_FIRED` which is stored in the syscall file.
     // `UserspaceKernelBoundary` will use this variable to decide why the app
     // stopped executing.
-    ldr r0, =SYSCALL_FIRED            // r0 = &SYSCALL_FIRED
+    ldr r0, ={syscall_fired}          // r0 = &SYSCALL_FIRED
     mov r1, #1                        // r1 = 1
     str r1, [r0]                      // *SYSCALL_FIRED = 1
 
     // Use the CONTROL register to set the thread mode to privileged to switch
     // back to kernel mode.
     //
-    // CONTROL[1]: Stack status
-    //   0 = Default stack (MSP) is used
-    //   1 = Alternate stack is used
-    // CONTROL[0]: Mode
-    //   0 = Privileged in thread mode
+    // CONTROL[2]: FPCA (Floating-Point Context Active)
+    //   0 = No active floating-point context
+    //   1 = Floating-point context active (FPU registers saved on exception entry)
+    // CONTROL[1]: SPSEL (Stack Pointer Select)
+    //   0 = Main Stack Pointer (MSP) is used
+    //   1 = Process Stack Pointer (PSP) is used
+    // CONTROL[0]: nPriv (Priviledged Mode?)
+    //   0 = Privileged in thread mode <--------- set to this here
     //   1 = User state in thread mode
-    mov r0, #0                        // r0 = 0
-    msr CONTROL, r0                   // CONTROL = 0
+    //
+    // Do not change other CONTROL bits.
+    mrs r0, CONTROL                   // r0 = CONTROL
+    bic r0, r0, #1                    // r0 = r0 & ~0x1
+    msr CONTROL, r0                   // CONTROL.nPriv = 0
     // CONTROL writes must be followed by an Instruction Synchronization Barrier
     // (ISB). https://developer.arm.com/documentation/dai0321/latest
     isb
 
-    // Set the link register to the special EXC_RETURN value of 0xFFFFFFF9 which
-    // instructs the CPU to run in thread mode with the main (kernel) stack.
-    ldr lr, =0xFFFFFFF9               // LR = 0xFFFFFFF9
+    // The link register is set to the `EXC_RETURN` value on exception entry. To
+    // ensure we continue executing in the kernel we ensure the SPSEL bit is set
+    // to 0 to use the main (kernel) stack.
+    bfc lr, #2, #1                    // LR = LR & !(0x1<<2)
 
     // Return to the kernel.
     bx lr
-    "
-);
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-extern "C" {
-    /// Generic interrupt handler for ARMv7-M instruction sets.
-    ///
-    /// For documentation of this function, see [`CortexMVariant::GENERIC_ISR`].
-    pub fn generic_isr_arm_v7m();
+        ",
+        syscall_fired = sym cortexm::syscall::SYSCALL_FIRED,
+        svc_switch_to_app = sym cortexm::syscall::SVC_SWITCH_TO_APP,
+    );
 }
+
+/// Generic interrupt handler for ARMv7-M instruction sets.
+///
+/// For documentation of this function, see `CortexMVariant::GENERIC_ISR`.
+///
+/// # Safety
+///
+/// - INPUTS:
+///   - This reads the `lr`, which is part of the calling convention.
+/// - OUTPUTS:
+///   - This writes to `r0`, a caller-saved register.
+///   - This writes to `r2`, a caller-saved register.
+///   - This writes to `r3`, a caller-saved register.
+/// - This does not fall-through, it branches at the end.
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-global_asm!(
+#[unsafe(naked)]
+pub unsafe extern "C" fn generic_isr_arm_v7m() {
+    use core::arch::naked_asm;
+    naked_asm!(
         "
-    .section .generic_isr_arm_v7m, \"ax\"
-    .global generic_isr_arm_v7m
-    .thumb_func
-  generic_isr_arm_v7m:
     // Use the CONTROL register to set the thread mode to privileged to ensure
     // we are executing as the kernel. This may be redundant if the interrupt
     // happened while the kernel code was executing.
     //
-    // CONTROL[1]: Stack status
-    //   0 = Default stack (MSP) is used
-    //   1 = Alternate stack is used
-    // CONTROL[0]: Mode
-    //   0 = Privileged in thread mode
+    // CONTROL[2]: FPCA (Floating-Point Context Active)
+    //   0 = No active floating-point context
+    //   1 = Floating-point context active (FPU registers saved on exception entry)
+    // CONTROL[1]: SPSEL (Stack Pointer Select)
+    //   0 = Main Stack Pointer (MSP) is used
+    //   1 = Process Stack Pointer (PSP) is used
+    // CONTROL[0]: nPriv (Priviledged Mode?)
+    //   0 = Privileged in thread mode <--------- set to this here
     //   1 = User state in thread mode
-    mov r0, #0                        // r0 = 0
-    msr CONTROL, r0                   // CONTROL = 0
+    //
+    // Do not change other CONTROL bits.
+    mrs r0, CONTROL                   // r0 = CONTROL
+    bic r0, r0, #1                    // r0 = r0 & ~0x1
+    msr CONTROL, r0                   // CONTROL.nPriv = 0
     // CONTROL writes must be followed by an Instruction Synchronization Barrier
     // (ISB). https://developer.arm.com/documentation/dai0321/latest
     isb
-
-    // Set the link register to the special EXC_RETURN value of 0xFFFFFFF9 which
-    // instructs the CPU to run in thread mode with the main (kernel) stack.
-    ldr lr, =0xFFFFFFF9               // LR = 0xFFFFFFF9
 
     // Now need to disable the interrupt that fired in the NVIC to ensure it
     // does not trigger again before the scheduler has a chance to handle it. We
@@ -209,25 +258,62 @@ global_asm!(
     ldr r3, =0xe000e200               // r3 = &NVIC.ISPR
     str r0, [r3, r2, lsl #2]          // *(r3 + r2 * 4) = r0
 
+    // The link register is set to the `EXC_RETURN` value on exception entry. To
+    // ensure we continue executing in the kernel we ensure the SPSEL bit is set
+    // to 0 to use the main (kernel) stack.
+    bfc lr, #2, #1                    // LR = LR & !(0x1<<2)
+
     // Now we can return from the interrupt context and resume what we were
     // doing. If an app was executing we will switch to the kernel so it can
     // choose whether to service the interrupt.
     bx lr
-    ");
+        "
+    );
+}
 
 /// Assembly function to switch into userspace and store/restore application
 /// state.
 ///
 /// For documentation of this function, please see
-/// [`CortexMVariant::switch_to_user`].
+/// `CortexMVariant::switch_to_user`.
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 pub unsafe fn switch_to_user_arm_v7m(
     mut user_stack: *const usize,
     process_regs: &mut [usize; 8],
 ) -> *const usize {
     use core::arch::asm;
-    asm!(
-    "
+    // # Safety
+    //
+    // - INPUTS:
+    //   - This uses `r0`, which is specified as an input from `user_stack`.
+    //   - This uses `r1`, which is specified as an input from `process_regs`.
+    // - CALLER-SAVED registers:
+    //   - This uses `r6`, which is replaced before exiting asm.
+    //   - This uses `r7`, which is replaced before exiting asm.
+    //   - This uses `r9`, which is replaced before exiting asm.
+    // - OUTPUTS:
+    //   - This writes `r0` which is specified as an output.
+    //   - This writes `r2` which is specified as an output.
+    //   - This writes `r3` which is specified as an output.
+    //   - This writes `r4` which is specified as an output.
+    //   - This writes `r5` which is specified as an output.
+    //   - This writes `r8` which is specified as an output.
+    //   - This writes `r10` which is specified as an output.
+    //   - This writes `r11` which is specified as an output.
+    //   - This writes `r12` which is specified as an output.
+    // - Options set:
+    // - Options not set:
+    //   - nomem: We read and write memory.
+    //   - nostack: We use the stack.
+    //   - preserves_flags: This likely change flags in userspace.
+    //   - pure: not required
+    //   - readonly: implied by nomem
+    //   - noreturn: we do fall-through
+    //   - att_syntax: not on arm
+    //   - raw: not required
+    unsafe {
+        asm!(
+            "
     // Rust `asm!()` macro (as of May 2021) will not let us mark r6, r7 and r9
     // as clobbers. r6 and r9 is used internally by LLVM, and r7 is used for
     // the frame pointer. However, in the process of restoring and saving the
@@ -250,10 +336,17 @@ pub unsafe fn switch_to_user_arm_v7m(
     // register.
     ldmia r1, {{r4-r11}}              // r4 = r1[0], r5 = r1[1], ...
 
-    // Generate a SVC exception to handle the context switch from kernel to
-    // userspace. It doesn't matter which SVC number we use here as it is not
-    // used in the exception handler. Data being returned from a syscall is
-    // transferred on the app's stack.
+    // Indicate that the next `svc` instruction intends to switch from kernel to
+    // an app, and then generate the SVC exception. See the documentation of
+    // `SVC_SWITCH_TO_APP` for more information. `r0` should be free to use
+    // here, as we've saved it at PSP. We use `r0` as a non-zero value, as
+    // Rust's references are guaranteed to have non-zero addresses. There is no
+    // other meaning in the value we write here.
+    ldr r0, ={svc_switch_to_app}      // r0 = &SVC_SWITCH_TO_APP
+    str r0, [r0]                      // *&SVC_SWITCH_TO_APP = <nonzero>
+    // It doesn't matter which SVC number we use here as it is not used in the
+    // exception handler. Data being returned from a syscall is transferred on
+    // the app's stack.
     svc 0xff
 
     // When execution returns here we have switched back to the kernel from the
@@ -272,13 +365,22 @@ pub unsafe fn switch_to_user_arm_v7m(
     mov r6, r2                        // r6 = r2
     mov r7, r3                        // r7 = r3
     mov r9, r12                       // r9 = r12
-    ",
-    inout("r0") user_stack,
-    in("r1") process_regs,
-    out("r2") _, out("r3") _, out("r4") _, out("r5") _, out("r8") _, out("r10") _,
-    out("r11") _, out("r12") _);
+            ",
+            inout("r0") user_stack,
+            in("r1") process_regs,
+            out("r2") _,
+            out("r3") _,
+            out("r4") _,
+            out("r5") _,
+            out("r8") _,
+            out("r10") _,
+            out("r11") _,
+            out("r12") _,
+            svc_switch_to_app = sym cortexm::syscall::SVC_SWITCH_TO_APP,
+        );
 
-    user_stack
+        user_stack
+    }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -293,22 +395,69 @@ unsafe extern "C" fn hard_fault_handler_arm_v7m_kernel(
         panic!("kernel stack overflow");
     } else {
         // Show the normal kernel hardfault message.
-        let stacked_r0: u32 = *faulting_stack.offset(0);
-        let stacked_r1: u32 = *faulting_stack.offset(1);
-        let stacked_r2: u32 = *faulting_stack.offset(2);
-        let stacked_r3: u32 = *faulting_stack.offset(3);
-        let stacked_r12: u32 = *faulting_stack.offset(4);
-        let stacked_lr: u32 = *faulting_stack.offset(5);
-        let stacked_pc: u32 = *faulting_stack.offset(6);
-        let stacked_xpsr: u32 = *faulting_stack.offset(7);
+
+        // Get the stacked copies of caller-saved registers and other state.
+        //
+        // # Safety
+        //
+        // Because we verified there was not a stack overflow when the hardware
+        // pushed these values to the stack, these are valid pointers to
+        // allocated memory.
+        let (
+            stacked_r0,
+            stacked_r1,
+            stacked_r2,
+            stacked_r3,
+            stacked_r12,
+            stacked_lr,
+            stacked_pc,
+            stacked_xpsr,
+        ) = unsafe {
+            let r0: u32 = *faulting_stack.add(0);
+            let r1: u32 = *faulting_stack.add(1);
+            let r2: u32 = *faulting_stack.add(2);
+            let r3: u32 = *faulting_stack.add(3);
+            let r12: u32 = *faulting_stack.add(4);
+            let lr: u32 = *faulting_stack.add(5);
+            let pc: u32 = *faulting_stack.add(6);
+            let xpsr: u32 = *faulting_stack.add(7);
+
+            (r0, r1, r2, r3, r12, lr, pc, xpsr)
+        };
 
         let mode_str = "Kernel";
 
-        let shcsr: u32 = core::ptr::read_volatile(0xE000ED24 as *const u32);
-        let cfsr: u32 = core::ptr::read_volatile(0xE000ED28 as *const u32);
-        let hfsr: u32 = core::ptr::read_volatile(0xE000ED2C as *const u32);
-        let mmfar: u32 = core::ptr::read_volatile(0xE000ED34 as *const u32);
-        let bfar: u32 = core::ptr::read_volatile(0xE000ED38 as *const u32);
+        // Extract symbols from the linker script
+        let (estack, sstack) = {
+            // # Safety
+            //
+            // Linker script symbols are value-less entities, a concept that
+            // does not map onto any actual Rust type (as of July 2026). The
+            // only valid operation on these "types" is taking their address.
+            // We scope the declaration to a dedicated block here to ensure no
+            // invalid access attempts.
+            unsafe extern "C" {
+                static _estack: u8;
+                static _sstack: u8;
+            }
+            let estack: u32 = core::ptr::addr_of!(_estack) as u32;
+            let sstack: u32 = core::ptr::addr_of!(_sstack) as u32;
+            (estack, sstack)
+        };
+
+        // Read system status registers.
+        //
+        // # Safety
+        //
+        // These are the valid locations of 32-bit registers.
+        let (shcsr, cfsr, hfsr, mmfar, bfar) = unsafe {
+            let shcsr: u32 = core::ptr::read_volatile(0xE000ED24 as *const u32);
+            let cfsr: u32 = core::ptr::read_volatile(0xE000ED28 as *const u32);
+            let hfsr: u32 = core::ptr::read_volatile(0xE000ED2C as *const u32);
+            let mmfar: u32 = core::ptr::read_volatile(0xE000ED34 as *const u32);
+            let bfar: u32 = core::ptr::read_volatile(0xE000ED38 as *const u32);
+            (shcsr, cfsr, hfsr, mmfar, bfar)
+        };
 
         let iaccviol = (cfsr & 0x01) == 0x01;
         let daccviol = (cfsr & 0x02) == 0x02;
@@ -341,7 +490,6 @@ unsafe extern "C" fn hard_fault_handler_arm_v7m_kernel(
 
         panic!(
             "{} HardFault.\r\n\
-         \tKernel version {}\r\n\
          \tr0  0x{:x}\r\n\
          \tr1  0x{:x}\r\n\
          \tr2  0x{:x}\r\n\
@@ -349,7 +497,7 @@ unsafe extern "C" fn hard_fault_handler_arm_v7m_kernel(
          \tr12 0x{:x}\r\n\
          \tlr  0x{:x}\r\n\
          \tpc  0x{:x}\r\n\
-         \tprs 0x{:x} [ N {} Z {} C {} V {} Q {} GE {}{}{}{} ; ICI.IT {} T {} ; Exc {}-{} ]\r\n\
+         \tpsr 0x{:x} [ N {} Z {} C {} V {} Q {} GE {}{}{}{} ; ICI.IT {} T {} ; Exc {}-{} ]\r\n\
          \tsp  0x{:x}\r\n\
          \ttop of stack     0x{:x}\r\n\
          \tbottom of stack  0x{:x}\r\n\
@@ -379,7 +527,6 @@ unsafe extern "C" fn hard_fault_handler_arm_v7m_kernel(
          \tBus Fault Address:       (valid: {}) {:#010X}\r\n\
          ",
             mode_str,
-            option_env!("TOCK_KERNEL_VERSION").unwrap_or("unknown"),
             stacked_r0,
             stacked_r1,
             stacked_r2,
@@ -402,8 +549,8 @@ unsafe extern "C" fn hard_fault_handler_arm_v7m_kernel(
             exception_number,
             ipsr_isr_number_to_str(exception_number),
             faulting_stack as u32,
-            core::ptr::addr_of!(_estack) as u32,
-            core::ptr::addr_of!(_sstack) as u32,
+            estack,
+            sstack,
             shcsr,
             cfsr,
             hfsr,
@@ -434,98 +581,112 @@ unsafe extern "C" fn hard_fault_handler_arm_v7m_kernel(
     }
 }
 
+/// ARMv7-M hardfault handler.
+///
+/// For documentation of this function, please see
+/// `CortexMVariant::HARD_FAULT_HANDLER_HANDLER`.
+///
+/// # Safety
+///
+/// - INPUTS:
+///   - This reads the `lr`, which is part of the calling convention.
+/// - OUTPUTS:
+///   - This writes to `r0`, a caller-saved register.
+///   - This writes to `r1`, a caller-saved register.
+///   - This writes to `r2`, a caller-saved register.
+///   - This writes to `r3`, a caller-saved register.
+/// - This does not fall-through, it branches at the end.
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-extern "C" {
-    /// ARMv7-M hardfault handler.
-    ///
-    /// For documentation of this function, please see
-    /// [`CortexMVariant::HARD_FAULT_HANDLER_HANDLER`].
-    pub fn hard_fault_handler_arm_v7m();
+#[unsafe(naked)]
+pub unsafe extern "C" fn hard_fault_handler_arm_v7m() {
+    use core::arch::naked_asm;
+    // First need to determine if this a kernel fault or a userspace fault, and store
+    // the unmodified stack pointer. Place these values in registers, then call
+    // a non-naked function, to allow for use of rust code alongside inline asm.
+    // Because calling a function increases the stack pointer, we have to check for a kernel
+    // stack overflow and adjust the stack pointer before we branch
+    naked_asm!(
+        "
+    mov    r2, 0     // r2 = 0
+    tst    lr, #4    // bitwise AND link register to 0b100
+    itte   eq        // if lr==4, run next two instructions, else, run 3rd instruction.
+    mrseq  r0, msp   // r0 = kernel stack pointer
+    addeq  r2, 1     // r2 = 1, kernel was executing
+    mrsne  r0, psp   // r0 = userland stack pointer
+    // Need to determine if we had a stack overflow before we push anything
+    // on to the stack. We check this by looking at the BusFault Status
+    // Register's (BFSR) `LSPERR` and `STKERR` bits to see if the hardware
+    // had any trouble stacking important registers to the stack during the
+    // fault. If so, then we cannot use this stack while handling this fault
+    // or we will trigger another fault.
+    ldr   r3, =0xE000ED29  // SCB BFSR register address
+    ldrb  r3, [r3]         // r3 = BFSR
+    tst   r3, #0x30        // r3 = BFSR & 0b00110000; LSPERR & STKERR bits
+    ite   ne               // check if the result of that bitwise AND was not 0
+    movne r1, #1           // BFSR & 0b00110000 != 0; r1 = 1
+    moveq r1, #0           // BFSR & 0b00110000 == 0; r1 = 0
+    and r3, r2, r1         // bitwise and r1 and r2, store in r3
+    cmp  r3, #1            //  update condition codes to reflect if r1 == 1 && r2 == 1
+    itt  eq                // if r3==1 run the next 2 instructions, else skip to branch
+    // if true, The hardware couldn't use the stack, so we have no saved data and
+    // we cannot use the kernel stack as is. We just want to report that
+    // the kernel's stack overflowed, since that is essential for
+    // debugging.
+    //
+    // To make room for a panic!() handler stack, we just re-use the
+    // kernel's original stack. This should in theory leave the bottom
+    // of the stack where the problem occurred untouched should one want
+    // to further debug.
+    ldreq  r3, =_estack  // load _estack into r3
+    moveq  sp, r3        // Set the stack pointer to _estack
+    // finally, if the fault occurred in privileged mode (r2 == 1), branch
+    // to non-naked handler.
+    cmp r2, #0
+    // Per ARM calling convention, faulting stack is passed in r0, whether
+    // there was a stack overflow in r1. This function must never return.
+    bne {kernel_hard_fault_handler} // branch to kernel hard fault handler
+    // Otherwise, the hard fault occurred in userspace. In this case, read
+    // the relevant SCB registers:
+    ldr r0, ={scb_registers}  // Global variable address
+    ldr r1, =0xE000ED14       // SCB CCR register address
+    ldr r2, [r1, #0]          // CCR
+    str r2, [r0, #0]
+    // Read MMFAR and BFAR first: the CFSR clear resets MMARVALID and BFARVALID.
+    ldr r2, [r1, #32]         // MMFAR
+    str r2, [r0, #12]
+    ldr r2, [r1, #36]         // BFAR
+    str r2, [r0, #16]
+    ldr r2, [r1, #20]         // CFSR
+    str r2, [r0, #4]
+    str r2, [r1, #20]         // Clear saved bits of CFSR (write 1 to clear)
+    ldr r2, [r1, #24]         // HFSR
+    str r2, [r0, #8]
+    str r2, [r1, #24]         // Clear saved bits of HFSR (write 1 to clear)
+
+    ldr r0, ={app_hard_fault}// Global variable address
+    mov r1, #1               // r1 = 1
+    str r1, [r0, #0]         // APP_HARD_FAULT = 1
+
+    // Set thread mode to privileged. Do not touch other CONTROL state.
+    mrs r0, CONTROL
+    bic r0, r0, #1
+    msr CONTROL, r0
+    // CONTROL writes must be followed by ISB
+    // http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dai0321a/BIHFJCAC.html
+    isb
+
+    // The link register is set to the `EXC_RETURN` value on exception
+    // entry. To ensure we continue executing in the kernel we ensure the
+    // SPSEL bit is set to 0 to use the main (kernel) stack.
+    bfc lr, #2, #1                    // LR = LR & !(0x1<<2)
+
+    bx lr
+        ",
+        kernel_hard_fault_handler = sym hard_fault_handler_arm_v7m_kernel,
+        app_hard_fault = sym cortexm::syscall::APP_HARD_FAULT,
+        scb_registers = sym cortexm::syscall::SCB_REGISTERS,
+    );
 }
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-// First need to determine if this a kernel fault or a userspace fault, and store
-// the unmodified stack pointer. Place these values in registers, then call
-// a non-naked function, to allow for use of rust code alongside inline asm.
-// Because calling a function increases the stack pointer, we have to check for a kernel
-// stack overflow and adjust the stack pointer before we branch
-global_asm!(
-    "
-        .section .hard_fault_handler_arm_v7m, \"ax\"
-        .global hard_fault_handler_arm_v7m
-        .thumb_func
-    hard_fault_handler_arm_v7m:
-        mov    r2, 0     // r2 = 0
-        tst    lr, #4    // bitwise AND link register to 0b100
-        itte   eq        // if lr==4, run next two instructions, else, run 3rd instruction.
-        mrseq  r0, msp   // r0 = kernel stack pointer
-        addeq  r2, 1     // r2 = 1, kernel was executing
-        mrsne  r0, psp   // r0 = userland stack pointer
-        // Need to determine if we had a stack overflow before we push anything
-        // on to the stack. We check this by looking at the BusFault Status
-        // Register's (BFSR) `LSPERR` and `STKERR` bits to see if the hardware
-        // had any trouble stacking important registers to the stack during the
-        // fault. If so, then we cannot use this stack while handling this fault
-        // or we will trigger another fault.
-        ldr   r3, =0xE000ED29  // SCB BFSR register address
-        ldrb  r3, [r3]         // r3 = BFSR
-        tst   r3, #0x30        // r3 = BFSR & 0b00110000; LSPERR & STKERR bits
-        ite   ne               // check if the result of that bitwise AND was not 0
-        movne r1, #1           // BFSR & 0b00110000 != 0; r1 = 1
-        moveq r1, #0           // BFSR & 0b00110000 == 0; r1 = 0
-        and r5, r2, r1         // bitwise and r1 and r2, store in r5
-        cmp  r5, #1            //  update condition codes to reflect if r1 == 1 && r2 == 1
-        itt  eq                // if r5==1 run the next 2 instructions, else skip to branch
-        // if true, The hardware couldn't use the stack, so we have no saved data and
-        // we cannot use the kernel stack as is. We just want to report that
-        // the kernel's stack overflowed, since that is essential for
-        // debugging.
-        //
-        // To make room for a panic!() handler stack, we just re-use the
-        // kernel's original stack. This should in theory leave the bottom
-        // of the stack where the problem occurred untouched should one want
-        // to further debug.
-        ldreq  r4, ={estack} // load _estack into r4
-        moveq  sp, r4        // Set the stack pointer to _estack
-        // finally, if the fault occurred in privileged mode (r2 == 1), branch
-        // to non-naked handler.
-        cmp r2, #0
-        // Per ARM calling convention, faulting stack is passed in r0, whether
-        // there was a stack overflow in r1. This function must never return.
-        bne {kernel_hard_fault_handler} // branch to kernel hard fault handler
-        // Otherwise, the hard fault occurred in userspace. In this case, read
-        // the relevant SCB registers:
-        ldr r0, =SCB_REGISTERS    // Global variable address
-        ldr r1, =0xE000ED14       // SCB CCR register address
-        ldr r2, [r1, #0]          // CCR
-        str r2, [r0, #0]
-        ldr r2, [r1, #20]         // CFSR
-        str r2, [r0, #4]
-        ldr r2, [r1, #24]         // HFSR
-        str r2, [r0, #8]
-        ldr r2, [r1, #32]         // MMFAR
-        str r2, [r0, #12]
-        ldr r2, [r1, #36]         // BFAR
-        str r2, [r0, #16]
-
-        ldr r0, =APP_HARD_FAULT  // Global variable address
-        mov r1, #1               // r1 = 1
-        str r1, [r0, #0]         // APP_HARD_FAULT = 1
-
-        // Set thread mode to privileged
-        mov r0, #0
-        msr CONTROL, r0
-        // CONTROL writes must be followed by ISB
-        // http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dai0321a/BIHFJCAC.html
-        isb
-
-        // Switch to the kernel (MSP) stack:
-        movw lr, #0xFFF9
-        movt lr, #0xFFFF
-        bx lr",
-    estack = sym _estack,
-    kernel_hard_fault_handler = sym hard_fault_handler_arm_v7m_kernel,
-);
 
 // Table 2.5
 // http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0553a/CHDBIBGJ.html

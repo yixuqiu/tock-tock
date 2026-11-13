@@ -122,10 +122,10 @@
 //! }
 //!
 //! impl FlashController<1024> for FlashCtrl {
-//!     fn read_region(&self, region_number: usize, offset: usize, buf: &mut [u8; 1024]) -> Result<(), ErrorCode> {
+//!     fn read_region(&self, region_number: usize, buf: &mut [u8; 1024]) -> Result<(), ErrorCode> {
 //!         // TODO: Read the specified flash region
 //!         for (i, b) in buf.iter_mut().enumerate() {
-//!             *b = self.buf.borrow()[region_number][offset + i]
+//!             *b = self.buf.borrow()[region_number][i]
 //!         }
 //!         Ok(())
 //!     }
@@ -225,9 +225,9 @@ pub use crate::async_ops::AsyncTicKV;
 pub use crate::error_codes::ErrorCode;
 #[doc(inline)]
 pub use crate::flash_controller::FlashController;
+pub use crate::tickv::MAIN_KEY;
 #[doc(inline)]
 pub use crate::tickv::TicKV;
-pub use crate::tickv::MAIN_KEY;
 
 // This is used to run the tests on a host
 #[cfg(test)]

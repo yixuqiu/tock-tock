@@ -7,10 +7,10 @@
 
 use core::cell::Cell;
 
+use kernel::ErrorCode;
 use kernel::collections::list::{List, ListLink, ListNode};
 use kernel::hil::time::{self, Alarm, Ticks, Time};
 use kernel::utilities::cells::OptionalCell;
-use kernel::ErrorCode;
 
 #[derive(Copy, Clone)]
 struct TickDtReference<T: Ticks> {
@@ -49,7 +49,7 @@ pub struct VirtualMuxAlarm<'a, A: Alarm<'a>> {
 }
 
 impl<'a, A: Alarm<'a>> ListNode<'a, VirtualMuxAlarm<'a, A>> for VirtualMuxAlarm<'a, A> {
-    fn next(&self) -> &'a ListLink<VirtualMuxAlarm<'a, A>> {
+    fn next(&self) -> &'a ListLink<'_, VirtualMuxAlarm<'a, A>> {
         &self.next
     }
 }
@@ -166,7 +166,7 @@ impl<'a, A: Alarm<'a>> Alarm<'a> for VirtualMuxAlarm<'a, A> {
             let expiration = reference.wrapping_add(dt);
             if !cur_alarm.within_range(reference, expiration) {
                 let next = self.mux.next_tick_vals.get();
-                if next.map_or(true, |(next_reference, next_dt)| {
+                if next.is_none_or(|(next_reference, next_dt)| {
                     now.within_range(next_reference, next_reference.wrapping_add(next_dt))
                 }) {
                     self.mux.set_alarm(reference, dt);
@@ -217,7 +217,7 @@ impl<'a, A: Alarm<'a>> MuxAlarm<'a, A> {
         MuxAlarm {
             virtual_alarms: List::new(),
             enabled: Cell::new(0),
-            alarm: alarm,
+            alarm,
             firing: Cell::new(false),
             next_tick_vals: Cell::new(None),
         }
@@ -565,13 +565,13 @@ mod tests {
         for v in v_alarms {
             v.setup();
             v.set_alarm_client(&client);
-            let _ = v.set_alarm(now, dt);
+            v.set_alarm(now, dt);
         }
 
         // Set one alarm to trigger immediately (at the hardware delay) and the other alarm to
         // trigger in the future by some large degree
-        let _ = v_alarms[0].set_alarm(now, 0.into());
-        let _ = v_alarms[1].set_alarm(now, 1_000.into());
+        v_alarms[0].set_alarm(now, 0.into());
+        v_alarms[1].set_alarm(now, 1_000.into());
 
         // Run the alarm long enough for every alarm but the longer alarm to fire, and all other
         // alarms should have fired once

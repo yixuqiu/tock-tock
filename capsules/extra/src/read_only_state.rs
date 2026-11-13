@@ -33,13 +33,13 @@
 //! ```
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::grant::{AllowRoCount, AllowRwCount, Grant, UpcallCount};
 use kernel::hil::time::{Ticks, Time};
 use kernel::platform::ContextSwitchCallback;
 use kernel::process::{self, ProcessId};
 use kernel::processbuffer::{UserspaceReadableProcessBuffer, WriteableProcessBuffer};
 use kernel::syscall::{CommandReturn, SyscallDriver};
-use kernel::ErrorCode;
 
 /// Syscall driver number.
 pub const DRIVER_NUM: usize = capsules_core::driver::NUM::ReadOnlyState as usize;
@@ -60,7 +60,7 @@ impl<'a, T: Time> ReadOnlyStateDriver<'a, T> {
     }
 }
 
-impl<'a, T: Time> ContextSwitchCallback for ReadOnlyStateDriver<'a, T> {
+impl<T: Time> ContextSwitchCallback for ReadOnlyStateDriver<'_, T> {
     fn context_switch_hook(&self, process: &dyn process::Process) {
         let processid = process.processid();
         let pending_tasks = process.pending_tasks();
@@ -88,13 +88,13 @@ impl<'a, T: Time> ContextSwitchCallback for ReadOnlyStateDriver<'a, T> {
     }
 }
 
-impl<'a, T: Time> SyscallDriver for ReadOnlyStateDriver<'a, T> {
+impl<T: Time> SyscallDriver for ReadOnlyStateDriver<'_, T> {
     /// Specify memory regions to be used.
     ///
     /// ### `allow_num`
     ///
-    /// - `0`: Allow a buffer for the kernel to stored syscall values.
-    ///        This should only be read by the app and written by the capsule.
+    /// - `0`: Allow a buffer for the kernel to stored syscall values. This
+    ///   should only be read by the app and written by the capsule.
     fn allow_userspace_readable(
         &self,
         processid: ProcessId,

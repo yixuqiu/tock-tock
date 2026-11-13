@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-//! SyscallDriver for the AMS CCS811 an ultra-low power digital gas sensor
-//! solution which integrates a metal oxide (MOX) gas sensor to detect a wide
+//! SyscallDriver for the AMS CCS811.
+//!
+//! The AMS CCS811 is an ultra-low power digital gas sensor solution
+//! which integrates a metal oxide (MOX) gas sensor to detect a wide
 //! range of Volatile Organic Compounds (VOCs) for indoor air quality
 //! monitoring using the I2C bus.
 //!
@@ -11,11 +13,11 @@
 //!
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil::i2c::{self, I2CClient, I2CDevice};
 use kernel::hil::sensors::{AirQualityClient, AirQualityDriver};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 const STATUS: u8 = 0x00;
 const MEAS_MODE: u8 = 0x01;
@@ -63,7 +65,7 @@ enum Operation {
 
 pub struct Ccs811<'a> {
     buffer: TakeCell<'static, [u8]>,
-    i2c: &'a dyn I2CDevice,
+    i2c: &'a dyn I2CDevice<'a>,
     client: OptionalCell<&'a dyn AirQualityClient>,
     state: Cell<DeviceState>,
     op: Cell<Operation>,
@@ -74,7 +76,7 @@ pub struct Ccs811<'a> {
 }
 
 impl<'a> Ccs811<'a> {
-    pub fn new(i2c: &'a dyn I2CDevice, buffer: &'static mut [u8]) -> Self {
+    pub fn new(i2c: &'a dyn I2CDevice<'a>, buffer: &'static mut [u8]) -> Self {
         Self {
             buffer: TakeCell::new(buffer),
             i2c,
@@ -181,7 +183,7 @@ impl<'a> AirQualityDriver<'a> for Ccs811<'a> {
     }
 }
 
-impl<'a> I2CClient for Ccs811<'a> {
+impl I2CClient for Ccs811<'_> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         if status.is_err() {
             match self.op.get() {
@@ -295,7 +297,7 @@ impl<'a> I2CClient for Ccs811<'a> {
     }
 }
 
-impl<'a> DeferredCallClient for Ccs811<'a> {
+impl DeferredCallClient for Ccs811<'_> {
     fn handle_deferred_call(&self) {
         if self.deferred_count.get() > 1000 {
             match self.state.get() {

@@ -5,7 +5,7 @@ This folder contains the detailed documentation for the interfaces between
 userspace and the kernel. It includes details of the ABI interface, the kernel
 provided syscalls, and the driver specific interfaces (using `allow`,
 `schedule`, and `command`). For more information on the general syscalls, see
-[here](../Syscalls.md).
+[here](https://book.tockos.org/doc/syscalls).
 
 <!-- toc -->
 
@@ -28,7 +28,7 @@ provided syscalls, and the driver specific interfaces (using `allow`,
 
 ## Syscall Binary Interface
 
-Details of the [application binary interface](../Syscalls.md).
+Details of the [application binary interface](https://book.tockos.org/doc/syscalls.html).
 
 ## Core Kernel Provided Syscalls
 
@@ -38,7 +38,7 @@ Details of the [application binary interface](../Syscalls.md).
 
 Each driver type that has been allocated a permanent driver number is listed in
 the tables below. The "2.0" column indicates whether the driver has been
-stabilized or not (a "✓" indicates stability) in the Tock 2.0 release.
+[stabilized](../Maintenance.md#stabilizing-a-syscall-driver) or not (a "✓" indicates stability) in the Tock 2.0 release.
 
 ### Base
 
@@ -56,6 +56,8 @@ stabilized or not (a "✓" indicates stability) in the Tock 2.0 release.
 |---|---------------|------------------|--------------------------------------------|
 |   | 0x00009       | [ROS](00009_ros.md) | Read Only State, access system information |
 |   | 0x10000       | IPC              | Inter-process communication                |
+|   | 0x10001       | DBS              | Dynamic Binary Storage/Process Loading     |
+|   | 0x10002       | ProcessInfo      | Inspect and control processes              |
 
 ### Hardware Access
 
@@ -81,7 +83,7 @@ _Note:_ GPIO is slated for re-numbering in Tock 2.0.
 |2.0| Driver Number | Driver           | Description                                |
 |---|---------------|------------------|--------------------------------------------|
 |   | 0x30000       | BLE              | Bluetooth Low Energy                       |
-|   | 0x30001       | 802.15.4         | IEEE 802.15.4                              |
+|   | 0x30001       | [802.15.4](30001_ieee802154.md) | IEEE 802.15.4               |
 |   | 0x30002       | [UDP](30002_udp.md)  | UDP / 6LoWPAN Interface                |
 
 ### Cryptography
@@ -100,6 +102,7 @@ _Note:_ GPIO is slated for re-numbering in Tock 2.0.
 |   | 0x50001       | Nonvolatile Storage | Generic interface for persistent storage |
 |   | 0x50002       | SDCard           | Raw block access to an SD card             |
 |   | 0x50003       | [Key-Value](50003_key_value.md) | Access to a key-value storage database |
+|   | 0x50004       | [Isolated Nonvolatile Storage](50004_isolated_nonvolatile_storage.md) | Per-application nonvolatile storage |
 
 ### Sensors
 
@@ -113,6 +116,7 @@ _Note:_ GPIO is slated for re-numbering in Tock 2.0.
 |   | 0x60005       | Proximity                                     | Proximity Sensor                           |
 |   | 0x60006       | SoundPressure                                 | Sound Pressure Sensor                      |
 |   | 0x90002       | [Touch](90002_touch.md)                       | Multi Touch Panel                          |
+|   | 0x60009       | [Distance](60009_distance.md)                 | Distance Sensor                            |
 
 ### Sensor ICs
 
@@ -146,3 +150,5 @@ _Note:_ GPIO is slated for re-numbering in Tock 2.0.
 |2.0| Driver Number | Driver                                  | Description                                |
 |---|---------------|-----------------------------------------|--------------------------------------------|
 |   | 0x90000       | Buzzer                                  | Buzzer                                     |
+|   | 0x90009       | [Servo](90009_servo.md)                |                  |
+Servo

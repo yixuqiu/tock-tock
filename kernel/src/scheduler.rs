@@ -4,15 +4,12 @@
 
 //! Interface for Tock kernel schedulers.
 
-pub mod cooperative;
-pub mod mlfq;
-pub mod priority;
-pub mod round_robin;
-
 use crate::deferred_call::DeferredCall;
 use crate::platform::chip::Chip;
 use crate::process::ProcessId;
 use crate::process::StoppedExecutingReason;
+
+use core::num::NonZeroU32;
 
 /// Trait which any scheduler must implement.
 pub trait Scheduler<C: Chip> {
@@ -48,7 +45,7 @@ pub trait Scheduler<C: Chip> {
     ///
     /// Custom implementations of this function must be very careful, however,
     /// as this function is called in the core kernel loop.
-    unsafe fn execute_kernel_work(&self, chip: &C) {
+    fn execute_kernel_work(&self, chip: &C) {
         chip.service_pending_interrupts();
         while DeferredCall::has_tasks() && !chip.has_pending_interrupts() {
             DeferredCall::service_next_pending();
@@ -59,7 +56,7 @@ pub trait Scheduler<C: Chip> {
     /// processes to handle kernel tasks. Most schedulers will use this default
     /// implementation, which always prioritizes kernel work, but schedulers
     /// that wish to defer interrupt handling may reimplement it.
-    unsafe fn do_kernel_work_now(&self, chip: &C) -> bool {
+    fn do_kernel_work_now(&self, chip: &C) -> bool {
         chip.has_pending_interrupts() || DeferredCall::has_tasks()
     }
 
@@ -79,7 +76,7 @@ pub trait Scheduler<C: Chip> {
     /// returns `false`, then `do_process` will exit with a `KernelPreemption`.
     ///
     /// `id` is the identifier of the currently active process.
-    unsafe fn continue_process(&self, _id: ProcessId, chip: &C) -> bool {
+    fn continue_process(&self, _id: ProcessId, chip: &C) -> bool {
         !(chip.has_pending_interrupts() || DeferredCall::has_tasks())
     }
 }
@@ -91,7 +88,7 @@ pub enum SchedulingDecision {
     /// Tell the kernel to run the specified process with the passed timeslice.
     /// If `None` is passed as a timeslice, the process will be run
     /// cooperatively.
-    RunProcess((ProcessId, Option<u32>)),
+    RunProcess((ProcessId, Option<NonZeroU32>)),
 
     /// Tell the kernel to go to sleep. Notably, if the scheduler asks the
     /// kernel to sleep when kernel tasks are ready, the kernel will not sleep,

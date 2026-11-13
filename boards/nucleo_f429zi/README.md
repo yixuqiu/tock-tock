@@ -1,5 +1,5 @@
-STM32 Nucleo-64 development board with STM32F429ZI MCU
-======================================================
+STM32 Nucleo-144 development board with STM32F429ZI MCU
+=======================================================
 
 For more details [visit NUCLEO-F429ZI
 website](https://www.st.com/en/evaluation-tools/nucleo-f429zi.html).
@@ -19,8 +19,7 @@ $ make flash-debug
 
 > **Note:** Unlike other Tock platforms, the default kernel image for this
 > board will clear flashed apps when the kernel is loaded. This is to support
-> the non-tockloader based app flash procedure below. To preserve loaded apps,
-> comment out the `APP_HACK` variable in `src/main.rs`.
+> the non-tockloader based app flash procedure below.
 
 ## Flashing app
 
@@ -30,8 +29,11 @@ apps included.
 
 ```bash
 $ arm-none-eabi-objcopy  \
-    --update-section .apps=../../../libtock-c/examples/c_hello/build/cortex-m4/cortex-m4.tbf \
+    --set-section-flags .apps=LOAD,ALLOC \
     target/thumbv7em-none-eabi/debug/nucleo_f429zi.elf \
+    target/thumbv7em-none-eabi/debug/nucleo_f429zi-app.elf
+$ arm-none-eabi-objcopy  \
+    --update-section .apps=../../../libtock-c/examples/c_hello/build/cortex-m4/cortex-m4.tbf \
     target/thumbv7em-none-eabi/debug/nucleo_f429zi-app.elf
 ```
 
@@ -44,7 +46,8 @@ KERNEL_WITH_APP=$(TOCK_ROOT_DIRECTORY)/target/$(TARGET)/debug/$(PLATFORM)-app.el
 
 .PHONY: program
 program: $(TOCK_ROOT_DIRECTORY)target/$(TARGET)/debug/$(PLATFORM).elf
-	arm-none-eabi-objcopy --update-section .apps=$(APP) $(KERNEL) $(KERNEL_WITH_APP)
+	arm-none-eabi-objcopy --set-section-flags .apps=LOAD,ALLOC $(KERNEL) $(KERNEL_WITH_APP)
+	arm-none-eabi-objcopy --update-section .apps=$(APP) $(KERNEL_WITH_APP)
 	$(OPENOCD) $(OPENOCD_OPTIONS) -c "init; reset halt; flash write_image erase $(KERNEL_WITH_APP); verify_image $(KERNEL_WITH_APP); reset; shutdown"
 ```
 

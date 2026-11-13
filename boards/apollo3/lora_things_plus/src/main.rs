@@ -14,7 +14,7 @@
 //! and <https://cdn.sparkfun.com/assets/4/4/f/7/e/expLoRaBLE_Thing_Plus_schematic.pdf>
 //! for details on the pin break outs
 //!
-//! ION0: Qwiic I2C
+//! IOM0: Qwiic I2C
 //! IOM1: Not connected
 //! IOM2: Broken out SPI
 //! IOM3: Semtech SX1262
@@ -31,16 +31,11 @@
 //! IOM5: Pins used by UART0
 
 #![no_std]
-// Disable this attribute when documenting, as a workaround for
-// https://github.com/rust-lang/rust/issues/62184.
-#![cfg_attr(not(doc), no_main)]
+#![no_main]
 #![deny(missing_docs)]
 #![feature(custom_test_frameworks)]
 #![test_runner(test_runner)]
 #![reexport_test_harness_main = "test_main"]
-
-use core::ptr::addr_of;
-use core::ptr::addr_of_mut;
 
 use apollo3::chip::Apollo3DefaultPeripherals;
 use capsules_core::virtualizers::virtual_alarm::MuxAlarm;
@@ -49,13 +44,29 @@ use components::bme280::Bme280Component;
 use components::ccs811::Ccs811Component;
 use kernel::capabilities;
 use kernel::component::Component;
+use kernel::debug::PanicResources;
+use kernel::hil::flash::HasClient;
+use kernel::hil::hasher::Hasher;
 use kernel::hil::i2c::I2CMaster;
 use kernel::hil::led::LedHigh;
 use kernel::hil::spi::SpiMaster;
 use kernel::hil::time::Counter;
+use kernel::platform::chip::Chip;
 use kernel::platform::{KernelResources, SyscallDriverLookup};
-use kernel::scheduler::round_robin::RoundRobinSched;
+use kernel::utilities::single_thread_value::SingleThreadValue;
 use kernel::{create_capability, debug, static_init};
+
+#[cfg(feature = "atecc508a")]
+use {
+    capsules_core::virtualizers::virtual_i2c::MuxI2C,
+    components::atecc508a::Atecc508aComponent,
+    kernel::hil::entropy::Entropy32,
+    kernel::hil::gpio::{Configure, Output},
+    kernel::hil::rng::Rng,
+};
+
+#[cfg(any(feature = "chirp_i2c_moisture", feature = "dfrobot_i2c_rainfall"))]
+use capsules_core::virtualizers::virtual_i2c::MuxI2C;
 
 /// Support routines for debugging I/O.
 pub mod io;
@@ -66,53 +77,77 @@ mod tests;
 // Number of concurrent processes this platform supports.
 const NUM_PROCS: usize = 4;
 
-// Actual memory for holding the active process structures.
-static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] = [None; 4];
+type ChipHw = apollo3::chip::Apollo3<Apollo3DefaultPeripherals>;
+type ProcessPrinterInUse = capsules_system::process_printer::ProcessPrinterText;
 
-// Static reference to chip for panic dumps.
-static mut CHIP: Option<&'static apollo3::chip::Apollo3<Apollo3DefaultPeripherals>> = None;
-// Static reference to process printer for panic dumps.
-static mut PROCESS_PRINTER: Option<&'static kernel::process::ProcessPrinterText> = None;
+/// Resources for when a board panics used by io.rs.
+static PANIC_RESOURCES: SingleThreadValue<PanicResources<ChipHw, ProcessPrinterInUse>> =
+    SingleThreadValue::new();
 
 // How should the kernel respond when a process faults.
-const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
+const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
+    capsules_system::process_policies::PanicFaultPolicy {};
 
 // Test access to the peripherals
-#[cfg(test)]
-static mut PERIPHERALS: Option<&'static Apollo3DefaultPeripherals> = None;
+static PERIPHERALS: SingleThreadValue<&'static Apollo3DefaultPeripherals> =
+    SingleThreadValue::new();
 // Test access to board
 #[cfg(test)]
-static mut BOARD: Option<&'static kernel::Kernel> = None;
+static BOARD: SingleThreadValue<&'static kernel::Kernel> = SingleThreadValue::new();
 // Test access to platform
 #[cfg(test)]
-static mut PLATFORM: Option<&'static LoRaThingsPlus> = None;
-// Test access to main loop capability
-#[cfg(test)]
-static mut MAIN_CAP: Option<&dyn kernel::capabilities::MainLoopCapability> = None;
+static PLATFORM: SingleThreadValue<&'static LoRaThingsPlus> = SingleThreadValue::new();
 // Test access to alarm
-static mut ALARM: Option<&'static MuxAlarm<'static, apollo3::stimer::STimer<'static>>> = None;
+static ALARM: SingleThreadValue<&'static MuxAlarm<'static, apollo3::stimer::STimer<'static>>> =
+    SingleThreadValue::new();
 // Test access to sensors
-static mut BME280: Option<
+static BME280: SingleThreadValue<
     &'static capsules_extra::bme280::Bme280<
         'static,
         capsules_core::virtualizers::virtual_i2c::I2CDevice<'static, apollo3::iom::Iom<'static>>,
     >,
-> = None;
-static mut CCS811: Option<&'static capsules_extra::ccs811::Ccs811<'static>> = None;
+> = SingleThreadValue::new();
+static CCS811: SingleThreadValue<&'static capsules_extra::ccs811::Ccs811<'static>> =
+    SingleThreadValue::new();
+#[cfg(feature = "atecc508a")]
+static ATECC508A: SingleThreadValue<&'static capsules_extra::atecc508a::Atecc508a<'static>> =
+    SingleThreadValue::new();
 
-/// Dummy buffer that causes the linker to reserve enough space for the stack.
-#[no_mangle]
-#[link_section = ".stack_buffer"]
-pub static mut STACK_MEMORY: [u8; 0x1000] = [0; 0x1000];
+kernel::stack_size! {0x1000}
 
 const LORA_SPI_DRIVER_NUM: usize = capsules_core::driver::NUM::LoRaPhySPI as usize;
 const LORA_GPIO_DRIVER_NUM: usize = capsules_core::driver::NUM::LoRaPhyGPIO as usize;
 
+type ChirpI2cMoistureType = components::chirp_i2c_moisture::ChirpI2cMoistureComponentType<
+    capsules_core::virtualizers::virtual_i2c::I2CDevice<'static, apollo3::iom::Iom<'static>>,
+>;
+type DFRobotRainFallType = components::dfrobot_rainfall_sensor::DFRobotRainFallSensorComponentType<
+    capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
+        'static,
+        apollo3::stimer::STimer<'static>,
+    >,
+    capsules_core::virtualizers::virtual_i2c::I2CDevice<'static, apollo3::iom::Iom<'static>>,
+>;
 type BME280Sensor = components::bme280::Bme280ComponentType<
     capsules_core::virtualizers::virtual_i2c::I2CDevice<'static, apollo3::iom::Iom<'static>>,
 >;
+
 type TemperatureDriver = components::temperature::TemperatureComponentType<BME280Sensor>;
 type HumidityDriver = components::humidity::HumidityComponentType<BME280Sensor>;
+
+#[cfg(feature = "atecc508a")]
+type Verifier = capsules_extra::atecc508a::Atecc508a<'static>;
+#[cfg(feature = "atecc508a")]
+type SignatureVerifyInMemoryKeys =
+    components::signature_verify_in_memory_keys::SignatureVerifyInMemoryKeysComponentType<
+        Verifier,
+        1,
+        64,
+        32,
+        64,
+    >;
+
+type SchedulerInUse = components::sched::round_robin::RoundRobinComponentType;
 
 /// A structure representing this platform that holds references to all
 /// capsules for this platform.
@@ -145,16 +180,154 @@ struct LoRaThingsPlus {
         >,
     >,
     sx1262_gpio: &'static capsules_core::gpio::GPIO<'static, apollo3::gpio::GpioPin<'static>>,
-    ble_radio: &'static capsules_extra::ble_advertising_driver::BLE<
-        'static,
-        apollo3::ble::Ble<'static>,
-        VirtualMuxAlarm<'static, apollo3::stimer::STimer<'static>>,
-    >,
     temperature: &'static TemperatureDriver,
     humidity: &'static HumidityDriver,
     air_quality: &'static capsules_extra::air_quality::AirQualitySensor<'static>,
-    scheduler: &'static RoundRobinSched<'static>,
+    moisture: Option<&'static components::moisture::MoistureComponentType<ChirpI2cMoistureType>>,
+    rainfall: Option<&'static components::rainfall::RainFallComponentType<DFRobotRainFallType>>,
+    rng: Option<
+        &'static capsules_core::rng::RngDriver<
+            'static,
+            capsules_core::rng::Entropy32ToRandom<
+                'static,
+                capsules_extra::atecc508a::Atecc508a<'static>,
+            >,
+        >,
+    >,
+    scheduler: &'static SchedulerInUse,
     systick: cortexm4::systick::SysTick,
+    kv_driver: &'static capsules_extra::kv_driver::KVStoreDriver<
+        'static,
+        capsules_extra::virtualizers::virtual_kv::VirtualKVPermissions<
+            'static,
+            capsules_extra::kv_store_permissions::KVStorePermissions<
+                'static,
+                capsules_extra::tickv_kv_store::TicKVKVStore<
+                    'static,
+                    capsules_extra::tickv::TicKVSystem<
+                        'static,
+                        capsules_core::virtualizers::virtual_flash::FlashUser<
+                            'static,
+                            apollo3::flashctrl::FlashCtrl<'static>,
+                        >,
+                        capsules_extra::sip_hash::SipHasher24<'static>,
+                        { apollo3::flashctrl::PAGE_SIZE },
+                    >,
+                    [u8; 8],
+                >,
+            >,
+        >,
+    >,
+}
+
+#[cfg(feature = "atecc508a")]
+fn atecc508a_wakeup() {
+    let peripherals = PERIPHERALS.get().unwrap();
+    peripherals.gpio_port[6].make_output();
+    peripherals.gpio_port[6].clear();
+
+    // The ATECC508A requires the SDA line to be low for at least 60us
+    // to wake up.
+    for _i in 0..700 {
+        cortexm4::support::nop();
+    }
+
+    // Enable SDA and SCL for I2C (exposed via Qwiic)
+    let _ = &peripherals
+        .gpio_port
+        .enable_i2c(&peripherals.gpio_port[6], &peripherals.gpio_port[5]);
+}
+
+#[cfg(feature = "atecc508a")]
+unsafe fn setup_atecc508a(
+    board_kernel: &'static kernel::Kernel,
+    memory_allocation_cap: &dyn capabilities::MemoryAllocationCapability,
+    mux_i2c: &'static MuxI2C<'static, apollo3::iom::Iom<'static>>,
+) -> &'static capsules_core::rng::RngDriver<
+    'static,
+    capsules_core::rng::Entropy32ToRandom<'static, capsules_extra::atecc508a::Atecc508a<'static>>,
+> {
+    let atecc508a = Atecc508aComponent::new(mux_i2c, 0x60, atecc508a_wakeup).finalize(
+        components::atecc508a_component_static!(apollo3::iom::Iom<'static>),
+    );
+    let _ = ATECC508A
+        .bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(atecc508a);
+
+    // Convert hardware RNG to the Random interface.
+    let entropy_to_random = static_init!(
+        capsules_core::rng::Entropy32ToRandom<
+            'static,
+            capsules_extra::atecc508a::Atecc508a<'static>,
+        >,
+        capsules_core::rng::Entropy32ToRandom::new(atecc508a)
+    );
+    atecc508a.set_client(entropy_to_random);
+    // Setup RNG for userspace
+    let rng_local = static_init!(
+        capsules_core::rng::RngDriver<
+            'static,
+            capsules_core::rng::Entropy32ToRandom<
+                'static,
+                capsules_extra::atecc508a::Atecc508a<'static>,
+            >,
+        >,
+        capsules_core::rng::RngDriver::new(
+            entropy_to_random,
+            board_kernel.create_grant(capsules_core::rng::DRIVER_NUM, memory_allocation_cap)
+        )
+    );
+    entropy_to_random.set_client(rng_local);
+
+    rng_local
+}
+
+#[cfg(feature = "chirp_i2c_moisture")]
+unsafe fn setup_chirp_i2c_moisture(
+    board_kernel: &'static kernel::Kernel,
+    _memory_allocation_cap: &dyn capabilities::MemoryAllocationCapability,
+    mux_i2c: &'static MuxI2C<'static, apollo3::iom::Iom<'static>>,
+) -> &'static components::moisture::MoistureComponentType<ChirpI2cMoistureType> {
+    let chirp_moisture =
+        components::chirp_i2c_moisture::ChirpI2cMoistureComponent::new(mux_i2c, 0x20).finalize(
+            components::chirp_i2c_moisture_component_static!(apollo3::iom::Iom<'static>),
+        );
+
+    let moisture = components::moisture::MoistureComponent::new(
+        board_kernel,
+        capsules_extra::moisture::DRIVER_NUM,
+        chirp_moisture,
+        create_capability!(capabilities::MemoryAllocationCapability),
+    )
+    .finalize(components::moisture_component_static!(ChirpI2cMoistureType));
+
+    moisture
+}
+
+#[cfg(feature = "dfrobot_i2c_rainfall")]
+unsafe fn setup_dfrobot_i2c_rainfall(
+    board_kernel: &'static kernel::Kernel,
+    _memory_allocation_cap: &dyn capabilities::MemoryAllocationCapability,
+    mux_i2c: &'static MuxI2C<'static, apollo3::iom::Iom<'static>>,
+    mux_alarm: &'static MuxAlarm<'static, apollo3::stimer::STimer<'static>>,
+) -> &'static components::rainfall::RainFallComponentType<DFRobotRainFallType> {
+    let dfrobot_rainfall =
+        components::dfrobot_rainfall_sensor::DFRobotRainFallSensorComponent::new(
+            mux_i2c, 0x1D, mux_alarm,
+        )
+        .finalize(components::dfrobot_rainfall_sensor_component_static!(
+            apollo3::stimer::STimer<'static>,
+            apollo3::iom::Iom<'static>
+        ));
+
+    let rainfall = components::rainfall::RainFallComponent::new(
+        board_kernel,
+        capsules_extra::rainfall::DRIVER_NUM,
+        dfrobot_rainfall,
+        create_capability!(capabilities::MemoryAllocationCapability),
+    )
+    .finalize(components::rainfall_component_static!(DFRobotRainFallType));
+
+    rainfall
 }
 
 /// Mapping of integer syscalls to objects that implement syscalls.
@@ -172,10 +345,31 @@ impl SyscallDriverLookup for LoRaThingsPlus {
             capsules_core::spi_controller::DRIVER_NUM => f(Some(self.external_spi_controller)),
             LORA_SPI_DRIVER_NUM => f(Some(self.sx1262_spi_controller)),
             LORA_GPIO_DRIVER_NUM => f(Some(self.sx1262_gpio)),
-            capsules_extra::ble_advertising_driver::DRIVER_NUM => f(Some(self.ble_radio)),
             capsules_extra::temperature::DRIVER_NUM => f(Some(self.temperature)),
             capsules_extra::humidity::DRIVER_NUM => f(Some(self.humidity)),
             capsules_extra::air_quality::DRIVER_NUM => f(Some(self.air_quality)),
+            capsules_extra::kv_driver::DRIVER_NUM => f(Some(self.kv_driver)),
+            capsules_core::rng::DRIVER_NUM => {
+                if let Some(rng) = self.rng {
+                    f(Some(rng))
+                } else {
+                    f(None)
+                }
+            }
+            capsules_extra::moisture::DRIVER_NUM => {
+                if let Some(moisture) = self.moisture {
+                    f(Some(moisture))
+                } else {
+                    f(None)
+                }
+            }
+            capsules_extra::rainfall::DRIVER_NUM => {
+                if let Some(rainfall) = self.rainfall {
+                    f(Some(rainfall))
+                } else {
+                    f(None)
+                }
+            }
             _ => f(None),
         }
     }
@@ -185,7 +379,7 @@ impl KernelResources<apollo3::chip::Apollo3<Apollo3DefaultPeripherals>> for LoRa
     type SyscallDriverLookup = Self;
     type SyscallFilter = ();
     type ProcessFault = ();
-    type Scheduler = RoundRobinSched<'static>;
+    type Scheduler = SchedulerInUse;
     type SchedulerTimer = cortexm4::systick::SysTick;
     type WatchDog = ();
     type ContextSwitchCallback = ();
@@ -220,9 +414,21 @@ unsafe fn setup() -> (
     &'static kernel::Kernel,
     &'static LoRaThingsPlus,
     &'static apollo3::chip::Apollo3<Apollo3DefaultPeripherals>,
-    &'static Apollo3DefaultPeripherals,
 ) {
+    // Initialize deferred calls very early.
+    kernel::deferred_call::initialize_deferred_call_state::<
+        <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+    >();
+
+    // Bind global variables to this thread.
+    let _ = PANIC_RESOURCES
+        .bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(
+            PanicResources::new(),
+        );
+
     let peripherals = static_init!(Apollo3DefaultPeripherals, Apollo3DefaultPeripherals::new());
+    let _ = PERIPHERALS
+        .bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(peripherals);
 
     // No need to statically allocate mcu/pwr/clk_ctrl because they are only used in main!
     let mcu_ctrl = apollo3::mcuctrl::McuCtrl::new();
@@ -232,10 +438,16 @@ unsafe fn setup() -> (
     clkgen.set_clock_frequency(apollo3::clkgen::ClockFrequency::Freq48MHz);
 
     // initialize capabilities
-    let process_mgmt_cap = create_capability!(capabilities::ProcessManagementCapability);
     let memory_allocation_cap = create_capability!(capabilities::MemoryAllocationCapability);
 
-    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&*addr_of!(PROCESSES)));
+    // Create an array to hold process references.
+    let processes = components::process_array::ProcessArrayComponent::new()
+        .finalize(components::process_array_component_static!(NUM_PROCS));
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.processes.put(processes.as_slice());
+    });
+
+    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(processes.as_slice()));
 
     // Power up components
     pwr_ctrl.enable_uart0();
@@ -243,14 +455,12 @@ unsafe fn setup() -> (
     pwr_ctrl.enable_iom2();
     pwr_ctrl.enable_iom3();
 
+    peripherals.init();
+
     // Enable PinCfg
     peripherals
         .gpio_port
         .enable_uart(&peripherals.gpio_port[48], &peripherals.gpio_port[49]);
-    // Enable SDA and SCL for I2C (exposed via Qwiic)
-    peripherals
-        .gpio_port
-        .enable_i2c(&peripherals.gpio_port[6], &peripherals.gpio_port[5]);
     // Enable Main SPI
     peripherals.gpio_port.enable_spi(
         &peripherals.gpio_port[27],
@@ -267,7 +477,14 @@ unsafe fn setup() -> (
     peripherals.gpio_port.enable_sx1262_radio_pins();
 
     // Configure kernel debug gpios as early as possible
-    kernel::debug::assign_gpios(Some(&peripherals.gpio_port[26]), None, None);
+    let debug_gpios = static_init!(
+        [&'static dyn kernel::hil::gpio::Pin; 1],
+        [&peripherals.gpio_port[26]]
+    );
+    kernel::debug::initialize_debug_gpio::<
+        <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+    >();
+    kernel::debug::assign_gpios(debug_gpios);
 
     // Create a shared UART channel for the console and for kernel debug.
     let uart_mux = components::console::UartMuxComponent::new(&peripherals.uart0, 115200)
@@ -278,11 +495,17 @@ unsafe fn setup() -> (
         board_kernel,
         capsules_core::console::DRIVER_NUM,
         uart_mux,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::console_component_static!());
     // Create the debugger object that handles calls to `debug!()`.
-    components::debug_writer::DebugWriterComponent::new(uart_mux)
-        .finalize(components::debug_writer_component_static!());
+    components::debug_writer::DebugWriterComponent::new::<
+        <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+    >(
+        uart_mux,
+        create_capability!(capabilities::SetDebugWriterCapability),
+    )
+    .finalize(components::debug_writer_component_static!());
 
     // LEDs
     let led = components::led::LedsComponent::new().finalize(components::led_component_static!(
@@ -303,6 +526,7 @@ unsafe fn setup() -> (
             3 => &peripherals.gpio_port[35],  // A3
             4 => &peripherals.gpio_port[34],  // A4
         ),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::gpio_component_static!(apollo3::gpio::GpioPin));
 
@@ -316,14 +540,23 @@ unsafe fn setup() -> (
         board_kernel,
         capsules_core::alarm::DRIVER_NUM,
         mux_alarm,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::alarm_component_static!(apollo3::stimer::STimer));
-    ALARM = Some(mux_alarm);
+    let _ = ALARM
+        .bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(mux_alarm);
 
     // Create a process printer for panic.
     let process_printer = components::process_printer::ProcessPrinterTextComponent::new()
         .finalize(components::process_printer_text_component_static!());
-    PROCESS_PRINTER = Some(process_printer);
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.printer.put(process_printer);
+    });
+
+    // Enable SDA and SCL for I2C (exposed via Qwiic)
+    peripherals
+        .gpio_port
+        .enable_i2c(&peripherals.gpio_port[6], &peripherals.gpio_port[5]);
 
     // Init the I2C device attached via Qwiic
     let i2c_master_buffer = static_init!(
@@ -356,15 +589,18 @@ unsafe fn setup() -> (
         board_kernel,
         capsules_extra::temperature::DRIVER_NUM,
         bme280,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::temperature_component_static!(BME280Sensor));
     let humidity = components::humidity::HumidityComponent::new(
         board_kernel,
         capsules_extra::humidity::DRIVER_NUM,
         bme280,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::humidity_component_static!(BME280Sensor));
-    BME280 = Some(bme280);
+    let _ =
+        BME280.bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(bme280);
 
     let ccs811 = Ccs811Component::new(mux_i2c, 0x5B).finalize(
         components::ccs811_component_static!(apollo3::iom::Iom<'static>),
@@ -373,9 +609,39 @@ unsafe fn setup() -> (
         board_kernel,
         capsules_extra::temperature::DRIVER_NUM,
         ccs811,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::air_quality_component_static!());
-    CCS811 = Some(ccs811);
+    let _ =
+        CCS811.bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(ccs811);
+
+    #[cfg(feature = "chirp_i2c_moisture")]
+    let moisture = Some(setup_chirp_i2c_moisture(
+        board_kernel,
+        &memory_allocation_cap,
+        mux_i2c,
+    ));
+    #[cfg(not(feature = "chirp_i2c_moisture"))]
+    let moisture = None;
+
+    #[cfg(feature = "dfrobot_i2c_rainfall")]
+    let rainfall = Some(setup_dfrobot_i2c_rainfall(
+        board_kernel,
+        &memory_allocation_cap,
+        mux_i2c,
+        mux_alarm,
+    ));
+    #[cfg(not(feature = "dfrobot_i2c_rainfall"))]
+    let rainfall = None;
+
+    #[cfg(feature = "atecc508a")]
+    let rng = Some(setup_atecc508a(
+        board_kernel,
+        &memory_allocation_cap,
+        mux_i2c,
+    ));
+    #[cfg(not(feature = "atecc508a"))]
+    let rng = None;
 
     // Init the broken out SPI controller
     let external_mux_spi = components::spi::SpiMuxComponent::new(&peripherals.iom2).finalize(
@@ -385,8 +651,11 @@ unsafe fn setup() -> (
     let external_spi_controller = components::spi::SpiSyscallComponent::new(
         board_kernel,
         external_mux_spi,
-        &peripherals.gpio_port[11], // A5
+        kernel::hil::spi::cs::IntoChipSelect::<_, kernel::hil::spi::cs::ActiveLow>::into_cs(
+            &peripherals.gpio_port[11], // A5
+        ),
         capsules_core::spi_controller::DRIVER_NUM,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::spi_syscall_component_static!(
         apollo3::iom::Iom<'static>
@@ -400,15 +669,23 @@ unsafe fn setup() -> (
     let sx1262_spi_controller = components::spi::SpiSyscallComponent::new(
         board_kernel,
         sx1262_mux_spi,
-        &peripherals.gpio_port[36], // H6 - SX1262 Slave Select
+        kernel::hil::spi::cs::IntoChipSelect::<_, kernel::hil::spi::cs::ActiveLow>::into_cs(
+            &peripherals.gpio_port[36], // H6 - SX1262 Slave Select
+        ),
         LORA_SPI_DRIVER_NUM,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::spi_syscall_component_static!(
         apollo3::iom::Iom<'static>
     ));
     peripherals
         .iom3
-        .specify_chip_select(&peripherals.gpio_port[36])
+        .specify_chip_select(kernel::hil::spi::cs::IntoChipSelect::<
+            _,
+            kernel::hil::spi::cs::ActiveLow,
+        >::into_cs(
+            &peripherals.gpio_port[36], // H6 - SX1262 Slave Select
+        ))
         .unwrap();
 
     let sx1262_gpio = components::gpio::GpioComponent::new(
@@ -422,27 +699,135 @@ unsafe fn setup() -> (
             3 => &peripherals.gpio_port[47], // H9 - SX1262 Multipurpose digital I/O (DIO3)
             4 => &peripherals.gpio_port[44], // J7 - SX1262 Reset
         ),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::gpio_component_static!(apollo3::gpio::GpioPin));
 
     // Setup BLE
-    mcu_ctrl.enable_ble();
-    clkgen.enable_ble();
-    pwr_ctrl.enable_ble();
-    peripherals.ble.setup_clocks();
-    mcu_ctrl.reset_ble();
-    peripherals.ble.power_up();
-    peripherals.ble.ble_initialise();
+    mcu_ctrl.disable_ble();
 
-    let ble_radio = components::ble::BLEComponent::new(
-        board_kernel,
-        capsules_extra::ble_advertising_driver::DRIVER_NUM,
-        &peripherals.ble,
-        mux_alarm,
+    // Flash
+    let flash_ctrl_read_buf = static_init!(
+        [u8; apollo3::flashctrl::PAGE_SIZE],
+        [0; apollo3::flashctrl::PAGE_SIZE]
+    );
+    let page_buffer = static_init!(
+        apollo3::flashctrl::Apollo3Page,
+        apollo3::flashctrl::Apollo3Page::default()
+    );
+
+    let mux_flash = components::flash::FlashMuxComponent::new(&peripherals.flash_ctrl).finalize(
+        components::flash_mux_component_static!(apollo3::flashctrl::FlashCtrl),
+    );
+
+    // SipHash
+    let sip_hash = static_init!(
+        capsules_extra::sip_hash::SipHasher24,
+        capsules_extra::sip_hash::SipHasher24::new()
+    );
+    kernel::deferred_call::DeferredCallClient::register(sip_hash);
+
+    // TicKV
+    let tickv = components::tickv::TicKVComponent::new(
+        sip_hash,
+        mux_flash, // Flash controller
+        core::ptr::addr_of!(_skv_data) as usize / apollo3::flashctrl::PAGE_SIZE, // Region offset (Last 0x28000 bytes of flash)
+        // Region Size, the final page doens't work correctly
+        core::ptr::addr_of!(_lkv_data) as usize - apollo3::flashctrl::PAGE_SIZE,
+        flash_ctrl_read_buf, // Buffer used internally in TicKV
+        page_buffer,         // Buffer used with the flash controller
     )
-    .finalize(components::ble_component_static!(
-        apollo3::stimer::STimer,
-        apollo3::ble::Ble,
+    .finalize(components::tickv_component_static!(
+        apollo3::flashctrl::FlashCtrl,
+        capsules_extra::sip_hash::SipHasher24,
+        { apollo3::flashctrl::PAGE_SIZE }
+    ));
+    HasClient::set_client(&peripherals.flash_ctrl, mux_flash);
+    sip_hash.set_client(tickv);
+
+    let kv_store = components::kv::TicKVKVStoreComponent::new(tickv).finalize(
+        components::tickv_kv_store_component_static!(
+            capsules_extra::tickv::TicKVSystem<
+                capsules_core::virtualizers::virtual_flash::FlashUser<
+                    apollo3::flashctrl::FlashCtrl,
+                >,
+                capsules_extra::sip_hash::SipHasher24<'static>,
+                { apollo3::flashctrl::PAGE_SIZE },
+            >,
+            capsules_extra::tickv::TicKVKeyType,
+        ),
+    );
+
+    let kv_store_permissions = components::kv::KVStorePermissionsComponent::new(kv_store).finalize(
+        components::kv_store_permissions_component_static!(
+            capsules_extra::tickv_kv_store::TicKVKVStore<
+                capsules_extra::tickv::TicKVSystem<
+                    capsules_core::virtualizers::virtual_flash::FlashUser<
+                        apollo3::flashctrl::FlashCtrl,
+                    >,
+                    capsules_extra::sip_hash::SipHasher24<'static>,
+                    { apollo3::flashctrl::PAGE_SIZE },
+                >,
+                capsules_extra::tickv::TicKVKeyType,
+            >
+        ),
+    );
+
+    let mux_kv = components::kv::KVPermissionsMuxComponent::new(kv_store_permissions).finalize(
+        components::kv_permissions_mux_component_static!(
+            capsules_extra::kv_store_permissions::KVStorePermissions<
+                capsules_extra::tickv_kv_store::TicKVKVStore<
+                    capsules_extra::tickv::TicKVSystem<
+                        capsules_core::virtualizers::virtual_flash::FlashUser<
+                            apollo3::flashctrl::FlashCtrl,
+                        >,
+                        capsules_extra::sip_hash::SipHasher24<'static>,
+                        { apollo3::flashctrl::PAGE_SIZE },
+                    >,
+                    capsules_extra::tickv::TicKVKeyType,
+                >,
+            >
+        ),
+    );
+
+    let virtual_kv_driver = components::kv::VirtualKVPermissionsComponent::new(mux_kv).finalize(
+        components::virtual_kv_permissions_component_static!(
+            capsules_extra::kv_store_permissions::KVStorePermissions<
+                capsules_extra::tickv_kv_store::TicKVKVStore<
+                    capsules_extra::tickv::TicKVSystem<
+                        capsules_core::virtualizers::virtual_flash::FlashUser<
+                            apollo3::flashctrl::FlashCtrl,
+                        >,
+                        capsules_extra::sip_hash::SipHasher24<'static>,
+                        { apollo3::flashctrl::PAGE_SIZE },
+                    >,
+                    capsules_extra::tickv::TicKVKeyType,
+                >,
+            >
+        ),
+    );
+
+    let kv_driver = components::kv::KVDriverComponent::new(
+        virtual_kv_driver,
+        board_kernel,
+        capsules_extra::kv_driver::DRIVER_NUM,
+        create_capability!(capabilities::MemoryAllocationCapability),
+    )
+    .finalize(components::kv_driver_component_static!(
+        capsules_extra::virtualizers::virtual_kv::VirtualKVPermissions<
+            capsules_extra::kv_store_permissions::KVStorePermissions<
+                capsules_extra::tickv_kv_store::TicKVKVStore<
+                    capsules_extra::tickv::TicKVSystem<
+                        capsules_core::virtualizers::virtual_flash::FlashUser<
+                            apollo3::flashctrl::FlashCtrl,
+                        >,
+                        capsules_extra::sip_hash::SipHasher24<'static>,
+                        { apollo3::flashctrl::PAGE_SIZE },
+                    >,
+                    capsules_extra::tickv::TicKVKeyType,
+                >,
+            >,
+        >
     ));
 
     mcu_ctrl.print_chip_revision();
@@ -459,9 +844,13 @@ unsafe fn setup() -> (
         static mut _sappmem: u8;
         /// End of the RAM region for app memory.
         static _eappmem: u8;
+        /// Beginning of the RAM region containing K/V data.
+        static _skv_data: u8;
+        /// Length of the RAM region containing K/V data.
+        static _lkv_data: u8;
     }
 
-    let scheduler = components::sched::round_robin::RoundRobinComponent::new(&*addr_of!(PROCESSES))
+    let scheduler = components::sched::round_robin::RoundRobinComponent::new(processes)
         .finalize(components::round_robin_component_static!(NUM_PROCS));
 
     let systick = cortexm4::systick::SysTick::new_with_calibration(48_000_000);
@@ -477,12 +866,15 @@ unsafe fn setup() -> (
             external_spi_controller,
             sx1262_spi_controller,
             sx1262_gpio,
-            ble_radio,
             temperature,
             humidity,
             air_quality,
+            moisture,
+            rainfall,
+            rng,
             scheduler,
             systick,
+            kv_driver,
         }
     );
 
@@ -490,45 +882,152 @@ unsafe fn setup() -> (
         apollo3::chip::Apollo3<Apollo3DefaultPeripherals>,
         apollo3::chip::Apollo3::new(peripherals)
     );
-    CHIP = Some(chip);
-
-    kernel::process::load_processes(
-        board_kernel,
-        chip,
-        core::slice::from_raw_parts(
-            core::ptr::addr_of!(_sapps),
-            core::ptr::addr_of!(_eapps) as usize - core::ptr::addr_of!(_sapps) as usize,
-        ),
-        core::slice::from_raw_parts_mut(
-            core::ptr::addr_of_mut!(_sappmem),
-            core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
-        ),
-        &mut *addr_of_mut!(PROCESSES),
-        &FAULT_RESPONSE,
-        &process_mgmt_cap,
-    )
-    .unwrap_or_else(|err| {
-        debug!("Error loading processes!");
-        debug!("{:?}", err);
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.chip.put(chip);
     });
 
-    (board_kernel, artemis_nano, chip, peripherals)
+    let checking_policy;
+    #[cfg(feature = "atecc508a")]
+    {
+        // Create the software-based SHA engine.
+        // We could use the ATECC508a for SHA, but writing the entire
+        // application to the device to compute a digtest ends up being
+        // pretty slow and the ATECC508a doesn't support the DigestVerify trait
+        let sha = components::sha::ShaSoftware256Component::new()
+            .finalize(components::sha_software_256_component_static!());
+
+        // These are the generated test keys used below, please do not use them
+        // for anything important!!!!
+        //
+        // These keys are not leaked, they are only used for this test case.
+        //
+        // -----BEGIN PRIVATE KEY-----
+        // MIGHAgEBMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgWClhguWHtAK85Kqc
+        // /BucDBQMGQw6R2PEQkyISHkn5xWhRANCAAQUFMTFoNL9oFpGmg6Cp351hQMq9hol
+        // KpEdQfjP1nYF1jxqz52YjPpFHvudkK/fFsik5Rd0AevNkQqjBdWEqmpW
+        // -----END PRIVATE KEY-----
+        //
+        // -----BEGIN PUBLIC KEY-----
+        // MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFBTExaDS/aBaRpoOgqd+dYUDKvYa
+        // JSqRHUH4z9Z2BdY8as+dmIz6RR77nZCv3xbIpOUXdAHrzZEKowXVhKpqVg==
+        // -----END PUBLIC KEY-----
+        let public_key = static_init!(
+            [u8; 64],
+            [
+                0x14, 0x14, 0xc4, 0xc5, 0xa0, 0xd2, 0xfd, 0xa0, 0x5a, 0x46, 0x9a, 0x0e, 0x82, 0xa7,
+                0x7e, 0x75, 0x85, 0x03, 0x2a, 0xf6, 0x1a, 0x25, 0x2a, 0x91, 0x1d, 0x41, 0xf8, 0xcf,
+                0xd6, 0x76, 0x05, 0xd6, 0x3c, 0x6a, 0xcf, 0x9d, 0x98, 0x8c, 0xfa, 0x45, 0x1e, 0xfb,
+                0x9d, 0x90, 0xaf, 0xdf, 0x16, 0xc8, 0xa4, 0xe5, 0x17, 0x74, 0x01, 0xeb, 0xcd, 0x91,
+                0x0a, 0xa3, 0x05, 0xd5, 0x84, 0xaa, 0x6a, 0x56
+            ]
+        );
+        let verifying_keys = kernel::static_init!([&'static mut [u8; 64]; 1], [public_key]);
+
+        // Setup the in-memory key selector.
+        let verifier_multiple_keys =
+            components::signature_verify_in_memory_keys::SignatureVerifyInMemoryKeysComponent::new(
+                *ATECC508A.get().unwrap(),
+                verifying_keys,
+            )
+            .finalize(
+                components::signature_verify_in_memory_keys_component_static!(
+                    Verifier, 1, 64, 32, 64,
+                ),
+            );
+
+        checking_policy = components::appid::checker_signature::AppCheckerSignatureComponent::new(
+            sha,
+            verifier_multiple_keys,
+            tock_tbf::types::TbfFooterV2CredentialsType::EcdsaNistP256,
+        )
+        .finalize(components::app_checker_signature_component_static!(
+            SignatureVerifyInMemoryKeys,
+            capsules_extra::sha256::Sha256Software<'static>,
+            32,
+            64,
+        ));
+    };
+    #[cfg(not(feature = "atecc508a"))]
+    {
+        checking_policy = components::appid::checker_null::AppCheckerNullComponent::new()
+            .finalize(components::app_checker_null_component_static!());
+    }
+
+    // Create the AppID assigner.
+    let assigner = components::appid::assigner_name::AppIdAssignerNamesComponent::new()
+        .finalize(components::appid_assigner_names_component_static!());
+
+    // Create the process checking machine.
+    let checker = components::appid::checker::ProcessCheckerMachineComponent::new(checking_policy)
+        .finalize(components::process_checker_machine_component_static!());
+
+    kernel::create_typed_capability!(app_store_cap, AppStoreCap: kernel::capabilities::ApplicationStorageCapability);
+    let storage_permissions_policy =
+        components::storage_permissions::tbf_header::StoragePermissionsTbfHeaderComponent::new(
+            app_store_cap,
+        )
+        .finalize(
+            components::storage_permissions_tbf_header_component_static!(
+                apollo3::chip::Apollo3<Apollo3DefaultPeripherals>,
+                kernel::process::ProcessStandardDebugFull,
+                AppStoreCap,
+            ),
+        );
+
+    let app_flash = core::slice::from_raw_parts(
+        core::ptr::addr_of!(_sapps),
+        core::ptr::addr_of!(_eapps) as usize - core::ptr::addr_of!(_sapps) as usize,
+    );
+    let app_memory = core::slice::from_raw_parts_mut(
+        core::ptr::addr_of_mut!(_sappmem),
+        core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
+    );
+
+    // Create and start the asynchronous process loader.
+    let _loader = components::loader::sequential::ProcessLoaderSequentialComponent::new(
+        checker,
+        board_kernel,
+        chip,
+        &FAULT_RESPONSE,
+        assigner,
+        storage_permissions_policy,
+        app_flash,
+        app_memory,
+        create_capability!(capabilities::ProcessManagementCapability),
+    )
+    .finalize(components::process_loader_sequential_component_static!(
+        apollo3::chip::Apollo3<Apollo3DefaultPeripherals>,
+        kernel::process::ProcessStandardDebugFull,
+        NUM_PROCS,
+    ));
+
+    (board_kernel, artemis_nano, chip)
 }
 
 /// Main function.
 ///
 /// This function is called from the arch crate after some very basic RISC-V
 /// setup and RAM initialization.
-#[no_mangle]
+///
+/// # Safety
+///
+/// ## `no_mangle`
+///
+/// We use `main` as a symbol in the arch crate's initialization routine to jump
+/// here. We guarantee no other symbol has the same name.
+///
+/// Note: this requires a global/uniqueness guarantee.
+/// See <https://github.com/tock/tock/issues/5250>.
+#[unsafe(no_mangle)]
 pub unsafe fn main() {
-    apollo3::init();
+    ChipHw::init();
 
     #[cfg(test)]
     test_main();
 
     #[cfg(not(test))]
     {
-        let (board_kernel, sf_lora_thing_plus_board, chip, _peripherals) = setup();
+        let (board_kernel, sf_lora_thing_plus_board, chip) = setup();
 
         let main_loop_cap = create_capability!(capabilities::MainLoopCapability);
 
@@ -546,21 +1045,19 @@ use kernel::platform::watchdog::WatchDog;
 
 #[cfg(test)]
 fn test_runner(tests: &[&dyn Fn()]) {
-    unsafe {
-        let (board_kernel, sf_lora_thing_plus_board, _chip, peripherals) = setup();
+    let (board_kernel, sf_lora_thing_plus_board, _chip) = unsafe { setup() };
 
-        BOARD = Some(board_kernel);
-        PLATFORM = Some(&sf_lora_thing_plus_board);
-        PERIPHERALS = Some(peripherals);
-        MAIN_CAP = Some(&create_capability!(capabilities::MainLoopCapability));
+    let _ = BOARD
+        .bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(board_kernel);
+    let _ = PLATFORM.bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(
+        sf_lora_thing_plus_board,
+    );
 
-        PLATFORM.map(|p| {
-            p.watchdog().setup();
-        });
+    let p = PLATFORM.get().unwrap();
+    p.watchdog().setup();
 
-        for test in tests {
-            test();
-        }
+    for test in tests {
+        test();
     }
 
     loop {}

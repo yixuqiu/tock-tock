@@ -4,11 +4,11 @@
 
 //! Test the CRC hardware.
 
+use kernel::ErrorCode;
 use kernel::debug;
 use kernel::hil::crc::{Client, Crc, CrcAlgorithm, CrcOutput};
 use kernel::utilities::cells::TakeCell;
 use kernel::utilities::leasable_buffer::SubSliceMut;
-use kernel::ErrorCode;
 
 pub struct TestCrc<'a, C: 'a> {
     crc: &'a C,
@@ -18,7 +18,7 @@ pub struct TestCrc<'a, C: 'a> {
 impl<'a, C: Crc<'a>> TestCrc<'a, C> {
     pub fn new(crc: &'a C, data: &'static mut [u8]) -> Self {
         TestCrc {
-            crc: crc,
+            crc,
             data: TakeCell::new(data),
         }
     }

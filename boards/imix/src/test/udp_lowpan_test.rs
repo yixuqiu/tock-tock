@@ -132,23 +132,19 @@ use capsules_extra::net::udp::udp_recv::MuxUdpReceiver;
 use capsules_extra::net::udp::udp_send::MuxUdpSender;
 use capsules_extra::test::udp::MockUdp;
 use core::cell::Cell;
-use core::ptr::addr_of_mut;
+use kernel::ErrorCode;
 use kernel::capabilities::NetworkCapabilityCreationCapability;
 use kernel::component::Component;
 use kernel::create_capability;
 use kernel::debug;
 use kernel::hil::time::{self, Alarm, ConvertTicks};
 use kernel::static_init;
-use kernel::ErrorCode;
 
 pub const TEST_DELAY_MS: u32 = 2000;
 pub const TEST_LOOP: bool = false;
-static mut UDP_PAYLOAD: [u8; PAYLOAD_LEN] = [0; PAYLOAD_LEN]; //Becomes payload of UDP packet
 
 const UDP_HDR_SIZE: usize = 8;
 const PAYLOAD_LEN: usize = components::udp_mux::MAX_PAYLOAD_LEN;
-static mut UDP_PAYLOAD1: [u8; PAYLOAD_LEN - UDP_HDR_SIZE] = [0; PAYLOAD_LEN - UDP_HDR_SIZE];
-static mut UDP_PAYLOAD2: [u8; PAYLOAD_LEN - UDP_HDR_SIZE] = [0; PAYLOAD_LEN - UDP_HDR_SIZE];
 
 #[derive(Copy, Clone)]
 enum TestMode {
@@ -193,7 +189,10 @@ pub unsafe fn initialize_all(
         udp_recv_mux,
         port_table,
         mux_alarm,
-        &mut *addr_of_mut!(UDP_PAYLOAD1),
+        static_init!(
+            [u8; PAYLOAD_LEN - UDP_HDR_SIZE],
+            [0; PAYLOAD_LEN - UDP_HDR_SIZE]
+        ),
         1, //id
         3, //dst_port
         net_cap,
@@ -206,7 +205,10 @@ pub unsafe fn initialize_all(
         udp_recv_mux,
         port_table,
         mux_alarm,
-        &mut *addr_of_mut!(UDP_PAYLOAD2),
+        static_init!(
+            [u8; PAYLOAD_LEN - UDP_HDR_SIZE],
+            [0; PAYLOAD_LEN - UDP_HDR_SIZE]
+        ),
         2, //id
         4, //dst_port
         net_cap,
@@ -238,11 +240,11 @@ impl<'a, A: time::Alarm<'a>> LowpanTest<'a, A> {
         mock_udp2: &'static MockUdp<'a, A>,
     ) -> LowpanTest<'a, A> {
         LowpanTest {
-            alarm: alarm,
+            alarm,
             test_counter: Cell::new(0),
-            port_table: port_table,
-            mock_udp1: mock_udp1,
-            mock_udp2: mock_udp2,
+            port_table,
+            mock_udp1,
+            mock_udp2,
             test_mode: Cell::new(TestMode::DefaultMode),
         }
     }
@@ -278,7 +280,7 @@ impl<'a, A: time::Alarm<'a>> LowpanTest<'a, A> {
         match TEST_LOOP {
             true => self.test_counter.set((test_counter + 1) % self.num_tests()),
             false => self.test_counter.set(test_counter + 1),
-        };
+        }
     }
 
     fn num_tests(&self) -> usize {
@@ -431,7 +433,7 @@ impl<'a, A: time::Alarm<'a>> LowpanTest<'a, A> {
 
     fn capsule_send_fail(&self) {
         let ret = self.mock_udp1.send(0);
-        assert!(ret != Ok(())); //trying to send while not bound should fail!
+        assert_ne!(ret, Ok(())); //trying to send while not bound should fail!
 
         debug!("send_fail test passed")
     }
@@ -480,7 +482,7 @@ impl<'a, A: time::Alarm<'a>> LowpanTest<'a, A> {
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
             0x0e, 0x00,
         ]); // differs in last byte from ip_addr1
-            // Any
+        // Any
         let any_addr = AddrRange::Any;
         for ip_addr in [ip_addr1, ip_addr2, ip_addr3].iter() {
             assert!(any_addr.is_addr_valid(*ip_addr))

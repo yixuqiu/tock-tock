@@ -8,8 +8,8 @@
 //!
 //! # Usage
 //!
-//! For the purposes of brevity, any error checking has been removed. In real applications, always
-//! check the return values of the [Hsi] methods.
+//! For the purposes of brevity, any error checking has been removed. In real
+//! applications, always check the return values of the [Hsi] methods.
 //!
 //! First, get a reference to the [Hsi] struct:
 //! ```rust,ignore
@@ -46,8 +46,8 @@
 
 use crate::rcc::Rcc;
 
-use kernel::debug;
 use kernel::ErrorCode;
+use kernel::debug;
 
 /// HSI frequency in MHz
 pub const HSI_FREQUENCY_MHZ: usize = 16;
@@ -75,8 +75,8 @@ impl<'a> Hsi<'a> {
     ///
     /// # Errors
     ///
-    /// + [Err]\([ErrorCode::BUSY]\): if enabling the HSI clock took too long. Recall this method to
-    /// ensure the HSI clock is running.
+    /// + [Err]\([ErrorCode::BUSY]\): if enabling the HSI clock took too long.
+    ///   Recall this method to ensure the HSI clock is running.
     pub fn enable(&self) -> Result<(), ErrorCode> {
         self.rcc.enable_hsi_clock();
 
@@ -94,8 +94,8 @@ impl<'a> Hsi<'a> {
     /// # Errors
     ///
     /// + [Err]\([ErrorCode::FAIL]\): if the HSI clock is configured as the system clock.
-    /// + [Err]\([ErrorCode::BUSY]\): disabling the HSI clock took to long. Retry to ensure it is
-    /// not running.
+    /// + [Err]\([ErrorCode::BUSY]\): disabling the HSI clock took to long.
+    ///   Retry to ensure it is not running.
     pub fn disable(&self) -> Result<(), ErrorCode> {
         if self.rcc.is_hsi_clock_system_clock() {
             return Err(ErrorCode::FAIL);
@@ -128,7 +128,7 @@ impl<'a> Hsi<'a> {
     ///
     /// + [Some]\(frequency_mhz\): if the HSI clock is enabled.
     /// + [None]: if the HSI clock is disabled.
-    pub fn get_frequency(&self) -> Option<usize> {
+    pub fn get_frequency_mhz(&self) -> Option<usize> {
         if self.is_enabled() {
             Some(HSI_FREQUENCY_MHZ)
         } else {
@@ -167,7 +167,7 @@ impl<'a> Hsi<'a> {
 ///
 /// **NOTE:** All these tests assume default boot configuration.
 pub mod tests {
-    use super::*;
+    use super::{ErrorCode, HSI_FREQUENCY_MHZ, Hsi, debug};
 
     /// Run the entire test suite.
     pub fn run(hsi: &Hsi) {
@@ -179,7 +179,7 @@ pub mod tests {
         assert!(hsi.is_enabled());
 
         // HSI frequency is 16MHz
-        assert_eq!(Some(HSI_FREQUENCY_MHZ), hsi.get_frequency());
+        assert_eq!(Some(HSI_FREQUENCY_MHZ), hsi.get_frequency_mhz());
 
         // Nothing should happen if the HSI clock is being enabled when already running
         assert_eq!(Ok(()), hsi.enable());

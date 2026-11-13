@@ -5,9 +5,9 @@
 //! AON/Watchdog Timer Driver
 
 use kernel::platform;
-use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadWrite, WriteOnly};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::{Readable, Writeable};
+use kernel::utilities::registers::{ReadWrite, WriteOnly, register_bitfields, register_structs};
 
 // Based on the latest commit of OpenTitan supported by tock:
 // Refer: https://github.com/lowRISC/opentitan/blob/217a0168ba118503c166a9587819e3811eeb0c0c/hw/ip/aon_timer/rtl/aon_timer_reg_pkg.sv#L136
@@ -83,7 +83,7 @@ impl AonTimer {
     pub const fn new(base: StaticRef<AonTimerRegisters>, aon_clk_freq: u32) -> AonTimer {
         AonTimer {
             registers: base,
-            aon_clk_freq: aon_clk_freq,
+            aon_clk_freq,
         }
     }
 
@@ -140,35 +140,6 @@ impl AonTimer {
     fn ms_to_cycles(&self, ms: u32) -> u32 {
         // 250kHZ CW130 or 125kHz Verilator (as specified in chip config)
         ms.saturating_mul(self.aon_clk_freq).saturating_div(1000)
-    }
-
-    /// Start the wake up counter
-    #[cfg(aon_wkup_timer)]
-    fn wkup_start_count(&self) {
-        self.registers.wkup_ctrl.write(WKUP_CTRL::ENABLE::SET);
-    }
-
-    /// Set wake-up prescaler, NOTE: Independant of the watchdog timer
-    /// A count starts at 0 and slowly ticks upwards
-    /// (one tick every N + 1 clock cycles, where N is the pre-scaler value)
-    #[cfg(aon_wkup_timer)]
-    fn set_wkup_prescaler(&self) {
-        // Ex: AON VerilatorClock ~125kHZ, (2^12)/125_000Hz ~= 32ms (per tick)
-        // NOTE: Arbitrarily chosen, update as necessary.
-        let prescaler = 0x1000; // 2^12
-        self.registers
-            .wkup_ctrl
-            .write(WKUP_CTRL::PRESCALER.val(prescaler));
-    }
-
-    /// Set threshold ticks for the wake-up interrupt,
-    /// Note: the timing here depends on the prescaler set in
-    /// `set_wkup_prescaler()`
-    #[cfg(aon_wkup_timer)]
-    fn set_wkup_thresh(&self) {
-        let regs = self.registers;
-        // 0xFF arbitrarily chosen.
-        regs.wkup_thold.write(THRESHOLD::THRESHOLD.val(0xFF));
     }
 
     fn reset_wkup_count(&self) {

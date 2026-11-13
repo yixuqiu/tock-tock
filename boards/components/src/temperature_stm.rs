@@ -23,7 +23,7 @@ macro_rules! temperature_stm_adc_component_static {
         );
 
         (adc_device, temperature_stm)
-    };};
+    }};
 }
 
 pub type TemperatureSTMComponentType<A> =
@@ -46,8 +46,8 @@ impl<A: 'static + adc::Adc<'static>> TemperatureSTMComponent<A> {
         TemperatureSTMComponent {
             adc_mux,
             adc_channel,
-            slope: slope,
-            v_25: v_25,
+            slope,
+            v_25,
         }
     }
 }

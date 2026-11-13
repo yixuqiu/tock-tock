@@ -68,8 +68,8 @@ impl<'a> Msp432DefaultPeripherals<'a> {
     }
 }
 
-impl<'a> kernel::platform::chip::InterruptService for Msp432DefaultPeripherals<'a> {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+impl kernel::platform::chip::InterruptService for Msp432DefaultPeripherals<'_> {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
             nvic::ADC => self.adc.handle_interrupt(),
             nvic::DMA_INT0 => self.dma_channels.handle_interrupt(0),
@@ -95,9 +95,12 @@ impl<'a> kernel::platform::chip::InterruptService for Msp432DefaultPeripherals<'
 }
 
 impl<'a, I: InterruptService + 'a> Msp432<'a, I> {
-    pub unsafe fn new(interrupt_service: &'a I) -> Self {
+    pub fn new(interrupt_service: &'a I) -> Self {
+        // SAFETY: All MSP432 chips are Cortex-M4 cores with valid MPU hardware.
+        let mpu = unsafe { cortexm4::mpu::new() };
+
         Self {
-            mpu: cortexm4::mpu::MPU::new(),
+            mpu,
             userspace_kernel_boundary: cortexm4::syscall::SysCall::new(),
             interrupt_service,
         }
@@ -107,27 +110,28 @@ impl<'a, I: InterruptService + 'a> Msp432<'a, I> {
 impl<'a, I: InterruptService + 'a> Chip for Msp432<'a, I> {
     type MPU = cortexm4::mpu::MPU;
     type UserspaceKernelBoundary = cortexm4::syscall::SysCall;
+    type ThreadIdProvider = cortexm4::thread_id::CortexMThreadIdProvider;
+
+    fn init() {
+        cortexm4::nvic::disable_all();
+        cortexm4::nvic::clear_all_pending();
+        cortexm4::nvic::enable_all();
+    }
 
     fn service_pending_interrupts(&self) {
-        unsafe {
-            loop {
-                if let Some(interrupt) = cortexm4::nvic::next_pending() {
-                    if !self.interrupt_service.service_interrupt(interrupt) {
-                        panic!("unhandled interrupt {}", interrupt);
-                    }
-
-                    let n = cortexm4::nvic::Nvic::new(interrupt);
-                    n.clear_pending();
-                    n.enable();
-                } else {
-                    break;
-                }
+        while let Some(interrupt) = cortexm4::nvic::next_pending() {
+            if !self.interrupt_service.service_interrupt(interrupt) {
+                panic!("unhandled interrupt {}", interrupt);
             }
+
+            let n = cortexm4::nvic::Nvic::new(interrupt);
+            n.clear_pending();
+            n.enable();
         }
     }
 
     fn has_pending_interrupts(&self) -> bool {
-        unsafe { cortexm4::nvic::has_pending() }
+        cortexm4::nvic::has_pending()
     }
 
     fn mpu(&self) -> &cortexm4::mpu::MPU {
@@ -139,19 +143,18 @@ impl<'a, I: InterruptService + 'a> Chip for Msp432<'a, I> {
     }
 
     fn sleep(&self) {
-        unsafe {
-            cortexm4::support::wfi();
-        }
+        let cap = kernel::create_capability!(kernel::capabilities::CpuStateControlCapability);
+        cortexm4::support::wfi(&cap);
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        cortexm4::support::atomic(f)
+        cortexm4::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, write: &mut dyn Write) {
+    unsafe fn print_state(_this: Option<&Self>, write: &mut dyn Write) {
         CortexM4::print_cortexm_state(write);
     }
 }

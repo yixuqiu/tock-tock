@@ -5,17 +5,15 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
-use kernel::debug::{self, IoWrite};
+use kernel::debug;
 use kernel::hil::led::LedHigh;
 use kernel::hil::uart::{Configure, Parameters, Parity, StopBits, Width};
 use kernel::utilities::cells::OptionalCell;
+use kernel::utilities::io_write::IoWrite;
 
+use rp2040::clocks::Clocks;
 use rp2040::gpio::{GpioFunction, RPGpio, RPGpioPin};
 use rp2040::uart::Uart;
-
-use crate::CHIP;
-use crate::PROCESSES;
-use crate::PROCESS_PRINTER;
 
 /// Writer is used by kernel::debug to panic message to the serial port.
 pub struct Writer {
@@ -69,7 +67,8 @@ impl IoWrite for Writer {
     fn write(&mut self, buf: &[u8]) -> usize {
         self.uart.map_or_else(
             || {
-                let uart = Uart::new_uart0();
+                let clocks = Clocks::new();
+                let uart = Uart::new_uart0(&clocks);
                 self.configure_uart(&uart);
                 self.write_to_uart(&uart, buf);
             },
@@ -86,23 +85,22 @@ impl IoWrite for Writer {
 ///
 /// We just use the standard default provided by the debug module in the kernel.
 #[cfg(not(test))]
-#[no_mangle]
 #[panic_handler]
-pub unsafe fn panic_fmt(pi: &PanicInfo) -> ! {
-    // LED is conneted to GPIO 25
+pub fn panic_fmt(pi: &PanicInfo) -> ! {
+    // LED is connected to GPIO 25
 
-    use core::ptr::{addr_of, addr_of_mut};
+    use core::ptr::addr_of_mut;
     let led_kernel_pin = &RPGpioPin::new(RPGpio::GPIO25);
     let led = &mut LedHigh::new(led_kernel_pin);
-    let writer = &mut *addr_of_mut!(WRITER);
+    let writer = unsafe { &mut *addr_of_mut!(WRITER) };
 
-    debug::panic(
-        &mut [led],
-        writer,
-        pi,
-        &cortexm0p::support::nop,
-        &*addr_of!(PROCESSES),
-        &*addr_of!(CHIP),
-        &*addr_of!(PROCESS_PRINTER),
-    )
+    unsafe {
+        debug::panic_old(
+            &mut [led],
+            writer,
+            pi,
+            &cortexm0p::support::nop,
+            crate::PANIC_RESOURCES.get(),
+        )
+    }
 }

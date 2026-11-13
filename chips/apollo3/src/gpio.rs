@@ -8,10 +8,10 @@ use core::ops::{Index, IndexMut};
 use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
 use kernel::hil::gpio;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
 pub const GPIO_BASE_RAW: usize = 0x4001_0000; //safe to export outside crate
 
@@ -22,7 +22,7 @@ pub struct Port<'a> {
     pins: [GpioPin<'a>; 50],
 }
 
-impl<'a> Port<'a> {
+impl Port<'_> {
     pub const fn new() -> Self {
         Self {
             pins: [
@@ -495,7 +495,7 @@ impl Port<'_> {
                         + CFG::GPIO4INTD.val(0x00),
                 );
                 regs.altpadcfgb
-                    .modify(ALTPADCFG::PAD3_DS1::SET + ALTPADCFG::PAD0_SR::CLEAR);
+                    .modify(ALTPADCFG::PAD3_DS1::SET + ALTPADCFG::PAD3_SR::CLEAR);
                 regs.padkey.set(0x00);
             }
             17 => {
@@ -940,7 +940,7 @@ impl<'a> GpioPin<'a> {
     }
 }
 
-impl<'a> gpio::Configure for GpioPin<'a> {
+impl gpio::Configure for GpioPin<'_> {
     fn configuration(&self) -> gpio::Configuration {
         unimplemented!();
     }
@@ -948,6 +948,17 @@ impl<'a> gpio::Configure for GpioPin<'a> {
     fn set_floating_state(&self, mode: gpio::FloatingState) {
         // Set the key
         self.registers.padkey.set(115);
+
+        // Configure the pin as GPIO
+        let pagreg_offset = self.pin as usize / 4;
+        let pagreg_value = match self.pin as usize % 4 {
+            0 => PADREG::PAD0FNCSEL.val(0x3),
+            1 => PADREG::PAD1FNCSEL.val(0x3),
+            2 => PADREG::PAD2FNCSEL.val(0x3),
+            3 => PADREG::PAD3FNCSEL.val(0x3),
+            _ => unreachable!(),
+        };
+        self.registers.padreg[pagreg_offset].modify(pagreg_value);
 
         match mode {
             gpio::FloatingState::PullUp => {
@@ -964,6 +975,15 @@ impl<'a> gpio::Configure for GpioPin<'a> {
                     _ => unreachable!(),
                 };
                 self.registers.cfg[cfgreg_offset].modify(cfgreg_value);
+
+                let pagreg_value = match self.pin as usize % 4 {
+                    0 => PADREG::PAD0PULL.val(0x1),
+                    1 => PADREG::PAD1PULL.val(0x1),
+                    2 => PADREG::PAD2PULL.val(0x1),
+                    3 => PADREG::PAD3PULL.val(0x1),
+                    _ => unreachable!(),
+                };
+                self.registers.padreg[pagreg_offset].modify(pagreg_value);
             }
             gpio::FloatingState::PullDown => {
                 let cfgreg_offset = self.pin as usize / 8;
@@ -994,6 +1014,15 @@ impl<'a> gpio::Configure for GpioPin<'a> {
                     _ => unreachable!(),
                 };
                 self.registers.cfg[cfgreg_offset].modify(cfgreg_value);
+
+                let pagreg_value = match self.pin as usize % 4 {
+                    0 => PADREG::PAD0PULL.val(0x0),
+                    1 => PADREG::PAD1PULL.val(0x0),
+                    2 => PADREG::PAD2PULL.val(0x0),
+                    3 => PADREG::PAD3PULL.val(0x0),
+                    _ => unreachable!(),
+                };
+                self.registers.padreg[pagreg_offset].modify(pagreg_value);
             }
         }
 
@@ -1065,7 +1094,7 @@ impl<'a> gpio::Configure for GpioPin<'a> {
         };
         regs.padreg[pagreg_offset].modify(pagreg_value);
 
-        // Set to push/pull
+        // Set to disabled (GPIO mode)
         let cfgreg_offset = self.pin as usize / 8;
         let cfgreg_value = match self.pin as usize % 8 {
             0 => CFG::GPIO0OUTCFG.val(0x00),
@@ -1092,13 +1121,13 @@ impl<'a> gpio::Configure for GpioPin<'a> {
         // Set the key
         regs.padkey.set(115);
 
-        // Configure the pin as GPIO
+        // Configure the pin as GPIO with input enabled
         let pagreg_offset = self.pin as usize / 4;
         let pagreg_value = match self.pin as usize % 4 {
-            0 => PADREG::PAD0FNCSEL.val(0x3),
-            1 => PADREG::PAD1FNCSEL.val(0x3),
-            2 => PADREG::PAD2FNCSEL.val(0x3),
-            3 => PADREG::PAD3FNCSEL.val(0x3),
+            0 => PADREG::PAD0FNCSEL.val(0x3) + PADREG::PAD0INPEN.val(0x1),
+            1 => PADREG::PAD1FNCSEL.val(0x3) + PADREG::PAD1INPEN.val(0x1),
+            2 => PADREG::PAD2FNCSEL.val(0x3) + PADREG::PAD2INPEN.val(0x1),
+            3 => PADREG::PAD3FNCSEL.val(0x3) + PADREG::PAD3INPEN.val(0x1),
             _ => unreachable!(),
         };
         regs.padreg[pagreg_offset].modify(pagreg_value);
@@ -1110,11 +1139,30 @@ impl<'a> gpio::Configure for GpioPin<'a> {
     }
 
     fn disable_input(&self) -> gpio::Configuration {
-        unimplemented!();
+        let regs = self.registers;
+
+        // Set the key
+        regs.padkey.set(115);
+
+        // Configure the pin as GPIO with input disabled
+        let pagreg_offset = self.pin as usize / 4;
+        let pagreg_value = match self.pin as usize % 4 {
+            0 => PADREG::PAD0INPEN.val(0x0),
+            1 => PADREG::PAD1INPEN.val(0x0),
+            2 => PADREG::PAD2INPEN.val(0x0),
+            3 => PADREG::PAD3INPEN.val(0x0),
+            _ => unreachable!(),
+        };
+        regs.padreg[pagreg_offset].modify(pagreg_value);
+
+        // Unset key
+        regs.padkey.set(0x00);
+
+        gpio::Configuration::Output
     }
 }
 
-impl<'a> gpio::Input for GpioPin<'a> {
+impl gpio::Input for GpioPin<'_> {
     fn read(&self) -> bool {
         let regs = self.registers;
 
@@ -1126,7 +1174,7 @@ impl<'a> gpio::Input for GpioPin<'a> {
     }
 }
 
-impl<'a> gpio::Output for GpioPin<'a> {
+impl gpio::Output for GpioPin<'_> {
     fn toggle(&self) -> bool {
         let regs = self.registers;
         let cur_value;

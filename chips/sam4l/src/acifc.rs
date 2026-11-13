@@ -31,12 +31,14 @@
 
 use crate::pm;
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::debug;
 use kernel::hil::analog_comparator;
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite, WriteOnly};
 use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::{
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
+};
 
 /// Representation of an AC channel on the SAM4L.
 pub struct AcChannel {
@@ -64,24 +66,26 @@ impl AcChannel {
     }
 }
 
-#[repr(C)]
-struct AcifcRegisters {
-    ctrl: ReadWrite<u32, Control::Register>,
-    sr: ReadOnly<u32, Status::Register>,
-    _reserved0: [ReadOnly<u32>; 2],
-    ier: WriteOnly<u32, Interrupt::Register>,
-    idr: WriteOnly<u32, Interrupt::Register>,
-    imr: ReadOnly<u32, Interrupt::Register>,
-    isr: ReadOnly<u32, Interrupt::Register>,
-    icr: WriteOnly<u32, Interrupt::Register>,
-    tr: ReadWrite<u32, Test::Register>,
-    _reserved1: [ReadOnly<u32>; 2],
-    parameter: ReadOnly<u32, Parameter::Register>,
-    version: ReadOnly<u32>,
-    _reserved2: [ReadOnly<u32>; 18],
-    confw: [ReadWrite<u32, WindowConfiguration::Register>; 4],
-    _reserved3: [ReadOnly<u32>; 16],
-    conf: [ReadWrite<u32, ACConfiguration::Register>; 8],
+register_structs! {
+    AcifcRegisters {
+        (0x000 => ctrl: ReadWrite<u32, Control::Register>),
+        (0x004 => sr: ReadOnly<u32, Status::Register>),
+        (0x008 => _reserved0: [ReadOnly<u32>; 2]),
+        (0x010 => ier: WriteOnly<u32, Interrupt::Register>),
+        (0x014 => idr: WriteOnly<u32, Interrupt::Register>),
+        (0x018 => imr: ReadOnly<u32, Interrupt::Register>),
+        (0x01C => isr: ReadOnly<u32, Interrupt::Register>),
+        (0x020 => icr: WriteOnly<u32, Interrupt::Register>),
+        (0x024 => tr: ReadWrite<u32, Test::Register>),
+        (0x028 => _reserved1: [ReadOnly<u32>; 2]),
+        (0x030 => parameter: ReadOnly<u32, Parameter::Register>),
+        (0x034 => version: ReadOnly<u32>),
+        (0x038 => _reserved2: [ReadOnly<u32>; 18]),
+        (0x080 => confw: [ReadWrite<u32, WindowConfiguration::Register>; 4]),
+        (0x090 => _reserved3: [ReadOnly<u32>; 16]),
+        (0x0D0 => conf: [ReadWrite<u32, ACConfiguration::Register>; 8]),
+        (0x0F0 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -458,20 +462,19 @@ impl<'a> analog_comparator::AnalogComparator<'a> for Acifc<'a> {
     fn comparison(&self, channel: &Self::Channel) -> bool {
         self.enable();
         let regs = ACIFC_BASE;
-        let result;
-        if channel.chan_num == 0 {
-            result = regs.sr.is_set(Status::ACCS0);
+        let result = if channel.chan_num == 0 {
+            regs.sr.is_set(Status::ACCS0)
         } else if channel.chan_num == 1 {
-            result = regs.sr.is_set(Status::ACCS1);
+            regs.sr.is_set(Status::ACCS1)
         } else if channel.chan_num == 2 {
-            result = regs.sr.is_set(Status::ACCS2);
+            regs.sr.is_set(Status::ACCS2)
         } else if channel.chan_num == 3 {
-            result = regs.sr.is_set(Status::ACCS3);
+            regs.sr.is_set(Status::ACCS3)
         } else {
             // Should never get here, just making sure
             self.disable();
             panic!("PANIC! Please choose a comparator (value of ac) that this chip supports");
-        }
+        };
         result
     }
 

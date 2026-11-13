@@ -11,25 +11,33 @@ use core::cmp::min;
 use core::fmt;
 
 use kernel::hil::usb::TransferType;
-use kernel::utilities::cells::VolatileCell;
+use kernel::utilities::registers::InMemoryRegister;
+use kernel::utilities::registers::interfaces::Readable;
 
 // On Nordic, USB buffers must be 32-bit aligned, with a power-of-2 size. For
 // now we apply these constraints on all platforms.
-#[derive(Default)]
 #[repr(align(4))]
 pub struct Buffer8 {
-    pub buf: [VolatileCell<u8>; 8],
+    pub buf: [InMemoryRegister<u8>; 8],
+}
+
+impl Default for Buffer8 {
+    fn default() -> Self {
+        Self {
+            buf: [const { InMemoryRegister::new(0) }; 8],
+        }
+    }
 }
 
 #[repr(align(4))]
 pub struct Buffer64 {
-    pub buf: [VolatileCell<u8>; 64],
+    pub buf: [InMemoryRegister<u8>; 64],
 }
 
 impl Default for Buffer64 {
     fn default() -> Self {
         Self {
-            buf: [(); 64].map(|()| VolatileCell::default()),
+            buf: [const { InMemoryRegister::new(0) }; 64],
         }
     }
 }
@@ -46,7 +54,7 @@ pub struct SetupData {
 
 impl SetupData {
     /// Create a `SetupData` structure from a packet received from the wire
-    pub fn get(p: &[VolatileCell<u8>]) -> Option<Self> {
+    pub fn get(p: &[InMemoryRegister<u8>]) -> Option<Self> {
         if p.len() < 8 {
             return None;
         }
@@ -78,21 +86,21 @@ impl SetupData {
                 5 => Some(StandardRequest::SetAddress {
                     device_address: self.value,
                 }),
-                6 => get_descriptor_type((self.value >> 8) as u8).map_or(None, |dt| {
-                    Some(StandardRequest::GetDescriptor {
+                6 => get_descriptor_type((self.value >> 8) as u8).map(|dt| {
+                    StandardRequest::GetDescriptor {
                         descriptor_type: dt,
                         descriptor_index: (self.value & 0xff) as u8,
                         lang_id: self.index,
                         requested_length: self.length,
-                    })
+                    }
                 }),
-                7 => get_set_descriptor_type((self.value >> 8) as u8).map_or(None, |dt| {
-                    Some(StandardRequest::SetDescriptor {
+                7 => get_set_descriptor_type((self.value >> 8) as u8).map(|dt| {
+                    StandardRequest::SetDescriptor {
                         descriptor_type: dt,
                         descriptor_index: (self.value & 0xff) as u8,
                         lang_id: self.index,
                         descriptor_length: self.length,
-                    })
+                    }
                 }),
                 8 => Some(StandardRequest::GetConfiguration),
                 9 => Some(StandardRequest::SetConfiguration {
@@ -413,12 +421,14 @@ impl DescriptorBuffer {
 }
 
 /// Transform descriptor structs into descriptor buffers that can be
-/// passed into the control endpoint handler. Each endpoint descriptor list
-/// corresponds to the matching index in the interface descriptor list. For
-/// example, if the interface descriptor list contains `[ID1, ID2, ID3]`,
-/// and the endpoint descriptors list is `[[ED1, ED2], [ED3, ED4, ED5],
-/// [ED6]]`, then the third interface descriptor (`ID3`) has one
-/// corresponding endpoint descriptor (`ED6`).
+/// passed into the control endpoint handler.
+///
+/// Each endpoint descriptor list corresponds to the matching index in
+/// the interface descriptor list. For example, if the interface
+/// descriptor list contains `[ID1, ID2, ID3]`, and the endpoint
+/// descriptors list is `[[ED1, ED2], [ED3, ED4, ED5], [ED6]]`, then
+/// the third interface descriptor (`ID3`) has one corresponding
+/// endpoint descriptor (`ED6`).
 pub fn create_descriptor_buffers(
     device_descriptor: DeviceDescriptor,
     mut configuration_descriptor: ConfigurationDescriptor,
@@ -757,7 +767,7 @@ pub struct HIDSubordinateDescriptor {
     pub len: u16,
 }
 
-impl<'a> Descriptor for HIDDescriptor<'a> {
+impl Descriptor for HIDDescriptor<'_> {
     fn size(&self) -> usize {
         6 + (3 * self.sub_descriptors.len())
     }
@@ -781,7 +791,7 @@ pub struct ReportDescriptor<'a> {
     pub desc: &'a [u8],
 }
 
-impl<'a> Descriptor for ReportDescriptor<'a> {
+impl Descriptor for ReportDescriptor<'_> {
     fn size(&self) -> usize {
         self.desc.len()
     }
@@ -875,7 +885,7 @@ pub struct CdcAcmSetLineCodingData {
 impl CdcAcmSetLineCodingData {
     /// Create a `CdcAcmSetLineCodingData` structure from a packet received
     /// after the ctrl endpoint setup.
-    pub fn get(p: &[VolatileCell<u8>]) -> Option<Self> {
+    pub fn get(p: &[InMemoryRegister<u8>]) -> Option<Self> {
         if p.len() < 7 {
             return None;
         }
@@ -892,7 +902,7 @@ pub struct LanguagesDescriptor<'a> {
     pub langs: &'a [u16],
 }
 
-impl<'a> Descriptor for LanguagesDescriptor<'a> {
+impl Descriptor for LanguagesDescriptor<'_> {
     fn size(&self) -> usize {
         2 + (2 * self.langs.len())
     }
@@ -912,7 +922,7 @@ pub struct StringDescriptor<'a> {
     pub string: &'a str,
 }
 
-impl<'a> Descriptor for StringDescriptor<'a> {
+impl Descriptor for StringDescriptor<'_> {
     fn size(&self) -> usize {
         let mut len = 2;
         for ch in self.string.chars() {

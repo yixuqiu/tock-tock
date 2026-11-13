@@ -7,9 +7,9 @@
 
 use crate::otbn::{Client, Otbn};
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::collections::list::{ListLink, ListNode};
 use kernel::utilities::cells::OptionalCell;
-use kernel::ErrorCode;
 
 pub struct VirtualMuxAccel<'a> {
     mux: &'a MuxAccel<'a>,
@@ -19,7 +19,7 @@ pub struct VirtualMuxAccel<'a> {
 }
 
 impl<'a> ListNode<'a, VirtualMuxAccel<'a>> for VirtualMuxAccel<'a> {
-    fn next(&self) -> &'a ListLink<VirtualMuxAccel<'a>> {
+    fn next(&self) -> &'a ListLink<'_, VirtualMuxAccel<'a>> {
         &self.next
     }
 }
@@ -33,7 +33,7 @@ impl<'a> VirtualMuxAccel<'a> {
             mux: mux_accel,
             next: ListLink::empty(),
             client: OptionalCell::empty(),
-            id: id,
+            id,
         }
     }
 
@@ -102,9 +102,10 @@ impl<'a> Client<'a> for VirtualMuxAccel<'a> {
 }
 
 /// Calling a 'set_mode*()' function from a `VirtualMuxAccel` will mark that
-/// `VirtualMuxAccel` as the one that has been enabled and running. Until that
-/// Mux calls `clear_data()` it will be the only `VirtualMuxAccel` that can
-/// interact with the underlying device.
+/// `VirtualMuxAccel` as the one that has been enabled and running.
+///
+/// Until that Mux calls `clear_data()` it will be the only
+/// `VirtualMuxAccel` that can interact with the underlying device.
 pub struct MuxAccel<'a> {
     accel: &'a Otbn<'a>,
     running: Cell<bool>,

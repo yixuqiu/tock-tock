@@ -4,22 +4,19 @@
 
 //! Power management
 
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, register_structs, ReadOnly, ReadWrite, WriteOnly,
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
 };
-use kernel::utilities::StaticRef;
-
-const POWER_BASE: StaticRef<PowerRegisters> =
-    unsafe { StaticRef::new(0x40000000 as *const PowerRegisters) };
 
 // Note: only the nrf52833+ have 9 banks, but we create all of them to avoid
 // gating this code by a feature.
 const NUM_RAM_BANKS: usize = 9;
 
 register_structs! {
-    PowerRegisters {
+    pub PowerRegisters {
         (0x000 => _reserved0),
         /// Enable Constant Latency mode
         (0x078 => task_constlat: WriteOnly<u32, Task::Register>),
@@ -237,6 +234,7 @@ register_bitfields! [u32,
 
 /// The USB state machine needs to be notified of power events (USB detected, USB
 /// removed, USB power ready) in order to be initialized and shut down properly.
+///
 /// These events come from the power management registers of this module; that's
 /// this has a USB client to notify.
 pub struct Power<'a> {
@@ -268,9 +266,9 @@ pub trait PowerClient {
 }
 
 impl<'a> Power<'a> {
-    pub const fn new() -> Self {
+    pub const fn new(registers: StaticRef<PowerRegisters>) -> Self {
         Power {
-            registers: POWER_BASE,
+            registers,
             usb_client: OptionalCell::empty(),
         }
     }

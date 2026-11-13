@@ -5,25 +5,22 @@
 //! Board file for a LiteX SoC running in a Verilated simulation
 
 #![no_std]
-// Disable this attribute when documenting, as a workaround for
-// https://github.com/rust-lang/rust/issues/62184.
-#![cfg_attr(not(doc), no_main)]
-
-use core::ptr::{addr_of, addr_of_mut};
+#![no_main]
 
 use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use kernel::capabilities;
 use kernel::component::Component;
+use kernel::debug::PanicResources;
 use kernel::hil::led::LedHigh;
 use kernel::hil::time::{Alarm, Timer};
 use kernel::platform::chip::InterruptService;
-use kernel::platform::scheduler_timer::VirtualSchedulerTimer;
 use kernel::platform::{KernelResources, SyscallDriverLookup};
-use kernel::scheduler::cooperative::CooperativeSched;
-use kernel::utilities::registers::interfaces::ReadWriteable;
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::ReadWriteable;
+use kernel::utilities::single_thread_value::SingleThreadValue;
 use kernel::{create_capability, debug, static_init};
 use rv32i::csr;
+use rv32i::interrupt_controller::InterruptController;
 
 mod io;
 mod litex_generated_constants;
@@ -51,7 +48,11 @@ struct LiteXSimInterruptablePeripherals {
         socc::SoCRegisterFmt,
         socc::ClockFrequency,
     >,
-    ethmac0: &'static litex_vexriscv::liteeth::LiteEth<'static, socc::SoCRegisterFmt>,
+    ethmac0: &'static litex_vexriscv::liteeth::LiteEth<
+        'static,
+        { socc::ETHMAC_TX_SLOTS },
+        socc::SoCRegisterFmt,
+    >,
 }
 
 impl LiteXSimInterruptablePeripherals {
@@ -62,7 +63,7 @@ impl LiteXSimInterruptablePeripherals {
 }
 
 impl InterruptService for LiteXSimInterruptablePeripherals {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt as usize {
             socc::UART_INTERRUPT => {
                 self.uart0.service_interrupt();
@@ -87,30 +88,23 @@ impl InterruptService for LiteXSimInterruptablePeripherals {
 
 const NUM_PROCS: usize = 4;
 
-// Actual memory for holding the active process structures. Need an
-// empty list at least.
-static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
-    [None; NUM_PROCS];
+type ChipHw = litex_vexriscv::chip::LiteXVexRiscv<LiteXSimInterruptablePeripherals>;
+type AlarmHw =
+    litex_vexriscv::timer::LiteXAlarm<'static, 'static, socc::SoCRegisterFmt, socc::ClockFrequency>;
+type SchedulerTimerHw =
+    components::virtual_scheduler_timer::VirtualSchedulerTimerComponentType<AlarmHw>;
+type ProcessPrinterInUse = capsules_system::process_printer::ProcessPrinterText;
+type SchedulerInUse = components::sched::mlfq::MLFQComponentType<AlarmHw>;
 
-// Reference to the chip and UART hardware for panic dumps
-struct LiteXSimPanicReferences {
-    chip: Option<&'static litex_vexriscv::chip::LiteXVexRiscv<LiteXSimInterruptablePeripherals>>,
-    uart: Option<&'static litex_vexriscv::uart::LiteXUart<'static, socc::SoCRegisterFmt>>,
-    process_printer: Option<&'static kernel::process::ProcessPrinterText>,
-}
-static mut PANIC_REFERENCES: LiteXSimPanicReferences = LiteXSimPanicReferences {
-    chip: None,
-    uart: None,
-    process_printer: None,
-};
+/// Resources for when a board panics used by io.rs.
+static PANIC_RESOURCES: SingleThreadValue<PanicResources<ChipHw, ProcessPrinterInUse>> =
+    SingleThreadValue::new();
 
 // How should the kernel respond when a process faults.
-const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
+const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
+    capsules_system::process_policies::PanicFaultPolicy {};
 
-/// Dummy buffer that causes the linker to reserve enough space for the stack.
-#[no_mangle]
-#[link_section = ".stack_buffer"]
-pub static mut STACK_MEMORY: [u8; 0x2000] = [0; 0x2000];
+kernel::stack_size! {0x2000}
 
 /// A structure representing this platform that holds references to all
 /// capsules for this platform.
@@ -136,31 +130,10 @@ struct LiteXSim {
         'static,
         capsules_core::virtualizers::virtual_uart::UartDevice<'static>,
     >,
-    alarm: &'static capsules_core::alarm::AlarmDriver<
-        'static,
-        VirtualMuxAlarm<
-            'static,
-            litex_vexriscv::timer::LiteXAlarm<
-                'static,
-                'static,
-                socc::SoCRegisterFmt,
-                socc::ClockFrequency,
-            >,
-        >,
-    >,
+    alarm: &'static capsules_core::alarm::AlarmDriver<'static, VirtualMuxAlarm<'static, AlarmHw>>,
     ipc: kernel::ipc::IPC<{ NUM_PROCS as u8 }>,
-    scheduler: &'static CooperativeSched<'static>,
-    scheduler_timer: &'static VirtualSchedulerTimer<
-        VirtualMuxAlarm<
-            'static,
-            litex_vexriscv::timer::LiteXAlarm<
-                'static,
-                'static,
-                socc::SoCRegisterFmt,
-                socc::ClockFrequency,
-            >,
-        >,
-    >,
+    scheduler: &'static SchedulerInUse,
+    scheduler_timer: &'static SchedulerTimerHw,
 }
 
 /// Mapping of integer syscalls to objects that implement syscalls.
@@ -188,18 +161,8 @@ impl KernelResources<litex_vexriscv::chip::LiteXVexRiscv<LiteXSimInterruptablePe
     type SyscallDriverLookup = Self;
     type SyscallFilter = ();
     type ProcessFault = ();
-    type Scheduler = CooperativeSched<'static>;
-    type SchedulerTimer = VirtualSchedulerTimer<
-        VirtualMuxAlarm<
-            'static,
-            litex_vexriscv::timer::LiteXAlarm<
-                'static,
-                'static,
-                socc::SoCRegisterFmt,
-                socc::ClockFrequency,
-            >,
-        >,
-    >;
+    type Scheduler = SchedulerInUse;
+    type SchedulerTimer = SchedulerTimerHw;
     type WatchDog = ();
     type ContextSwitchCallback = ();
 
@@ -226,12 +189,15 @@ impl KernelResources<litex_vexriscv::chip::LiteXVexRiscv<LiteXSimInterruptablePe
     }
 }
 
-/// Main function.
-///
-/// This function is called from the arch crate after some very basic RISC-V
-/// and RAM setup.
-#[no_mangle]
-pub unsafe fn main() {
+/// This is in a separate, inline(never) function so that its stack frame is
+/// removed when this function returns. Otherwise, the stack space used for
+/// these static_inits is wasted.
+#[inline(never)]
+unsafe fn start() -> (
+    &'static kernel::Kernel,
+    LiteXSim,
+    &'static litex_vexriscv::chip::LiteXVexRiscv<LiteXSimInterruptablePeripherals>,
+) {
     // These symbols are defined in the linker script.
     extern "C" {
         /// Beginning of the ROM region containing app images.
@@ -259,35 +225,46 @@ pub unsafe fn main() {
     // ---------- BASIC INITIALIZATION ----------
 
     // Basic setup of the riscv platform.
-    rv32i::configure_trap_handler(rv32i::PermissionMode::Machine);
+    rv32i::interrupt_controller::Clint::configure_trap_handler();
+
+    // Initialize deferred calls very early.
+    kernel::deferred_call::initialize_deferred_call_state_unsafe::<
+        <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+    >();
+
+    // Bind global variables to this thread.
+    let _ = PANIC_RESOURCES
+        .bind_to_thread_unsafe::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(
+            PanicResources::new(),
+        );
 
     // Set up memory protection immediately after setting the trap handler, to
     // ensure that much of the board initialization routine runs with PMP kernel
     // memory protection.
     let pmp = rv32i::pmp::kernel_protection::KernelProtectionPMP::new(
         rv32i::pmp::kernel_protection::FlashRegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
+            rv32i::pmp::NAPOTRegionSpec::from_start_end(
                 core::ptr::addr_of!(_sflash),
-                core::ptr::addr_of!(_eflash) as usize - core::ptr::addr_of!(_sflash) as usize,
+                core::ptr::addr_of!(_eflash),
             )
             .unwrap(),
         ),
         rv32i::pmp::kernel_protection::RAMRegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
+            rv32i::pmp::NAPOTRegionSpec::from_start_end(
                 core::ptr::addr_of!(_ssram),
-                core::ptr::addr_of!(_esram) as usize - core::ptr::addr_of!(_ssram) as usize,
+                core::ptr::addr_of!(_esram),
             )
             .unwrap(),
         ),
         rv32i::pmp::kernel_protection::MMIORegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
+            rv32i::pmp::NAPOTRegionSpec::from_start_size(
                 0xf0000000 as *const u8, // start
                 0x10000000,              // size
             )
             .unwrap(),
         ),
         rv32i::pmp::kernel_protection::KernelTextRegion(
-            rv32i::pmp::TORRegionSpec::new(
+            rv32i::pmp::TORRegionSpec::from_start_end(
                 core::ptr::addr_of!(_stext),
                 core::ptr::addr_of!(_etext),
             )
@@ -299,9 +276,16 @@ pub unsafe fn main() {
     // initialize capabilities
     let process_mgmt_cap = create_capability!(capabilities::ProcessManagementCapability);
     let memory_allocation_cap = create_capability!(capabilities::MemoryAllocationCapability);
-    let main_loop_cap = create_capability!(capabilities::MainLoopCapability);
 
-    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&*addr_of!(PROCESSES)));
+    // Create an array to hold process references.
+    let processes = components::process_array::ProcessArrayComponent::new()
+        .finalize(components::process_array_component_static!(NUM_PROCS));
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.processes.put(processes.as_slice());
+    });
+
+    // Setup space to store the core kernel data structure.
+    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(processes.as_slice()));
 
     // --------- TIMER & UPTIME CORE; ALARM INITIALIZATION ----------
 
@@ -327,12 +311,7 @@ pub unsafe fn main() {
     // Create the LiteXAlarm based on the hardware LiteXTimer core and
     // the uptime peripheral
     let litex_alarm = static_init!(
-        litex_vexriscv::timer::LiteXAlarm<
-            'static,
-            'static,
-            socc::SoCRegisterFmt,
-            socc::ClockFrequency,
-        >,
+        AlarmHw,
         litex_vexriscv::timer::LiteXAlarm::new(timer0_uptime, timer0)
     );
     timer0.set_timer_client(litex_alarm);
@@ -340,48 +319,18 @@ pub unsafe fn main() {
 
     // Create a shared virtualization mux layer on top of a single hardware
     // alarm.
-    let mux_alarm = static_init!(
-        MuxAlarm<
-            'static,
-            litex_vexriscv::timer::LiteXAlarm<
-                'static,
-                'static,
-                socc::SoCRegisterFmt,
-                socc::ClockFrequency,
-            >,
-        >,
-        MuxAlarm::new(litex_alarm)
-    );
+    let mux_alarm = static_init!(MuxAlarm<'static, AlarmHw>, MuxAlarm::new(litex_alarm));
     litex_alarm.set_alarm_client(mux_alarm);
 
     // Userspace alarm driver
     let virtual_alarm_user = static_init!(
-        VirtualMuxAlarm<
-            'static,
-            litex_vexriscv::timer::LiteXAlarm<
-                'static,
-                'static,
-                socc::SoCRegisterFmt,
-                socc::ClockFrequency,
-            >,
-        >,
+        VirtualMuxAlarm<'static, AlarmHw>,
         VirtualMuxAlarm::new(mux_alarm)
     );
     virtual_alarm_user.setup();
 
     let alarm = static_init!(
-        capsules_core::alarm::AlarmDriver<
-            'static,
-            VirtualMuxAlarm<
-                'static,
-                litex_vexriscv::timer::LiteXAlarm<
-                    'static,
-                    'static,
-                    socc::SoCRegisterFmt,
-                    socc::ClockFrequency,
-                >,
-            >,
-        >,
+        capsules_core::alarm::AlarmDriver<'static, VirtualMuxAlarm<'static, AlarmHw>>,
         capsules_core::alarm::AlarmDriver::new(
             virtual_alarm_user,
             board_kernel.create_grant(capsules_core::alarm::DRIVER_NUM, &memory_allocation_cap)
@@ -389,35 +338,11 @@ pub unsafe fn main() {
     );
     virtual_alarm_user.set_alarm_client(alarm);
 
-    // Systick virtual alarm for scheduling
-    let systick_virtual_alarm = static_init!(
-        VirtualMuxAlarm<
-            'static,
-            litex_vexriscv::timer::LiteXAlarm<
-                'static,
-                'static,
-                socc::SoCRegisterFmt,
-                socc::ClockFrequency,
-            >,
-        >,
-        VirtualMuxAlarm::new(mux_alarm)
-    );
-    systick_virtual_alarm.setup();
-
-    let scheduler_timer = static_init!(
-        VirtualSchedulerTimer<
-            VirtualMuxAlarm<
-                'static,
-                litex_vexriscv::timer::LiteXAlarm<
-                    'static,
-                    'static,
-                    socc::SoCRegisterFmt,
-                    socc::ClockFrequency,
-                >,
-            >,
-        >,
-        VirtualSchedulerTimer::new(systick_virtual_alarm)
-    );
+    let scheduler_timer =
+        components::virtual_scheduler_timer::VirtualSchedulerTimerComponent::new(mux_alarm)
+            .finalize(components::virtual_scheduler_timer_component_static!(
+                AlarmHw
+            ));
 
     // ---------- UART ----------
 
@@ -434,8 +359,6 @@ pub unsafe fn main() {
     );
     uart0.initialize();
 
-    PANIC_REFERENCES.uart = Some(uart0);
-
     // Create a shared UART channel for the console and for kernel debug.
     //
     // The baudrate is ingnored, as no UART phy is present in the
@@ -445,12 +368,9 @@ pub unsafe fn main() {
 
     // ---------- ETHERNET ----------
 
-    // Packet receive buffer
-    let ethmac0_rxbuf0 = static_init!([u8; 1522], [0; 1522]);
-
     // ETHMAC peripheral
     let ethmac0 = static_init!(
-        litex_vexriscv::liteeth::LiteEth<socc::SoCRegisterFmt>,
+        litex_vexriscv::liteeth::LiteEth<{socc::ETHMAC_TX_SLOTS}, socc::SoCRegisterFmt>,
         litex_vexriscv::liteeth::LiteEth::new(
             StaticRef::new(
                 socc::CSR_ETHMAC_BASE
@@ -461,7 +381,6 @@ pub unsafe fn main() {
             socc::ETHMAC_SLOT_SIZE,
             socc::ETHMAC_RX_SLOTS,
             socc::ETHMAC_TX_SLOTS,
-            ethmac0_rxbuf0,
         )
     );
 
@@ -508,6 +427,7 @@ pub unsafe fn main() {
             30 => gpio0.get_gpio_pin(30).unwrap(),
             31 => gpio0.get_gpio_pin(31).unwrap(),
         ),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::gpio_component_static!(GPIOPin));
 
@@ -588,6 +508,7 @@ pub unsafe fn main() {
                 kernel::hil::gpio::FloatingState::PullNone
             ),
         ),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::button_component_static!(GPIOPin));
 
@@ -614,13 +535,15 @@ pub unsafe fn main() {
             pmp,
         )
     );
-
-    PANIC_REFERENCES.chip = Some(chip);
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.chip.put(chip);
+    });
 
     let process_printer = components::process_printer::ProcessPrinterTextComponent::new()
         .finalize(components::process_printer_text_component_static!());
-
-    PANIC_REFERENCES.process_printer = Some(process_printer);
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.printer.put(process_printer);
+    });
 
     // Enable RISC-V interrupts globally
     csr::CSR
@@ -636,32 +559,39 @@ pub unsafe fn main() {
         board_kernel,
         capsules_core::console::DRIVER_NUM,
         uart_mux,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::console_component_static!());
     // Create the debugger object that handles calls to `debug!()`.
-    components::debug_writer::DebugWriterComponent::new(uart_mux)
-        .finalize(components::debug_writer_component_static!());
+    components::debug_writer::DebugWriterComponent::new_unsafe(
+        uart_mux,
+        create_capability!(capabilities::SetDebugWriterCapability),
+        || unsafe {
+            kernel::debug::initialize_debug_writer_wrapper_unsafe::<
+                <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+            >();
+        },
+    )
+    .finalize(components::debug_writer_component_static!());
 
     let lldb = components::lldb::LowLevelDebugComponent::new(
         board_kernel,
         capsules_core::low_level_debug::DRIVER_NUM,
         uart_mux,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::low_level_debug_component_static!());
 
-    debug!("Verilated LiteX+VexRiscv: initialization complete, entering main loop.");
-
-    let scheduler =
-        components::sched::cooperative::CooperativeComponent::new(&*addr_of!(PROCESSES))
-            .finalize(components::cooperative_component_static!(NUM_PROCS));
+    let scheduler = components::sched::mlfq::MLFQComponent::new(mux_alarm, processes)
+        .finalize(components::mlfq_component_static!(AlarmHw, NUM_PROCS));
 
     let litex_sim = LiteXSim {
-        gpio_driver: gpio_driver,
-        button_driver: button_driver,
-        led_driver: led_driver,
-        console: console,
-        alarm: alarm,
-        lldb: lldb,
+        gpio_driver,
+        button_driver,
+        led_driver,
+        console,
+        alarm,
+        lldb,
         ipc: kernel::ipc::IPC::new(
             board_kernel,
             kernel::ipc::DRIVER_NUM,
@@ -670,6 +600,8 @@ pub unsafe fn main() {
         scheduler,
         scheduler_timer,
     };
+
+    debug!("Verilated LiteX+VexRiscv: initialization complete, entering main loop.");
 
     kernel::process::load_processes(
         board_kernel,
@@ -682,7 +614,6 @@ pub unsafe fn main() {
             core::ptr::addr_of_mut!(_sappmem),
             core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
         ),
-        &mut *addr_of_mut!(PROCESSES),
         &FAULT_RESPONSE,
         &process_mgmt_cap,
     )
@@ -691,5 +622,24 @@ pub unsafe fn main() {
         debug!("{:?}", err);
     });
 
-    board_kernel.kernel_loop(&litex_sim, chip, Some(&litex_sim.ipc), &main_loop_cap);
+    (board_kernel, litex_sim, chip)
+}
+
+/// Main function called after RAM initialized.
+///
+/// # Safety
+///
+/// ## `no_mangle`
+///
+/// We use `main` as a symbol in the arch crate's initialization routine to jump
+/// here. We guarantee no other symbol has the same name.
+///
+/// Note: this requires a global/uniqueness guarantee.
+/// See <https://github.com/tock/tock/issues/5250>.
+#[unsafe(no_mangle)]
+pub unsafe fn main() {
+    let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
+
+    let (board_kernel, board, chip) = start();
+    board_kernel.kernel_loop(&board, chip, Some(&board.ipc), &main_loop_capability);
 }

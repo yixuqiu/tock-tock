@@ -2,43 +2,46 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-// use cortexm4;
-use cortexm4::support::atomic;
+use cortexm4f::support::with_interrupts_disabled;
 use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
 use kernel::hil;
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
+};
 
 use crate::exti::{self, LineId};
 use crate::rcc;
 
-/// General-purpose I/Os
-#[repr(C)]
-struct GpioRegisters {
-    /// GPIO port mode register
-    moder: ReadWrite<u32, MODER::Register>,
-    /// GPIO port output type register
-    otyper: ReadWrite<u32, OTYPER::Register>,
-    /// GPIO port output speed register
-    ospeedr: ReadWrite<u32, OSPEEDR::Register>,
-    /// GPIO port pull-up/pull-down register
-    pupdr: ReadWrite<u32, PUPDR::Register>,
-    /// GPIO port input data register
-    idr: ReadOnly<u32, IDR::Register>,
-    /// GPIO port output data register
-    odr: ReadWrite<u32, ODR::Register>,
-    /// GPIO port bit set/reset register
-    bsrr: WriteOnly<u32, BSRR::Register>,
-    /// GPIO port configuration lock register
-    lckr: ReadWrite<u32, LCKR::Register>,
-    /// GPIO alternate function low register
-    afrl: ReadWrite<u32, AFRL::Register>,
-    /// GPIO alternate function high register
-    afrh: ReadWrite<u32, AFRH::Register>,
+register_structs! {
+    /// General-purpose I/Os
+    GpioRegisters {
+        /// GPIO port mode register
+        (0x000 => moder: ReadWrite<u32, MODER::Register>),
+        /// GPIO port output type register
+        (0x004 => otyper: ReadWrite<u32, OTYPER::Register>),
+        /// GPIO port output speed register
+        (0x008 => ospeedr: ReadWrite<u32, OSPEEDR::Register>),
+        /// GPIO port pull-up/pull-down register
+        (0x00C => pupdr: ReadWrite<u32, PUPDR::Register>),
+        /// GPIO port input data register
+        (0x010 => idr: ReadOnly<u32, IDR::Register>),
+        /// GPIO port output data register
+        (0x014 => odr: ReadWrite<u32, ODR::Register>),
+        /// GPIO port bit set/reset register
+        (0x018 => bsrr: WriteOnly<u32, BSRR::Register>),
+        /// GPIO port configuration lock register
+        (0x01C => lckr: ReadWrite<u32, LCKR::Register>),
+        /// GPIO alternate function low register
+        (0x020 => afrl: ReadWrite<u32, AFRL::Register>),
+        /// GPIO alternate function high register
+        (0x024 => afrh: ReadWrite<u32, AFRH::Register>),
+        (0x028 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -477,7 +480,7 @@ impl<'a> GpioPorts<'a> {
         self.pins[usize::from(port_num)][usize::from(pin_num)].as_ref()
     }
 
-    pub fn get_port(&self, pinid: PinId) -> &Port {
+    pub fn get_port(&self, pinid: PinId) -> &Port<'_> {
         let mut port_num: u8 = pinid as u8;
 
         // Right shift p by 4 bits, so we can get rid of pin bits
@@ -485,7 +488,7 @@ impl<'a> GpioPorts<'a> {
         &self.ports[usize::from(port_num)]
     }
 
-    pub fn get_port_from_port_id(&self, portid: PortId) -> &Port {
+    pub fn get_port_from_port_id(&self, portid: PortId) -> &Port<'_> {
         &self.ports[portid as usize]
     }
 }
@@ -690,7 +693,7 @@ pub struct Port<'a> {
     clock: PortClock<'a>,
 }
 
-impl<'a> Port<'a> {
+impl Port<'_> {
     pub fn is_enabled_clock(&self) -> bool {
         self.clock.is_enabled()
     }
@@ -1115,46 +1118,42 @@ impl hil::gpio::Input for Pin<'_> {
 
 impl<'a> hil::gpio::Interrupt<'a> for Pin<'a> {
     fn enable_interrupts(&self, mode: hil::gpio::InterruptEdge) {
-        unsafe {
-            atomic(|| {
-                self.exti_lineid.map(|lineid| {
-                    let l = lineid;
+        with_interrupts_disabled(|| {
+            self.exti_lineid.map(|lineid| {
+                let l = lineid;
 
-                    // disable the interrupt
-                    self.exti.mask_interrupt(l);
-                    self.exti.clear_pending(l);
+                // disable the interrupt
+                self.exti.mask_interrupt(l);
+                self.exti.clear_pending(l);
 
-                    match mode {
-                        hil::gpio::InterruptEdge::EitherEdge => {
-                            self.exti.select_rising_trigger(l);
-                            self.exti.select_falling_trigger(l);
-                        }
-                        hil::gpio::InterruptEdge::RisingEdge => {
-                            self.exti.select_rising_trigger(l);
-                            self.exti.deselect_falling_trigger(l);
-                        }
-                        hil::gpio::InterruptEdge::FallingEdge => {
-                            self.exti.deselect_rising_trigger(l);
-                            self.exti.select_falling_trigger(l);
-                        }
+                match mode {
+                    hil::gpio::InterruptEdge::EitherEdge => {
+                        self.exti.select_rising_trigger(l);
+                        self.exti.select_falling_trigger(l);
                     }
+                    hil::gpio::InterruptEdge::RisingEdge => {
+                        self.exti.select_rising_trigger(l);
+                        self.exti.deselect_falling_trigger(l);
+                    }
+                    hil::gpio::InterruptEdge::FallingEdge => {
+                        self.exti.deselect_rising_trigger(l);
+                        self.exti.select_falling_trigger(l);
+                    }
+                }
 
-                    self.exti.unmask_interrupt(l);
-                });
+                self.exti.unmask_interrupt(l);
             });
-        }
+        });
     }
 
     fn disable_interrupts(&self) {
-        unsafe {
-            atomic(|| {
-                self.exti_lineid.map(|lineid| {
-                    let l = lineid;
-                    self.exti.mask_interrupt(l);
-                    self.exti.clear_pending(l);
-                });
+        with_interrupts_disabled(|| {
+            self.exti_lineid.map(|lineid| {
+                let l = lineid;
+                self.exti.mask_interrupt(l);
+                self.exti.clear_pending(l);
             });
-        }
+        });
     }
 
     fn set_client(&self, client: &'a dyn hil::gpio::Client) {

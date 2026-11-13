@@ -35,14 +35,14 @@ pub enum Error {
     Busy,
 }
 
-impl Into<ErrorCode> for Error {
-    fn into(self) -> ErrorCode {
-        match self {
-            Self::AddressNak | Self::DataNak => ErrorCode::NOACK,
-            Self::ArbitrationLost => ErrorCode::RESERVE,
-            Self::Overrun => ErrorCode::SIZE,
-            Self::NotSupported => ErrorCode::NOSUPPORT,
-            Self::Busy => ErrorCode::BUSY,
+impl From<Error> for ErrorCode {
+    fn from(val: Error) -> Self {
+        match val {
+            Error::AddressNak | Error::DataNak => ErrorCode::NOACK,
+            Error::ArbitrationLost => ErrorCode::RESERVE,
+            Error::Overrun => ErrorCode::SIZE,
+            Error::NotSupported => ErrorCode::NOSUPPORT,
+            Error::Busy => ErrorCode::BUSY,
         }
     }
 }
@@ -95,7 +95,7 @@ pub trait I2CMaster<'a> {
 }
 
 /// Interface for an SMBus Master hardware driver.
-/// The device implementing this will also seperately implement
+/// The device implementing this will also separately implement
 /// I2CMaster.
 pub trait SMBusMaster<'a>: I2CMaster<'a> {
     /// Write data then read data via the I2C Master device in an SMBus
@@ -217,7 +217,7 @@ pub trait I2CHwSlaveClient {
 /// Higher-level interface for I2C Master commands that wraps in the I2C
 /// address. It gives an interface for communicating with a specific I2C
 /// device.
-pub trait I2CDevice {
+pub trait I2CDevice<'a> {
     fn enable(&self);
     fn disable(&self);
     fn write_read(
@@ -228,10 +228,13 @@ pub trait I2CDevice {
     ) -> Result<(), (Error, &'static mut [u8])>;
     fn write(&self, data: &'static mut [u8], len: usize) -> Result<(), (Error, &'static mut [u8])>;
     fn read(&self, buffer: &'static mut [u8], len: usize)
-        -> Result<(), (Error, &'static mut [u8])>;
+    -> Result<(), (Error, &'static mut [u8])>;
+
+    /// Set the client for the I2CDevice.
+    fn set_client(&'a self, client: &'a dyn I2CClient);
 }
 
-pub trait SMBusDevice: I2CDevice {
+pub trait SMBusDevice<'a>: I2CDevice<'a> {
     /// Write data then read data to a slave device in an SMBus
     /// compatible way.
     ///
@@ -325,7 +328,7 @@ impl<'a> I2CMaster<'a> for NoSMBus {
     }
 }
 
-impl<'a> SMBusMaster<'a> for NoSMBus {
+impl SMBusMaster<'_> for NoSMBus {
     fn smbus_write_read(
         &self,
         _addr: u8,

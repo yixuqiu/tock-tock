@@ -7,7 +7,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! let hmac = &earlgrey::hmac::HMAC;
 //!
 //! let mux_hmac = static_init!(MuxHmac<'static, lowrisc::hmac::Hmac>, MuxHmac::new(hmac));
@@ -60,6 +60,9 @@ use kernel::utilities::leasable_buffer::SubSliceMut;
 use kernel::{ErrorCode, ProcessId};
 
 enum ShaOperation {
+    Md5,
+    Sha1,
+    Sha224,
     Sha256,
     Sha384,
     Sha512,
@@ -70,7 +73,7 @@ enum ShaOperation {
 // Needs to be able to accommodate the largest key sizes, e.g. 512
 const TMP_KEY_BUFFER_SIZE: usize = 512 / 8;
 
-pub struct HmacDriver<'a, H: digest::Digest<'a, L>, const L: usize> {
+pub struct HmacDriver<'a, H: digest::Digest<'a, DIGEST_LEN>, const DIGEST_LEN: usize> {
     hmac: &'a H,
 
     active: Cell<bool>,
@@ -85,28 +88,34 @@ pub struct HmacDriver<'a, H: digest::Digest<'a, L>, const L: usize> {
 
     data_buffer: TakeCell<'static, [u8]>,
     data_copied: Cell<usize>,
-    dest_buffer: TakeCell<'static, [u8; L]>,
+    dest_buffer: TakeCell<'static, [u8; DIGEST_LEN]>,
 }
 
 impl<
-        'a,
-        H: digest::Digest<'a, L> + digest::HmacSha256 + digest::HmacSha384 + digest::HmacSha512,
-        const L: usize,
-    > HmacDriver<'a, H, L>
+    'a,
+    H: digest::Digest<'a, DIGEST_LEN>
+        + digest::HmacMd5
+        + digest::HmacSha1
+        + digest::HmacSha224
+        + digest::HmacSha256
+        + digest::HmacSha384
+        + digest::HmacSha512,
+    const DIGEST_LEN: usize,
+> HmacDriver<'a, H, DIGEST_LEN>
 {
     pub fn new(
         hmac: &'a H,
         data_buffer: &'static mut [u8],
-        dest_buffer: &'static mut [u8; L],
+        dest_buffer: &'static mut [u8; DIGEST_LEN],
         grant: Grant<
             App,
             UpcallCount<1>,
             AllowRoCount<{ ro_allow::COUNT }>,
             AllowRwCount<{ rw_allow::COUNT }>,
         >,
-    ) -> HmacDriver<'a, H, L> {
+    ) -> HmacDriver<'a, H, DIGEST_LEN> {
         HmacDriver {
-            hmac: hmac,
+            hmac,
             active: Cell::new(false),
             apps: grant,
             processid: OptionalCell::empty(),
@@ -128,9 +137,19 @@ impl<
                                     let mut tmp_key_buffer: [u8; TMP_KEY_BUFFER_SIZE] =
                                         [0; TMP_KEY_BUFFER_SIZE];
                                     let key_len = core::cmp::min(k.len(), TMP_KEY_BUFFER_SIZE);
+
                                     k[..key_len].copy_to_slice(&mut tmp_key_buffer[..key_len]);
 
                                     match op {
+                                        ShaOperation::Md5 => {
+                                            self.hmac.set_mode_hmacmd5(&tmp_key_buffer[..key_len])
+                                        }
+                                        ShaOperation::Sha1 => {
+                                            self.hmac.set_mode_hmacsha1(&tmp_key_buffer[..key_len])
+                                        }
+                                        ShaOperation::Sha224 => self
+                                            .hmac
+                                            .set_mode_hmacsha224(&tmp_key_buffer[..key_len]),
                                         ShaOperation::Sha256 => self
                                             .hmac
                                             .set_mode_hmacsha256(&tmp_key_buffer[..key_len]),
@@ -231,7 +250,7 @@ impl<
                 }
 
                 // If this app has a pending command let's use it.
-                app.pending_run_app.take().map_or(false, |processid| {
+                app.pending_run_app.take().is_some_and(|processid| {
                     // Mark this driver as being in use.
                     self.processid.set(processid);
                     // Actually make the buzz happen.
@@ -246,10 +265,16 @@ impl<
 }
 
 impl<
-        'a,
-        H: digest::Digest<'a, L> + digest::HmacSha256 + digest::HmacSha384 + digest::HmacSha512,
-        const L: usize,
-    > digest::ClientData<L> for HmacDriver<'a, H, L>
+    'a,
+    H: digest::Digest<'a, DIGEST_LEN>
+        + digest::HmacMd5
+        + digest::HmacSha1
+        + digest::HmacSha224
+        + digest::HmacSha256
+        + digest::HmacSha384
+        + digest::HmacSha512,
+    const DIGEST_LEN: usize,
+> digest::ClientData<DIGEST_LEN> for HmacDriver<'a, H, DIGEST_LEN>
 {
     // Because data needs to be copied from a userspace buffer into a kernel (RAM) one,
     // we always pass mut data; this callback should never be invoked.
@@ -333,9 +358,8 @@ impl<
                     // If we get here we are ready to run the digest, reset the copied data
                     if app.op.get().unwrap() == UserSpaceOp::Run {
                         if let Err(e) = self.calculate_digest() {
-                            kernel_data
-                                .schedule_upcall(0, (into_statuscode(e.into()), 0, 0))
-                                .ok();
+                            let _ =
+                                kernel_data.schedule_upcall(0, (into_statuscode(e.into()), 0, 0));
                         }
                     } else if app.op.get().unwrap() == UserSpaceOp::Verify {
                         let _ = kernel_data
@@ -361,12 +385,11 @@ impl<
                             });
 
                         if let Err(e) = self.verify_digest() {
-                            kernel_data
-                                .schedule_upcall(1, (into_statuscode(e.into()), 0, 0))
-                                .ok();
+                            let _ =
+                                kernel_data.schedule_upcall(1, (into_statuscode(e.into()), 0, 0));
                         }
                     } else {
-                        kernel_data.schedule_upcall(0, (0, 0, 0)).ok();
+                        let _ = kernel_data.schedule_upcall(0, (0, 0, 0));
                     }
                 })
                 .map_err(|err| {
@@ -383,12 +406,18 @@ impl<
 }
 
 impl<
-        'a,
-        H: digest::Digest<'a, L> + digest::HmacSha256 + digest::HmacSha384 + digest::HmacSha512,
-        const L: usize,
-    > digest::ClientHash<L> for HmacDriver<'a, H, L>
+    'a,
+    H: digest::Digest<'a, DIGEST_LEN>
+        + digest::HmacMd5
+        + digest::HmacSha1
+        + digest::HmacSha224
+        + digest::HmacSha256
+        + digest::HmacSha384
+        + digest::HmacSha512,
+    const DIGEST_LEN: usize,
+> digest::ClientHash<DIGEST_LEN> for HmacDriver<'a, H, DIGEST_LEN>
 {
-    fn hash_done(&self, result: Result<(), ErrorCode>, digest: &'static mut [u8; L]) {
+    fn hash_done(&self, result: Result<(), ErrorCode>, digest: &'static mut [u8; DIGEST_LEN]) {
         self.processid.map(|id| {
             self.apps
                 .enter(id, |_, kernel_data| {
@@ -402,20 +431,19 @@ impl<
                             dest.mut_enter(|dest| {
                                 let len = dest.len();
 
-                                if len < L {
+                                if len < DIGEST_LEN {
                                     dest.copy_from_slice(&digest[0..len]);
                                 } else {
-                                    dest[0..L].copy_from_slice(digest);
+                                    dest[0..DIGEST_LEN].copy_from_slice(digest);
                                 }
                             })
                         });
 
-                    match result {
+                    let _ = match result {
                         Ok(()) => kernel_data.schedule_upcall(0, (0, pointer as usize, 0)),
                         Err(e) => kernel_data
                             .schedule_upcall(0, (into_statuscode(e.into()), pointer as usize, 0)),
-                    }
-                    .ok();
+                    };
 
                     // Clear the current processid as it has finished running
                     self.processid.clear();
@@ -435,22 +463,31 @@ impl<
 }
 
 impl<
-        'a,
-        H: digest::Digest<'a, L> + digest::HmacSha256 + digest::HmacSha384 + digest::HmacSha512,
-        const L: usize,
-    > digest::ClientVerify<L> for HmacDriver<'a, H, L>
+    'a,
+    H: digest::Digest<'a, DIGEST_LEN>
+        + digest::HmacMd5
+        + digest::HmacSha1
+        + digest::HmacSha224
+        + digest::HmacSha256
+        + digest::HmacSha384
+        + digest::HmacSha512,
+    const DIGEST_LEN: usize,
+> digest::ClientVerify<DIGEST_LEN> for HmacDriver<'a, H, DIGEST_LEN>
 {
-    fn verification_done(&self, result: Result<bool, ErrorCode>, compare: &'static mut [u8; L]) {
+    fn verification_done(
+        &self,
+        result: Result<bool, ErrorCode>,
+        compare: &'static mut [u8; DIGEST_LEN],
+    ) {
         self.processid.map(|id| {
             self.apps
                 .enter(id, |_app, kernel_data| {
                     self.hmac.clear_data();
 
-                    match result {
+                    let _ = match result {
                         Ok(equal) => kernel_data.schedule_upcall(1, (0, equal as usize, 0)),
                         Err(e) => kernel_data.schedule_upcall(1, (into_statuscode(e.into()), 0, 0)),
-                    }
-                    .ok();
+                    };
 
                     // Clear the current processid as it has finished running
                     self.processid.clear();
@@ -473,29 +510,32 @@ impl<
 ///
 /// ### `allow_num`
 ///
-/// - `0`: Allow a buffer for storing the key.
-///        The kernel will read from this when running
-///        This should not be changed after running `run` until the HMAC
-///        has completed
-/// - `1`: Allow a buffer for storing the buffer.
-///        The kernel will read from this when running
-///        This should not be changed after running `run` until the HMAC
-///        has completed
-/// - `2`: Allow a buffer for storing the digest.
-///        The kernel will fill this with the HMAC digest before calling
-///        the `hash_done` callback.
+/// - `0`: Allow a buffer for storing the key. The kernel will read from this
+///   when running This should not be changed after running `run` until the HMAC
+///   has completed
+/// - `1`: Allow a buffer for storing the buffer. The kernel will read from this
+///   when running This should not be changed after running `run` until the HMAC
+///   has completed
+/// - `2`: Allow a buffer for storing the digest. The kernel will fill this with
+///   the HMAC digest before calling the `hash_done` callback.
 impl<
-        'a,
-        H: digest::Digest<'a, L> + digest::HmacSha256 + digest::HmacSha384 + digest::HmacSha512,
-        const L: usize,
-    > SyscallDriver for HmacDriver<'a, H, L>
+    'a,
+    H: digest::Digest<'a, DIGEST_LEN>
+        + digest::HmacMd5
+        + digest::HmacSha1
+        + digest::HmacSha224
+        + digest::HmacSha256
+        + digest::HmacSha384
+        + digest::HmacSha512,
+    const DIGEST_LEN: usize,
+> SyscallDriver for HmacDriver<'a, H, DIGEST_LEN>
 {
     // Subscribe to HmacDriver events.
     //
     // ### `subscribe_num`
     //
-    // - `0`: Subscribe to interrupts from HMAC events.
-    //        The callback signature is `fn(result: u32)`
+    // - `0`: Subscribe to interrupts from HMAC events. The callback signature
+    //   is `fn(result: u32)`
 
     /// Setup and run the HMAC hardware
     ///
@@ -630,6 +670,21 @@ impl<
                                 app.sha_operation = Some(ShaOperation::Sha512);
                                 CommandReturn::success()
                             }
+                            // SHA224
+                            3 => {
+                                app.sha_operation = Some(ShaOperation::Sha224);
+                                CommandReturn::success()
+                            }
+                            // SHA1
+                            4 => {
+                                app.sha_operation = Some(ShaOperation::Sha1);
+                                CommandReturn::success()
+                            }
+                            // Md5
+                            5 => {
+                                app.sha_operation = Some(ShaOperation::Md5);
+                                CommandReturn::success()
+                            }
                             _ => CommandReturn::failure(ErrorCode::NOSUPPORT),
                         }
                     }
@@ -669,12 +724,10 @@ impl<
                     3 => {
                         if app_match {
                             if let Err(e) = self.calculate_digest() {
-                                kernel_data
-                                    .schedule_upcall(
-                                        0,
-                                        (kernel::errorcode::into_statuscode(e.into()), 0, 0),
-                                    )
-                                    .ok();
+                                let _ = kernel_data.schedule_upcall(
+                                    0,
+                                    (kernel::errorcode::into_statuscode(e.into()), 0, 0),
+                                );
                             }
                             CommandReturn::success()
                         } else {
@@ -727,9 +780,8 @@ impl<
                                 });
 
                             if let Err(e) = self.verify_digest() {
-                                kernel_data
-                                    .schedule_upcall(1, (into_statuscode(e.into()), 0, 0))
-                                    .ok();
+                                let _ = kernel_data
+                                    .schedule_upcall(1, (into_statuscode(e.into()), 0, 0));
                             }
                             CommandReturn::success()
                         } else {

@@ -6,13 +6,13 @@
 
 use core::marker::PhantomData;
 
+use kernel::ErrorCode;
 use kernel::hil::time::{self, Alarm, Counter, Ticks, Ticks64, Time};
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::register_bitfields;
-use kernel::utilities::registers::{register_structs, ReadWrite};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{ReadWrite, register_structs};
 
 pub const TIMG0_BASE: StaticRef<TimgRegisters> =
     unsafe { StaticRef::new(0x6001_F000 as *const TimgRegisters) };
@@ -194,9 +194,11 @@ impl<F: time::Frequency, const C3: bool> time::Time for TimG<'_, F, C3> {
     type Ticks = Ticks64;
 
     fn now(&self) -> Self::Ticks {
-        // a write (of any value) to T0UPDATE stores the
-        // current counter value to T0LO and T0HI
+        // A write (of any value) to T0UPDATE stores the current counter value
+        // to T0LO and T0HI. When T0UPDATE is cleared the value is ready.
         self.registers.t0update.set(0xABC);
+        while self.registers.t0update.get() != 0 {}
+
         Self::Ticks::from(
             self.registers.t0lo.get() as u64 + ((self.registers.t0hi.get() as u64) << 32),
         )
@@ -204,10 +206,6 @@ impl<F: time::Frequency, const C3: bool> time::Time for TimG<'_, F, C3> {
 }
 
 impl<'a, F: time::Frequency, const C3: bool> Counter<'a> for TimG<'a, F, C3> {
-    fn set_overflow_client(&self, _client: &'a dyn time::OverflowClient) {
-        // We have no way to know when this happens
-    }
-
     fn start(&self) -> Result<(), ErrorCode> {
         self.registers.t0config.write(CONFIG::EN::SET);
 
@@ -215,7 +213,7 @@ impl<'a, F: time::Frequency, const C3: bool> Counter<'a> for TimG<'a, F, C3> {
     }
 
     fn stop(&self) -> Result<(), ErrorCode> {
-        self.registers.t0config.write(CONFIG::EN::CLEAR);
+        self.registers.t0config.modify(CONFIG::EN::CLEAR);
 
         Ok(())
     }
@@ -247,6 +245,7 @@ impl<'a, F: time::Frequency, const C3: bool> Alarm<'a> for TimG<'a, F, C3> {
 
         self.registers.t0config.modify(
             CONFIG::USE_XTAL.val(self.clocksource as u32)
+                + CONFIG::AUTORELOAD::CLEAR
                 + CONFIG::INCREASE::SET
                 + CONFIG::DIVIDER.val(2 * (2 - self.clocksource as u32)),
         );

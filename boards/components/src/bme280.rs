@@ -28,6 +28,7 @@ use capsules_extra::bme280::Bme280;
 use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::i2c;
+use kernel::hil::i2c::I2CDevice as _;
 
 // Setup static space for the objects.
 #[macro_export]
@@ -44,7 +45,7 @@ macro_rules! bme280_component_static {
         );
 
         (i2c_device, i2c_buffer, bme280)
-    };};
+    }};
 }
 
 pub type Bme280ComponentType<I> = capsules_extra::bme280::Bme280<'static, I>;
@@ -58,7 +59,7 @@ impl<I: 'static + i2c::I2CMaster<'static>> Bme280Component<I> {
     pub fn new(i2c: &'static MuxI2C<'static, I>, i2c_address: u8) -> Self {
         Bme280Component {
             i2c_mux: i2c,
-            i2c_address: i2c_address,
+            i2c_address,
         }
     }
 }

@@ -9,15 +9,15 @@ use core::marker::PhantomData;
 use core::ptr::addr_of;
 use kernel::platform::chip::{Chip, InterruptService};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use rv32i::csr::{mcause, mie::mie, mtvec::mtvec, CSR};
+use rv32i::csr::{CSR, mcause, mie::mie, mtvec::mtvec};
 use rv32i::pmp::{PMPUserMPU, TORUserPMP};
 use rv32i::syscall::SysCall;
 
 use crate::chip_config::EarlGreyConfig;
 use crate::interrupts;
 use crate::pinmux_config::EarlGreyPinmuxConfig;
-use crate::plic::Plic;
 use crate::plic::PLIC;
+use crate::plic::Plic;
 
 pub struct EarlGrey<
     'a,
@@ -54,8 +54,8 @@ pub struct EarlGreyDefaultPeripherals<'a, CFG: EarlGreyConfig, PINMUX: EarlGreyP
     _pinmux: PhantomData<PINMUX>,
 }
 
-impl<'a, CFG: EarlGreyConfig, PINMUX: EarlGreyPinmuxConfig>
-    EarlGreyDefaultPeripherals<'a, CFG, PINMUX>
+impl<CFG: EarlGreyConfig, PINMUX: EarlGreyPinmuxConfig>
+    EarlGreyDefaultPeripherals<'_, CFG, PINMUX>
 {
     pub fn new() -> Self {
         Self {
@@ -95,10 +95,10 @@ impl<'a, CFG: EarlGreyConfig, PINMUX: EarlGreyPinmuxConfig>
     }
 }
 
-impl<'a, CFG: EarlGreyConfig, PINMUX: EarlGreyPinmuxConfig> InterruptService
-    for EarlGreyDefaultPeripherals<'a, CFG, PINMUX>
+impl<CFG: EarlGreyConfig, PINMUX: EarlGreyPinmuxConfig> InterruptService
+    for EarlGreyDefaultPeripherals<'_, CFG, PINMUX>
 {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
             interrupts::UART0_TX_WATERMARK..=interrupts::UART0_RX_PARITYERR => {
                 self.uart0.handle_interrupt();
@@ -138,13 +138,13 @@ impl<'a, CFG: EarlGreyConfig, PINMUX: EarlGreyPinmuxConfig> InterruptService
 }
 
 impl<
-        'a,
-        const MPU_REGIONS: usize,
-        I: InterruptService + 'a,
-        CFG: EarlGreyConfig,
-        PINMUX: EarlGreyPinmuxConfig,
-        PMP: TORUserPMP<{ MPU_REGIONS }> + Display + 'static,
-    > EarlGrey<'a, MPU_REGIONS, I, CFG, PINMUX, PMP>
+    'a,
+    const MPU_REGIONS: usize,
+    I: InterruptService + 'a,
+    CFG: EarlGreyConfig,
+    PINMUX: EarlGreyPinmuxConfig,
+    PMP: TORUserPMP<{ MPU_REGIONS }> + Display + 'static,
+> EarlGrey<'a, MPU_REGIONS, I, CFG, PINMUX, PMP>
 {
     pub unsafe fn new(
         plic_interrupt_service: &'a I,
@@ -196,7 +196,7 @@ impl<
                         // In order to stop an interrupt loop, we first disable the
                         // interrupt. `service_pending_interrupts()` will re-enable
                         // interrupts once they are all handled.
-                        self.atomic(|| {
+                        self.with_interrupts_disabled(|| {
                             // Safe as interrupts are disabled
                             self.plic.disable(interrupt);
                             self.plic.complete(interrupt);
@@ -211,7 +211,7 @@ impl<
             match interrupt {
                 interrupts::HMAC_HMACDONE..=interrupts::HMAC_HMACERR => {}
                 _ => {
-                    self.atomic(|| {
+                    self.with_interrupts_disabled(|| {
                         self.plic.complete(interrupt);
                     });
                 }
@@ -254,16 +254,19 @@ impl<
 }
 
 impl<
-        'a,
-        const MPU_REGIONS: usize,
-        I: InterruptService + 'a,
-        CFG: EarlGreyConfig,
-        PINMUX: EarlGreyPinmuxConfig,
-        PMP: TORUserPMP<{ MPU_REGIONS }> + Display + 'static,
-    > kernel::platform::chip::Chip for EarlGrey<'a, MPU_REGIONS, I, CFG, PINMUX, PMP>
+    'a,
+    const MPU_REGIONS: usize,
+    I: InterruptService + 'a,
+    CFG: EarlGreyConfig,
+    PINMUX: EarlGreyPinmuxConfig,
+    PMP: TORUserPMP<{ MPU_REGIONS }> + Display + 'static,
+> kernel::platform::chip::Chip for EarlGrey<'a, MPU_REGIONS, I, CFG, PINMUX, PMP>
 {
     type MPU = PMPUserMPU<MPU_REGIONS, PMP>;
     type UserspaceKernelBoundary = SysCall;
+    type ThreadIdProvider = rv32i::thread_id::RiscvThreadIdProvider;
+
+    fn init() {}
 
     fn mpu(&self) -> &Self::MPU {
         &self.mpu
@@ -304,20 +307,22 @@ impl<
         }
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        rv32i::support::atomic(f)
+        rv32i::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, writer: &mut dyn Write) {
+    unsafe fn print_state(this: Option<&Self>, writer: &mut dyn Write) {
         let _ = writer.write_fmt(format_args!(
             "\r\n---| OpenTitan Earlgrey configuration for {} |---",
             CFG::NAME
         ));
         rv32i::print_riscv_state(writer);
-        let _ = writer.write_fmt(format_args!("{}", self.mpu.pmp));
+        if let Some(t) = this {
+            let _ = writer.write_fmt(format_args!("{}", t.mpu.pmp));
+        }
     }
 }
 
@@ -374,12 +379,12 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             // Once claimed this interrupt won't fire until it's completed
             // NOTE: The interrupt is no longer pending in the PLIC
             loop {
-                let interrupt = PLIC.next_pending();
+                let interrupt = (*addr_of!(PLIC)).next_pending();
 
                 match interrupt {
                     Some(irq) => {
                         // Safe as interrupts are disabled
-                        PLIC.save_interrupt(irq);
+                        (*addr_of!(PLIC)).save_interrupt(irq);
                     }
                     None => {
                         // Enable generic interrupts
@@ -390,7 +395,7 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             }
         }
 
-        mcause::Interrupt::Unknown => {
+        mcause::Interrupt::Unknown(_) => {
             panic!("interrupt of unknown cause");
         }
     }
@@ -400,7 +405,7 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
 ///
 /// For the Ibex this gets called when an interrupt occurs while the chip is
 /// in kernel mode.
-#[export_name = "_start_trap_rust_from_kernel"]
+#[export_name = "start_trap_rust_from_kernel"]
 pub unsafe extern "C" fn start_trap_rust() {
     match mcause::Trap::from(CSR.mcause.extract()) {
         mcause::Trap::Interrupt(interrupt) => {
@@ -413,6 +418,7 @@ pub unsafe extern "C" fn start_trap_rust() {
 }
 
 /// Function that gets called if an interrupt occurs while an app was running.
+///
 /// mcause is passed in, and this function should correctly handle disabling the
 /// interrupt that fired so that it does not trigger again.
 #[export_name = "_disable_interrupt_trap_rust_from_app"]
@@ -428,16 +434,23 @@ pub unsafe extern "C" fn disable_interrupt_trap_handler(mcause_val: u32) {
 }
 
 pub unsafe fn configure_trap_handler() {
+    // The common start_trap handler uses mscratch to determine
+    // whether we are executing kernel or process code. Set to `0` to
+    // indicate we're in the kernel right now.
+    CSR.mscratch.set(0);
+
     // The Ibex CPU does not support non-vectored trap entries.
-    CSR.mtvec
-        .write(mtvec::trap_addr.val(_start_trap_vectored as usize >> 2) + mtvec::mode::Vectored)
+    CSR.mtvec.write(
+        mtvec::trap_addr.val(earlgrey_start_trap_vectored as extern "C" fn() -> ! as usize >> 2)
+            + mtvec::mode::Vectored,
+    );
 }
 
 // Mock implementation for crate tests that does not include the section
 // specifier, as the test will not use our linker script, and the host
 // compilation environment may not allow the section name.
 #[cfg(not(all(target_arch = "riscv32", target_os = "none")))]
-pub extern "C" fn _start_trap_vectored() {
+pub extern "C" fn earlgrey_start_trap_vectored() -> ! {
     use core::hint::unreachable_unchecked;
     unsafe {
         unreachable_unchecked();
@@ -445,55 +458,68 @@ pub extern "C" fn _start_trap_vectored() {
 }
 
 #[cfg(all(target_arch = "riscv32", target_os = "none"))]
-extern "C" {
-    pub fn _start_trap_vectored();
+// Only apply the `link_section` attribute when actually targeting bare-metal
+// RISC-V (`target_os = "none"`). Non-bare-metal object formats (Mach-O, PE,
+// ...) reject a bare section name like this, yielding errors such as:
+// `mach-o section specifier requires a segment and section separated by a
+// comma`.
+#[cfg_attr(
+    all(target_arch = "riscv32", target_os = "none"),
+    link_section = ".riscv.trap_vectored"
+)]
+#[unsafe(naked)]
+pub extern "C" fn earlgrey_start_trap_vectored() -> ! {
+    use core::arch::naked_asm;
+    // According to the Ibex user manual:
+    // [NMI] has interrupt ID 31, i.e., it has the highest priority of all
+    // interrupts and the core jumps to the trap-handler base address (in
+    // mtvec) plus 0x7C to handle the NMI.
+    //
+    // Below are 32 (non-compressed) jumps to cover the entire possible
+    // range of vectored traps.
+    naked_asm!(
+        "
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+    j {start_trap}
+        ",
+        start_trap = sym rv32i::start_trap,
+    );
 }
 
-#[cfg(all(target_arch = "riscv32", target_os = "none"))]
-// According to the Ibex user manual:
-// [NMI] has interrupt ID 31, i.e., it has the highest priority of all
-// interrupts and the core jumps to the trap-handler base address (in
-// mtvec) plus 0x7C to handle the NMI.
-//
-// Below are 32 (non-compressed) jumps to cover the entire possible
-// range of vectored traps.
-core::arch::global_asm!(
-    "
-            .section .riscv.trap_vectored, \"ax\"
-            .globl _start_trap_vectored
-          _start_trap_vectored:
-
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-            j _start_trap
-        "
-);
+/// Array used to track the "trap handler active" state per hart.
+///
+/// The `riscv` crate requires chip crates to allocate an array to
+/// track whether any given hart is currently in a trap handler. The
+/// array must be zero-initialized.
+#[export_name = "_trap_handler_active"]
+static mut TRAP_HANDLER_ACTIVE: [usize; 1] = [0; 1];

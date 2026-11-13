@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-use crate::tests::run_kernel_op;
 use crate::PERIPHERALS;
+use crate::tests::run_kernel_op;
 use core::cell::Cell;
 use kernel::debug;
 use kernel::hil::i2c::I2CHwSlaveClient;
@@ -39,7 +39,7 @@ impl<'a> I2CHwSlaveClient for I2CSlaveCallback {
     fn command_complete(
         &self,
         buffer: &'static mut [u8],
-        length: usize,
+        _length: usize,
         transmission_type: SlaveTransmissionType,
     ) {
         match transmission_type {
@@ -74,7 +74,7 @@ unsafe fn static_init_test_cb() -> &'static I2CSlaveCallback {
 
 #[test_case]
 fn i2c_slave_receive() {
-    let perf = unsafe { PERIPHERALS.unwrap() };
+    let perf = *PERIPHERALS.get().unwrap();
     let i2c_slave = &perf.ios;
     let cb = unsafe { static_init_test_cb() };
     let received_data = cb.received_data.take().unwrap();

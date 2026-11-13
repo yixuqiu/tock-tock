@@ -17,14 +17,14 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::{hil, static_init};
-//! # use capsules::virtual_uart::{MuxUart, UartDevice};
+//! # use capsules_core::virtual_uart::{MuxUart, UartDevice};
 //!
 //! // Create a shared UART channel for the console and for kernel debug.
 //! let uart_mux = static_init!(
 //!     MuxUart<'static>,
-//!     MuxUart::new(&sam4l::usart::USART0, &mut capsules::virtual_uart::RX_BUF)
+//!     MuxUart::new(&sam4l::usart::USART0, &mut capsules_core::virtual_uart::RX_BUF)
 //! );
 //! hil::uart::UART::set_receive_client(&sam4l::usart::USART0, uart_mux);
 //! hil::uart::UART::set_transmit_client(&sam4l::usart::USART0, uart_mux);
@@ -33,11 +33,11 @@
 //! let console_uart = static_init!(UartDevice, UartDevice::new(uart_mux, true));
 //! console_uart.setup(); // This is important!
 //! let console = static_init!(
-//!     capsules::console::Console<'static>,
-//!     capsules::console::Console::new(
+//!     capsules_core::console::Console<'static>,
+//!     capsules_core::console::Console::new(
 //!         console_uart,
-//!         &mut capsules::console::WRITE_BUF,
-//!         &mut capsules::console::READ_BUF,
+//!         &mut capsules_core::console::WRITE_BUF,
+//!         &mut capsules_core::console::READ_BUF,
 //!         board_kernel.create_grant(&grant_cap)
 //!     )
 //! );
@@ -48,11 +48,11 @@
 use core::cell::Cell;
 use core::cmp;
 
+use kernel::ErrorCode;
 use kernel::collections::list::{List, ListLink, ListNode};
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil::uart;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 pub const RX_BUF_LEN: usize = 64;
 
@@ -66,7 +66,7 @@ pub struct MuxUart<'a> {
     deferred_call: DeferredCall,
 }
 
-impl<'a> uart::TransmitClient for MuxUart<'a> {
+impl uart::TransmitClient for MuxUart<'_> {
     fn transmitted_buffer(
         &self,
         tx_buffer: &'static mut [u8],
@@ -81,7 +81,7 @@ impl<'a> uart::TransmitClient for MuxUart<'a> {
     }
 }
 
-impl<'a> uart::ReceiveClient for MuxUart<'a> {
+impl uart::ReceiveClient for MuxUart<'_> {
     fn received_buffer(
         &self,
         buffer: &'static mut [u8],
@@ -307,8 +307,7 @@ impl<'a> MuxUart<'a> {
     /// requiring a callback with an error condition; if the operation
     /// is executed synchronously, the callback may be reentrant (executed
     /// during the downcall). Please see
-    ///
-    /// https://github.com/tock/tock/issues/1496
+    /// <https://github.com/tock/tock/issues/1496>
     fn do_next_op_async(&self) {
         self.deferred_call.set();
     }
@@ -356,8 +355,8 @@ impl<'a> UartDevice<'a> {
     pub fn new(mux: &'a MuxUart<'a>, receiver: bool) -> UartDevice<'a> {
         UartDevice {
             state: Cell::new(UartDeviceReceiveState::Idle),
-            mux: mux,
-            receiver: receiver,
+            mux,
+            receiver,
             tx_buffer: TakeCell::empty(),
             transmitting: Cell::new(false),
             rx_buffer: TakeCell::empty(),
@@ -376,7 +375,7 @@ impl<'a> UartDevice<'a> {
     }
 }
 
-impl<'a> uart::TransmitClient for UartDevice<'a> {
+impl uart::TransmitClient for UartDevice<'_> {
     fn transmitted_buffer(
         &self,
         tx_buffer: &'static mut [u8],
@@ -396,7 +395,7 @@ impl<'a> uart::TransmitClient for UartDevice<'a> {
         });
     }
 }
-impl<'a> uart::ReceiveClient for UartDevice<'a> {
+impl uart::ReceiveClient for UartDevice<'_> {
     fn received_buffer(
         &self,
         rx_buffer: &'static mut [u8],
@@ -450,7 +449,7 @@ impl<'a> uart::Transmit<'a> for UartDevice<'a> {
             Err(ErrorCode::BUSY)
         } else {
             self.transmitting.set(true);
-            self.operation.set(Operation::TransmitWord { word: word });
+            self.operation.set(Operation::TransmitWord { word });
             self.mux.do_next_op_async();
             Ok(())
         }

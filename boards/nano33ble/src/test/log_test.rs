@@ -35,7 +35,7 @@
 use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use capsules_extra::log;
 use core::cell::Cell;
-use core::ptr::addr_of_mut;
+use kernel::ErrorCode;
 use kernel::debug;
 use kernel::hil::flash;
 use kernel::hil::gpio::{self, Interrupt, InterruptEdge};
@@ -44,9 +44,8 @@ use kernel::hil::time::{Alarm, AlarmClient, ConvertTicks};
 use kernel::static_init;
 use kernel::storage_volume;
 use kernel::utilities::cells::{NumericCellExt, TakeCell};
-use kernel::ErrorCode;
 use nrf52840::{
-    gpio::{GPIOPin, Pin},
+    gpio::Pin,
     nvmc::{NrfPage, Nvmc},
     rtc::Rtc,
 };
@@ -75,16 +74,18 @@ pub unsafe fn run(mux_alarm: &'static MuxAlarm<'static, Rtc>, flash_controller: 
     alarm.setup();
 
     // Create and run test for log storage.
+    let buffer = static_init!([u8; 8], [0; 8]);
+    let dummy_buffer = static_init!([u8; 4160], [0; 4160]);
     let test = static_init!(
         LogTest<VirtualMuxAlarm<'static, Rtc>>,
-        LogTest::new(log, &mut *addr_of_mut!(BUFFER), alarm, &TEST_OPS)
+        LogTest::new(log, buffer, dummy_buffer, alarm, &TEST_OPS)
     );
     log.set_read_client(test);
     log.set_append_client(test);
     test.alarm.set_alarm_client(test);
 
     // Configure GPIO pin P1.08 as the log erase pin.
-    let log_erase_pin = GPIOPin::new(Pin::P1_08);
+    let log_erase_pin = nrf52840::gpio::nrf52840_gpio_create_pin(Pin::P1_08);
     log_erase_pin.enable_interrupts(InterruptEdge::RisingEdge);
     log_erase_pin.set_client(test);
 
@@ -128,14 +129,10 @@ static TEST_OPS: [TestOp; 24] = [
     TestOp::Sync,
 ];
 
-// Buffer for reading from and writing to in the log tests.
-static mut BUFFER: [u8; 8] = [0; 8];
 // Length of buffer to actually use.
 const BUFFER_LEN: usize = 8;
 // Amount to shift value before adding to magic in order to fit in buffer.
 const VALUE_SHIFT: usize = 8 * (8 - BUFFER_LEN);
-// Dummy buffer for testing bad writes.
-static mut DUMMY_BUFFER: [u8; 4160] = [0; 4160];
 // Time to wait in between log operations.
 const WAIT_MS: u32 = 10;
 // Magic number to write to log storage (+ offset).
@@ -168,6 +165,8 @@ type Log = log::Log<'static, Nvmc>;
 struct LogTest<A: 'static + Alarm<'static>> {
     log: &'static Log,
     buffer: TakeCell<'static, [u8]>,
+    // Dummy buffer for testing bad writes.
+    dummy_buffer: TakeCell<'static, [u8]>,
     alarm: &'static A,
     state: Cell<TestState>,
     ops: &'static [TestOp],
@@ -181,6 +180,7 @@ impl<A: 'static + Alarm<'static>> LogTest<A> {
     fn new(
         log: &'static Log,
         buffer: &'static mut [u8],
+        dummy_buffer: &'static mut [u8],
         alarm: &'static A,
         ops: &'static [TestOp],
     ) -> LogTest<A> {
@@ -199,6 +199,7 @@ impl<A: 'static + Alarm<'static>> LogTest<A> {
         LogTest {
             log,
             buffer: TakeCell::new(buffer),
+            dummy_buffer: TakeCell::new(dummy_buffer),
             alarm,
             state: Cell::new(TestState::Operate),
             ops,
@@ -384,13 +385,13 @@ impl<A: 'static + Alarm<'static>> LogTest<A> {
             .unwrap();
 
         // Ensure failure if entry is too large to fit within a single flash page.
-        unsafe {
-            match self
-                .log
-                .append(&mut *addr_of_mut!(DUMMY_BUFFER), DUMMY_BUFFER.len())
-            {
-                Ok(()) => panic!("Appending with too-small buffer succeeded unexpectedly!"),
-                Err((error, _original_buffer)) => assert_eq!(error, ErrorCode::SIZE),
+        let dummy_buffer = self.dummy_buffer.take().unwrap();
+        let len = dummy_buffer.len();
+        match self.log.append(dummy_buffer, len) {
+            Ok(()) => panic!("Appending with too-small buffer succeeded unexpectedly!"),
+            Err((error, original_buffer)) => {
+                self.dummy_buffer.replace(original_buffer);
+                assert_eq!(error, ErrorCode::SIZE);
             }
         }
 
@@ -525,16 +526,17 @@ impl<A: Alarm<'static>> LogWriteClient for LogTest<A> {
                 let expected_records_lost =
                     self.write_val.get() > entry_id_to_test_value(TEST_LOG.len());
                 if records_lost && records_lost != expected_records_lost {
-                    panic!("Append callback states records_lost = {}, expected {} (write #{}, offset {:?})!",
-                           records_lost,
-                           expected_records_lost,
-                           self.write_val.get(),
-                           self.log.log_end()
+                    panic!(
+                        "Append callback states records_lost = {}, expected {} (write #{}, offset {:?})!",
+                        records_lost,
+                        expected_records_lost,
+                        self.write_val.get(),
+                        self.log.log_end()
                     );
                 }
 
                 // Stop writing after `ENTRIES_PER_WRITE` entries have been written.
-                if (self.write_val.get() + 1) % ENTRIES_PER_WRITE == 0 {
+                if (self.write_val.get() + 1).is_multiple_of(ENTRIES_PER_WRITE) {
                     debug!(
                         "WRITE DONE: READ OFFSET: {:?} / WRITE OFFSET: {:?}",
                         self.log.next_read_entry_id(),

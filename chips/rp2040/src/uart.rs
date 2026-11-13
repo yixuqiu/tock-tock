@@ -3,17 +3,17 @@
 // Copyright Tock Contributors 2022.
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::hil::uart::ReceiveClient;
 use kernel::hil::uart::{
     Configure, Parameters, Parity, Receive, StopBits, Transmit, TransmitClient, Width,
 };
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
 use crate::clocks;
 
@@ -380,7 +380,7 @@ const UART1_BASE: StaticRef<UartRegisters> =
 
 pub struct Uart<'a> {
     registers: StaticRef<UartRegisters>,
-    clocks: OptionalCell<&'a clocks::Clocks>,
+    clocks: &'a clocks::Clocks,
 
     tx_client: OptionalCell<&'a dyn TransmitClient>,
     rx_client: OptionalCell<&'a dyn ReceiveClient>,
@@ -399,10 +399,10 @@ pub struct Uart<'a> {
 }
 
 impl<'a> Uart<'a> {
-    pub fn new_uart0() -> Self {
+    pub fn new_uart0(clocks: &'a clocks::Clocks) -> Self {
         Self {
             registers: UART0_BASE,
-            clocks: OptionalCell::empty(),
+            clocks,
 
             tx_client: OptionalCell::empty(),
             rx_client: OptionalCell::empty(),
@@ -420,10 +420,10 @@ impl<'a> Uart<'a> {
             deferred_call: DeferredCall::new(),
         }
     }
-    pub fn new_uart1() -> Self {
+    pub fn new_uart1(clocks: &'a clocks::Clocks) -> Self {
         Self {
             registers: UART1_BASE,
-            clocks: OptionalCell::empty(),
+            clocks,
 
             tx_client: OptionalCell::empty(),
             rx_client: OptionalCell::empty(),
@@ -439,10 +439,6 @@ impl<'a> Uart<'a> {
 
             deferred_call: DeferredCall::new(),
         }
-    }
-
-    pub(crate) fn set_clocks(&self, clocks: &'a clocks::Clocks) {
-        self.clocks.set(clocks);
     }
 
     pub fn enable(&self) {
@@ -596,14 +592,12 @@ impl Configure for Uart<'_> {
         self.disable();
         self.registers.uartlcr_h.modify(UARTLCR_H::FEN::CLEAR);
 
-        let clk = self.clocks.map_or(125_000_000, |clocks| {
-            clocks.get_frequency(clocks::Clock::Peripheral)
-        });
+        let clk = self.clocks.get_frequency(clocks::Clock::Peripheral);
 
         // Calculate baud rate
         let baud_rate_div = 8 * clk / params.baud_rate;
         let mut baud_ibrd = baud_rate_div >> 7;
-        let mut baud_fbrd = ((baud_rate_div & 0x7f) + 1) / 2;
+        let mut baud_fbrd = (baud_rate_div & 0x7f).div_ceil(2);
 
         if baud_ibrd == 0 {
             baud_ibrd = 1;

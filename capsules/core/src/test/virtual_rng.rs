@@ -10,9 +10,9 @@ use crate::virtualizers::virtual_rng::VirtualRngMasterDevice;
 
 use core::cell::Cell;
 
+use kernel::ErrorCode;
 use kernel::debug;
 use kernel::hil::rng::{Client, Continue, Rng};
-use kernel::ErrorCode;
 
 const NUM_REQUESTS: usize = 2;
 
@@ -26,8 +26,8 @@ pub struct TestRng<'a> {
 impl<'a> TestRng<'a> {
     pub fn new(device_id: usize, device: &'a VirtualRngMasterDevice<'a>) -> TestRng<'a> {
         TestRng {
-            device_id: device_id,
-            device: device,
+            device_id,
+            device,
             num_requests: Cell::new(NUM_REQUESTS),
         }
     }
@@ -40,7 +40,7 @@ impl<'a> TestRng<'a> {
     }
 }
 
-impl<'a> Client for TestRng<'a> {
+impl Client for TestRng<'_> {
     fn randomness_available(
         &self,
         randomness: &mut dyn Iterator<Item = u32>,

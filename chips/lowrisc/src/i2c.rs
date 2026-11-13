@@ -10,10 +10,10 @@ use crate::registers::i2c_regs::{
 use core::cell::Cell;
 use kernel::hil;
 use kernel::hil::i2c;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::StaticRef;
 
 pub use crate::registers::i2c_regs::I2cRegisters;
 
@@ -36,7 +36,7 @@ pub struct I2c<'a> {
     read_index: Cell<usize>,
 }
 
-impl<'a> I2c<'_> {
+impl<'a> I2c<'a> {
     pub fn new(base: StaticRef<I2cRegisters>, clock_period_nanos: u32) -> I2c<'a> {
         I2c {
             registers: base,

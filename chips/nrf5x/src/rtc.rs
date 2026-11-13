@@ -5,18 +5,15 @@
 //! RTC driver, nRF5X-family
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil::time::{self, Alarm, Ticks, Time};
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
-
-const RTC1_BASE: StaticRef<RtcRegisters> =
-    unsafe { StaticRef::new(0x40011000 as *const RtcRegisters) };
+use kernel::utilities::registers::{ReadOnly, ReadWrite, WriteOnly, register_bitfields};
 
 #[repr(C)]
-struct RtcRegisters {
+pub struct RtcRegisters {
     /// Start RTC Counter.
     tasks_start: WriteOnly<u32, Task::Register>,
     /// Stop RTC Counter.
@@ -95,10 +92,10 @@ pub struct Rtc<'a> {
     enabled: Cell<bool>,
 }
 
-impl<'a> Rtc<'a> {
-    pub const fn new() -> Self {
+impl Rtc<'_> {
+    pub const fn new(registers: StaticRef<RtcRegisters>) -> Self {
         Self {
-            registers: RTC1_BASE,
+            registers,
             overflow_client: OptionalCell::empty(),
             alarm_client: OptionalCell::empty(),
             enabled: Cell::new(false),
@@ -130,11 +127,6 @@ impl Time for Rtc<'_> {
 }
 
 impl<'a> time::Counter<'a> for Rtc<'a> {
-    fn set_overflow_client(&self, client: &'a dyn time::OverflowClient) {
-        self.overflow_client.set(client);
-        self.registers.intenset.write(Inte::OVRFLW::SET);
-    }
-
     fn start(&self) -> Result<(), ErrorCode> {
         self.registers.prescaler.write(Prescaler::PRESCALER.val(0));
         self.registers.tasks_start.write(Task::ENABLE::SET);
@@ -156,6 +148,14 @@ impl<'a> time::Counter<'a> for Rtc<'a> {
 
     fn is_running(&self) -> bool {
         self.enabled.get()
+    }
+}
+
+#[allow(deprecated)]
+impl<'a> time::CounterOverflow<'a> for Rtc<'a> {
+    fn set_overflow_client(&self, client: &'a dyn time::OverflowClient) {
+        self.overflow_client.set(client);
+        self.registers.intenset.write(Inte::OVRFLW::SET);
     }
 }
 

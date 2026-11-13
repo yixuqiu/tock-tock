@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-use cortexm4::{
-    initialize_ram_jump_to_main, nvic, scb, unhandled_interrupt, CortexM4, CortexMVariant,
-};
+use cortexm4f::{CortexM4F, CortexMVariant, initialize_ram_jump_to_main, scb, unhandled_interrupt};
 
 /*
  * Adapted from crt1.c which was relicensed by the original author from
@@ -36,7 +34,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     // NMI
     unhandled_interrupt,
     // Hard Fault
-    CortexM4::HARD_FAULT_HANDLER,
+    CortexM4F::HARD_FAULT_HANDLER,
     // Memory Management Fault
     unhandled_interrupt,
     // Bus Fault
@@ -52,7 +50,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     // Reserved
     unhandled_interrupt,
     // SVCall
-    CortexM4::SVC_HANDLER,
+    CortexM4F::SVC_HANDLER,
     // Reserved for Debug
     unhandled_interrupt,
     // Reserved
@@ -60,7 +58,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     // PendSv
     unhandled_interrupt,
     // SysTick
-    CortexM4::SYSTICK_HANDLER,
+    CortexM4F::SYSTICK_HANDLER,
 ];
 
 #[cfg_attr(
@@ -69,26 +67,37 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
 )]
 // used Ensures that the symbol is kept until the final binary
 #[cfg_attr(all(target_arch = "arm", target_os = "none"), used)]
-pub static IRQS: [unsafe extern "C" fn(); 80] = [CortexM4::GENERIC_ISR; 80];
+pub static IRQS: [unsafe extern "C" fn(); 80] = [CortexM4F::GENERIC_ISR; 80];
 
-#[no_mangle]
-pub unsafe extern "C" fn init() {
+/// Apply fixes for various nRF52 errata
+///
+/// # Safety
+///
+/// Fixing these errata requires writing to various memory locations. These
+/// operations are safe as long as this is only run on an nRF52 MCU.
+pub(crate) unsafe fn fix_errata() {
     // Apply early initialization workarounds for anomalies documented on
     // 2015-12-11 nRF52832 Errata v1.2
     // http://infocenter.nordicsemi.com/pdf/nRF52832_Errata_v1.2.pdf
 
     // Workaround for Errata 12
     // "COMP: Reference ladder not correctly callibrated" found at the Errate doc
-    *(0x40013540i32 as *mut u32) = (*(0x10000324i32 as *mut u32) & 0x1f00u32) >> 8i32;
+    core::ptr::write_volatile(
+        0x40013540i32 as *mut u32,
+        (core::ptr::read_volatile(0x10000324i32 as *mut u32) & 0x1f00u32) >> 8i32,
+    );
 
     // Workaround for Errata 16
     // "System: RAM may be corrupt on wakeup from CPU IDLE" found at the Errata doc
-    *(0x4007c074i32 as *mut u32) = 3131961357u32;
+    core::ptr::write_volatile(0x4007c074i32 as *mut u32, 3131961357u32);
 
     // Workaround for Errata 31
     // "CLOCK: Calibration values are not correctly loaded from FICR at reset"
     // found at the Errata doc
-    *(0x4000053ci32 as *mut u32) = (*(0x10000244i32 as *mut u32) & 0xe000u32) >> 13i32;
+    core::ptr::write_volatile(
+        0x4000053ci32 as *mut u32,
+        (core::ptr::read_volatile(0x10000244i32 as *mut u32) & 0xe000u32) >> 13i32,
+    );
 
     // Only needed for preview hardware
     // // Workaround for Errata 32
@@ -105,14 +114,14 @@ pub unsafe extern "C" fn init() {
 
     // Workaround for Errata 37
     // "RADIO: Encryption engine is slow by default" found at the Errata document doc
-    *(0x400005a0i32 as *mut u32) = 0x3u32;
+    core::ptr::write_volatile(0x400005a0i32 as *mut u32, 0x3u32);
 
     // Workaround for Errata 57
     // "NFCT: NFC Modulation amplitude" found at the Errata doc
-    *(0x40005610i32 as *mut u32) = 0x5u32;
-    *(0x40005688i32 as *mut u32) = 0x1u32;
-    *(0x40005618i32 as *mut u32) = 0x0u32;
-    *(0x40005614i32 as *mut u32) = 0x3fu32;
+    core::ptr::write_volatile(0x40005610i32 as *mut u32, 0x5u32);
+    core::ptr::write_volatile(0x40005688i32 as *mut u32, 0x1u32);
+    core::ptr::write_volatile(0x40005618i32 as *mut u32, 0x0u32);
+    core::ptr::write_volatile(0x40005614i32 as *mut u32, 0x3fu32);
 
     // Workaround for Errata 66
     // "TEMP: Linearity specification not met with default settings" found at the Errata doc
@@ -138,15 +147,27 @@ pub unsafe extern "C" fn init() {
     // Workaround for Errata 108
     // "RAM: RAM content cannot be trusted upon waking up from System ON Idle
     // or System OFF mode" found at the Errata doc
-    *(0x40000ee4i32 as *mut u32) = *(0x10000258i32 as *mut u32) & 0x4fu32;
+    core::ptr::write_volatile(
+        0x40000ee4i32 as *mut u32,
+        core::ptr::read_volatile(0x10000258i32 as *mut u32) & 0x4fu32,
+    );
+}
 
-    // Explicitly tell the core where Tock's vector table is located. If Tock is the
-    // only thing on the chip then this is effectively a no-op. If, however, there is
-    // a bootloader present then we want to ensure that the vector table is set
-    // correctly for Tock. The bootloader _may_ set this for us, but it may not
-    // so that any errors early in the Tock boot process trap back to the bootloader.
-    // To be safe we unconditionally set the vector table.
-    scb::set_vector_table_offset(BASE_VECTORS.as_ptr().cast::<()>());
-
-    nvic::enable_all();
+/// Explicitly tell the core where Tock's vector table is located.
+///
+/// If Tock is the
+/// only thing on the chip then this is effectively a no-op. If, however, there is
+/// a bootloader present then we want to ensure that the vector table is set
+/// correctly for Tock. The bootloader _may_ set this for us, but it may not
+/// so that any errors early in the Tock boot process trap back to the bootloader.
+/// To be safe we unconditionally set the vector table.
+pub(crate) fn initialize_vector_table() {
+    // # Safety
+    //
+    // The vector table must setup function pointers for the thumb core
+    // correctly. Because `BASE_VECTORS` is the correct data type this is
+    // safe.
+    unsafe {
+        scb::set_vector_table_offset(BASE_VECTORS.as_ptr().cast::<()>());
+    }
 }

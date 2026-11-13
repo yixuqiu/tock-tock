@@ -18,9 +18,12 @@ pub struct Imxrt10xx<I: InterruptService + 'static> {
 }
 
 impl<I: InterruptService + 'static> Imxrt10xx<I> {
-    pub unsafe fn new(interrupt_service: &'static I) -> Self {
+    pub fn new(interrupt_service: &'static I) -> Self {
+        // SAFETY: All i.MX RT 10xx chips are Cortex-M7 cores with valid MPU hardware.
+        let mpu = unsafe { cortexm7::mpu::new() };
+
         Imxrt10xx {
-            mpu: cortexm7::mpu::MPU::new(),
+            mpu,
             userspace_kernel_boundary: cortexm7::syscall::SysCall::new(),
             interrupt_service,
         }
@@ -62,7 +65,7 @@ impl Imxrt10xxDefaultPeripherals {
 }
 
 impl InterruptService for Imxrt10xxDefaultPeripherals {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
             nvic::LPUART1 => self.lpuart1.handle_interrupt(),
             nvic::LPUART2 => self.lpuart2.handle_interrupt(),
@@ -105,25 +108,30 @@ impl InterruptService for Imxrt10xxDefaultPeripherals {
 impl<I: InterruptService + 'static> Chip for Imxrt10xx<I> {
     type MPU = cortexm7::mpu::MPU;
     type UserspaceKernelBoundary = cortexm7::syscall::SysCall;
+    type ThreadIdProvider = cortexm7::thread_id::CortexMThreadIdProvider;
+
+    fn init() {
+        cortexm7::nvic::disable_all();
+        cortexm7::nvic::clear_all_pending();
+
+        // Set the vector table offset.
+        crate::initialize_vector_table();
+
+        cortexm7::nvic::enable_all();
+    }
 
     fn service_pending_interrupts(&self) {
-        unsafe {
-            loop {
-                if let Some(interrupt) = cortexm7::nvic::next_pending() {
-                    let handled = self.interrupt_service.service_interrupt(interrupt);
-                    assert!(handled, "Unhandled interrupt number {}", interrupt);
-                    let n = cortexm7::nvic::Nvic::new(interrupt);
-                    n.clear_pending();
-                    n.enable();
-                } else {
-                    break;
-                }
-            }
+        while let Some(interrupt) = cortexm7::nvic::next_pending() {
+            let handled = self.interrupt_service.service_interrupt(interrupt);
+            assert!(handled, "Unhandled interrupt number {}", interrupt);
+            let n = cortexm7::nvic::Nvic::new(interrupt);
+            n.clear_pending();
+            n.enable();
         }
     }
 
     fn has_pending_interrupts(&self) -> bool {
-        unsafe { cortexm7::nvic::has_pending() }
+        cortexm7::nvic::has_pending()
     }
 
     fn mpu(&self) -> &cortexm7::mpu::MPU {
@@ -135,20 +143,19 @@ impl<I: InterruptService + 'static> Chip for Imxrt10xx<I> {
     }
 
     fn sleep(&self) {
-        unsafe {
-            cortexm7::scb::unset_sleepdeep();
-            cortexm7::support::wfi();
-        }
+        let cap = kernel::create_capability!(kernel::capabilities::CpuStateControlCapability);
+        cortexm7::scb::unset_sleepdeep(&cap);
+        cortexm7::support::wfi(&cap);
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        cortexm7::support::atomic(f)
+        cortexm7::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, write: &mut dyn Write) {
+    unsafe fn print_state(_this: Option<&Self>, write: &mut dyn Write) {
         CortexM7::print_cortexm_state(write);
     }
 }

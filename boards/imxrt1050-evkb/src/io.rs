@@ -4,21 +4,15 @@
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::ptr::addr_of;
 use core::ptr::addr_of_mut;
 
 use kernel::debug;
-use kernel::debug::IoWrite;
 use kernel::hil::led;
 use kernel::hil::uart;
 use kernel::hil::uart::Configure;
+use kernel::utilities::io_write::IoWrite;
 
-use crate::imxrt1050;
-use imxrt1050::gpio::PinId;
-
-use crate::CHIP;
-use crate::PROCESSES;
-use crate::PROCESS_PRINTER;
+use imxrt10xx::gpio::PinId;
 
 /// Writer is used by kernel::debug to panic message to the serial port.
 pub struct Writer {
@@ -44,8 +38,8 @@ impl Write for Writer {
 
 impl IoWrite for Writer {
     fn write(&mut self, buf: &[u8]) -> usize {
-        let ccm = crate::imxrt1050::ccm::Ccm::new();
-        let uart = imxrt1050::lpuart::Lpuart::new_lpuart1(&ccm);
+        let ccm = imxrt10xx::ccm::Ccm::new();
+        let uart = imxrt10xx::lpuart::Lpuart::new_lpuart1(&ccm);
 
         if !self.initialized {
             self.initialized = true;
@@ -67,21 +61,20 @@ impl IoWrite for Writer {
 }
 
 /// Panic handler.
-#[no_mangle]
 #[panic_handler]
-pub unsafe fn panic_fmt(info: &PanicInfo) -> ! {
+pub fn panic_fmt(info: &PanicInfo) -> ! {
     // User Led is connected to AdB0_09
-    let pin = imxrt1050::gpio::Pin::from_pin_id(PinId::AdB0_09);
+    let pin = imxrt10xx::gpio::Pin::from_pin_id(PinId::AdB0_09);
     let led = &mut led::LedLow::new(&pin);
-    let writer = &mut *addr_of_mut!(WRITER);
+    let writer = unsafe { &mut *addr_of_mut!(WRITER) };
 
-    debug::panic(
-        &mut [led],
-        writer,
-        info,
-        &cortexm7::support::nop,
-        &*addr_of!(PROCESSES),
-        &*addr_of!(CHIP),
-        &*addr_of!(PROCESS_PRINTER),
-    )
+    unsafe {
+        debug::panic_old(
+            &mut [led],
+            writer,
+            info,
+            &cortexm7::support::nop,
+            crate::PANIC_RESOURCES.get(),
+        )
+    }
 }

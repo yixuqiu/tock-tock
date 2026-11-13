@@ -11,4 +11,8 @@ edition.workspace = true
 [dependencies]
 cortexm0p = { path="../../arch/cortex-m0p" }
 kernel = { path = "../../kernel" }
+rp2xxx = { path = "../rp2xxx" }
 enum_primitive = { path = "../../libraries/enum_primitive" }
+
+[lints]
+workspace = true

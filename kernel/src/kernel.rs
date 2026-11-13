@@ -4,13 +4,12 @@
 
 //! Tock's main kernel loop, scheduler loop, and Scheduler trait.
 //!
-//! This module also includes utility functions that are commonly used
-//! by scheduler policy implementations.  Scheduling policy (round
-//! robin, priority, etc.) is defined in the `sched` subcrate and
-//! selected by a board.
+//! This module also includes utility functions that are commonly used by
+//! scheduler policy implementations. Scheduling policy (round robin, priority,
+//! etc.) is defined in the `scheduler` subcrate and selected by a board.
 
 use core::cell::Cell;
-use core::ptr::NonNull;
+use core::num::NonZeroU32;
 
 use crate::capabilities;
 use crate::config;
@@ -27,11 +26,12 @@ use crate::platform::platform::KernelResources;
 use crate::platform::platform::{ProcessFault, SyscallDriverLookup, SyscallFilter};
 use crate::platform::scheduler_timer::SchedulerTimer;
 use crate::platform::watchdog::WatchDog;
+use crate::process::ProcessSlot;
 use crate::process::{self, ProcessId, Task};
 use crate::scheduler::{Scheduler, SchedulingDecision};
 use crate::syscall::SyscallDriver;
 use crate::syscall::{ContextSwitchReason, SyscallReturn};
-use crate::syscall::{Syscall, YieldCall};
+use crate::syscall::{Syscall, YieldVariant};
 use crate::syscall_driver::CommandReturn;
 use crate::upcall::{Upcall, UpcallId};
 use crate::utilities::cells::NumericCellExt;
@@ -44,7 +44,7 @@ pub(crate) const MIN_QUANTA_THRESHOLD_US: u32 = 500;
 /// Main object for the kernel. Each board will need to create one.
 pub struct Kernel {
     /// This holds a pointer to the static array of Process pointers.
-    processes: &'static [Option<&'static dyn process::Process>],
+    processes: &'static [ProcessSlot],
 
     /// A counter which keeps track of how many process identifiers have been
     /// created. This is used to create new unique identifiers for processes.
@@ -88,7 +88,7 @@ impl Kernel {
     /// Crucially, the processes included in the `processes` array MUST be valid
     /// to execute. Any credential checks or validation MUST happen before the
     /// `Process` object is included in this array.
-    pub fn new(processes: &'static [Option<&'static dyn process::Process>]) -> Kernel {
+    pub const fn new(processes: &'static [ProcessSlot]) -> Kernel {
         Kernel {
             processes,
             process_identifier_max: Cell::new(0),
@@ -100,27 +100,21 @@ impl Kernel {
     /// Helper function that moves all non-generic portions of process_map_or
     /// into a non-generic function to reduce code bloat from monomorphization.
     pub(crate) fn get_process(&self, processid: ProcessId) -> Option<&dyn process::Process> {
-        // We use the index in the `processid` so we can do a direct lookup.
+        // We use the index in the [`ProcessId`] so we can do a direct lookup.
         // However, we are not guaranteed that the app still exists at that
         // index in the processes array. To avoid additional overhead, we do the
         // lookup and check here, rather than calling `.index()`.
-        match self.processes.get(processid.index) {
-            Some(Some(process)) => {
-                // Check that the process stored here matches the identifier
-                // in the `processid`.
-                if process.processid() == processid {
-                    Some(*process)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+        self.processes
+            .get(processid.index)
+            .and_then(|pslot| pslot.get())
+            // Check that the process stored here matches the
+            // identifier in the `processid`.
+            .filter(|process| process.processid() == processid)
     }
 
     /// Run a closure on a specific process if it exists. If the process with a
-    /// matching `ProcessId` does not exist at the index specified within the
-    /// `ProcessId`, then `default` will be returned.
+    /// matching [`ProcessId`] does not exist at the index specified within the
+    /// [`ProcessId`], then `default` will be returned.
     ///
     /// A match will not be found if the process was removed (and there is a
     /// `None` in the process array), if the process changed its identifier
@@ -170,33 +164,28 @@ impl Kernel {
 
     /// Run a closure on every valid process. This will iterate the array of
     /// processes and call the closure on every process that exists.
-    pub(crate) fn process_each<F>(&self, mut closure: F)
+    pub(crate) fn process_each<F>(&self, closure: F)
     where
         F: FnMut(&dyn process::Process),
     {
-        for process in self.processes.iter() {
-            match process {
-                Some(p) => {
-                    closure(*p);
-                }
-                None => {}
-            }
-        }
+        self.get_process_iter().for_each(closure);
     }
 
-    /// Returns an iterator over all processes loaded by the kernel
+    pub fn process_iter_capability(
+        &self,
+        _capability: &dyn capabilities::ProcessManagementCapability,
+    ) -> impl Iterator<Item = &dyn process::Process> {
+        self.get_process_iter()
+    }
+
+    /// Returns an iterator over all processes loaded by the kernel.
     pub(crate) fn get_process_iter(
         &self,
     ) -> core::iter::FilterMap<
-        core::slice::Iter<Option<&dyn process::Process>>,
-        fn(&Option<&'static dyn process::Process>) -> Option<&'static dyn process::Process>,
+        core::slice::Iter<'_, ProcessSlot>,
+        fn(&ProcessSlot) -> Option<&'static dyn process::Process>,
     > {
-        fn keep_some(
-            &x: &Option<&'static dyn process::Process>,
-        ) -> Option<&'static dyn process::Process> {
-            x
-        }
-        self.processes.iter().filter_map(keep_some)
+        self.processes.iter().filter_map(ProcessSlot::get)
     }
 
     /// Run a closure on every valid process. This will iterate the array of
@@ -208,51 +197,39 @@ impl Kernel {
     pub fn process_each_capability<F>(
         &'static self,
         _capability: &dyn capabilities::ProcessManagementCapability,
-        mut closure: F,
+        closure: F,
     ) where
         F: FnMut(&dyn process::Process),
     {
-        for process in self.processes.iter() {
-            match process {
-                Some(p) => {
-                    closure(*p);
-                }
-                None => {}
-            }
-        }
+        self.process_each(closure);
     }
 
-    /// Run a closure on every process, but only continue if the closure returns `None`. That is,
-    /// if the closure returns any non-`None` value, iteration stops and the value is returned from
-    /// this function to the called.
+    /// Run a closure on every process, but only continue if the closure returns
+    /// `None`. That is, if the closure returns any non-`None` value, iteration
+    /// stops and the value is returned from this function to the called.
     pub(crate) fn process_until<T, F>(&self, closure: F) -> Option<T>
     where
         F: Fn(&dyn process::Process) -> Option<T>,
     {
-        for process in self.processes.iter() {
-            match process {
-                Some(p) => {
-                    let ret = closure(*p);
-                    if ret.is_some() {
-                        return ret;
-                    }
-                }
-                None => {}
+        for process in self.get_process_iter() {
+            let ret = closure(process);
+            if ret.is_some() {
+                return ret;
             }
         }
         None
     }
 
-    /// Checks if the provided `ProcessId` is still valid given the processes stored
-    /// in the processes array. Returns `true` if the ProcessId still refers to
-    /// a valid process, and `false` if not.
+    /// Checks if the provided [`ProcessId`] is still valid given the processes
+    /// stored in the processes array. Returns `true` if the ProcessId still
+    /// refers to a valid process, and `false` if not.
     ///
-    /// This is needed for `ProcessId` itself to implement the `.index()` command to
-    /// verify that the referenced app is still at the correct index.
+    /// This is needed for `ProcessId` itself to implement the `.index()`
+    /// command to verify that the referenced app is still at the correct index.
     pub(crate) fn processid_is_valid(&self, processid: &ProcessId) -> bool {
-        self.processes.get(processid.index).map_or(false, |p| {
-            p.map_or(false, |process| process.processid().id() == processid.id())
-        })
+        self.processes
+            .get(processid.index)
+            .is_some_and(|p| p.contains_process_with_id(processid.id()))
     }
 
     /// Create a new grant. This is used in board initialization to setup grants
@@ -318,10 +295,47 @@ impl Kernel {
 
     /// Create a new unique identifier for a process and return the identifier.
     ///
-    /// Typically we just choose a larger number than we have used for any process
-    /// before which ensures that the identifier is unique.
+    /// Typically we just choose a larger number than we have used for any
+    /// process before which ensures that the identifier is unique.
     pub(crate) fn create_process_identifier(&self) -> usize {
         self.process_identifier_max.get_and_increment()
+    }
+
+    /// Find the next slot that is available for storing a new
+    /// [`&Process`](process::Process).
+    ///
+    /// Returns `Err(())` if there are no available slots.
+    pub(crate) fn next_available_process_slot(&self) -> Result<(usize, &ProcessSlot), ()> {
+        for (index, slot) in self.processes.iter().enumerate() {
+            if slot.proc.get().is_none() {
+                return Ok((index, slot));
+            }
+        }
+        Err(())
+    }
+
+    /// Terminate a process if it exists, and remove it from ProcessArray.
+    /// `extract_app_handle` is the caller-passed operation which is used
+    /// to determine the `app_handle` which is returned as a usize value.
+    pub(crate) fn remove_process_from_active_processes<F>(
+        &self,
+        shortid: process::ShortId,
+        extract_app_handle: F,
+    ) -> Result<usize, ()>
+    where
+        F: FnOnce(&'static dyn process::Process) -> usize,
+    {
+        for slot in self.processes.iter() {
+            if let Some(process) = slot.get() {
+                if process.short_app_id() == shortid {
+                    process.terminate(None);
+                    let result = extract_app_handle(process);
+                    slot.proc.set(None);
+                    return Ok(result);
+                }
+            }
+        }
+        Err(())
     }
 
     /// Cause all apps to fault.
@@ -335,10 +349,8 @@ impl Kernel {
     /// function, since capsules should not be able to arbitrarily restart all
     /// apps.
     pub fn hardfault_all_apps<C: capabilities::ProcessManagementCapability>(&self, _c: &C) {
-        for p in self.processes.iter() {
-            p.map(|process| {
-                process.set_fault_state();
-            });
+        for process in self.get_process_iter() {
+            process.set_fault_state();
         }
     }
 
@@ -370,51 +382,48 @@ impl Kernel {
         let scheduler = resources.scheduler();
 
         resources.watchdog().tickle();
-        unsafe {
-            // Ask the scheduler if we should do tasks inside of the kernel,
-            // such as handle interrupts. A scheduler may want to prioritize
-            // processes instead, or there may be no kernel work to do.
-            match scheduler.do_kernel_work_now(chip) {
-                true => {
-                    // Execute kernel work. This includes handling
-                    // interrupts and is how code in the chips/ and capsules
-                    // crates is able to execute.
-                    scheduler.execute_kernel_work(chip);
-                }
-                false => {
-                    // No kernel work ready, so ask scheduler for a process.
-                    match scheduler.next() {
-                        SchedulingDecision::RunProcess((processid, timeslice_us)) => {
-                            self.process_map_or((), processid, |process| {
-                                let (reason, time_executed) =
-                                    self.do_process(resources, chip, process, ipc, timeslice_us);
-                                scheduler.result(reason, time_executed);
+        // Ask the scheduler if we should do tasks inside of the kernel,
+        // such as handle interrupts. A scheduler may want to prioritize
+        // processes instead, or there may be no kernel work to do.
+        match scheduler.do_kernel_work_now(chip) {
+            true => {
+                // Execute kernel work. This includes handling
+                // interrupts and is how code in the chips/ and capsules
+                // crates is able to execute.
+                scheduler.execute_kernel_work(chip);
+            }
+            false => {
+                // No kernel work ready, so ask scheduler for a process.
+                match scheduler.next() {
+                    SchedulingDecision::RunProcess((processid, timeslice_us)) => {
+                        self.process_map_or((), processid, |process| {
+                            let (reason, time_executed) =
+                                self.do_process(resources, chip, process, ipc, timeslice_us);
+                            scheduler.result(reason, time_executed);
+                        });
+                    }
+                    SchedulingDecision::TrySleep => {
+                        // For testing, it may be helpful to
+                        // disable sleeping the chip in case
+                        // the running test does not generate
+                        // any interrupts.
+                        if !no_sleep {
+                            chip.with_interrupts_disabled(|| {
+                                // Cannot sleep if interrupts are pending,
+                                // as on most platforms unhandled interrupts
+                                // will wake the device. Also, if the only
+                                // pending interrupt occurred after the
+                                // scheduler decided to put the chip to
+                                // sleep, but before this atomic section
+                                // starts, the interrupt will not be
+                                // serviced and the chip will never wake
+                                // from sleep.
+                                if !chip.has_pending_interrupts() && !DeferredCall::has_tasks() {
+                                    resources.watchdog().suspend();
+                                    chip.sleep();
+                                    resources.watchdog().resume();
+                                }
                             });
-                        }
-                        SchedulingDecision::TrySleep => {
-                            // For testing, it may be helpful to
-                            // disable sleeping the chip in case
-                            // the running test does not generate
-                            // any interrupts.
-                            if !no_sleep {
-                                chip.atomic(|| {
-                                    // Cannot sleep if interrupts are pending,
-                                    // as on most platforms unhandled interrupts
-                                    // will wake the device. Also, if the only
-                                    // pending interrupt occurred after the
-                                    // scheduler decided to put the chip to
-                                    // sleep, but before this atomic section
-                                    // starts, the interrupt will not be
-                                    // serviced and the chip will never wake
-                                    // from sleep.
-                                    if !chip.has_pending_interrupts() && !DeferredCall::has_tasks()
-                                    {
-                                        resources.watchdog().suspend();
-                                        chip.sleep();
-                                        resources.watchdog().resume();
-                                    }
-                                });
-                            }
                         }
                     }
                 }
@@ -424,7 +433,7 @@ impl Kernel {
 
     /// Main loop of the OS.
     ///
-    /// Most of the behavior of this loop is controlled by the `Scheduler`
+    /// Most of the behavior of this loop is controlled by the [`Scheduler`]
     /// implementation in use.
     pub fn kernel_loop<KR: KernelResources<C>, C: Chip, const NUM_PROCS: u8>(
         &self,
@@ -478,7 +487,7 @@ impl Kernel {
         chip: &C,
         process: &dyn process::Process,
         ipc: Option<&crate::ipc::IPC<NUM_PROCS>>,
-        timeslice_us: Option<u32>,
+        timeslice_us: Option<NonZeroU32>,
     ) -> (process::StoppedExecutingReason, Option<u32>) {
         // We must use a dummy scheduler timer if the process should be executed
         // without any timeslice restrictions. Note, a chip may not provide a
@@ -494,7 +503,9 @@ impl Kernel {
         // point, the scheduler timer need not have an interrupt enabled after
         // `start()`.
         scheduler_timer.reset();
-        timeslice_us.map(|timeslice| scheduler_timer.start(timeslice));
+        if let Some(timeslice) = timeslice_us {
+            scheduler_timer.start(timeslice)
+        }
 
         // Need to track why the process is no longer executing so that we can
         // inform the scheduler.
@@ -508,7 +519,7 @@ impl Kernel {
         // timeslice.
         loop {
             let stop_running = match scheduler_timer.get_remaining_us() {
-                Some(us) => us <= MIN_QUANTA_THRESHOLD_US,
+                Some(us) => us.get() <= MIN_QUANTA_THRESHOLD_US,
                 None => true,
             };
             if stop_running {
@@ -519,11 +530,9 @@ impl Kernel {
             }
 
             // Check if the scheduler wishes to continue running this process.
-            let continue_process = unsafe {
-                resources
-                    .scheduler()
-                    .continue_process(process.processid(), chip)
-            };
+            let continue_process = resources
+                .scheduler()
+                .continue_process(process.processid(), chip);
             if !continue_process {
                 return_reason = process::StoppedExecutingReason::KernelPreemption;
                 break;
@@ -547,12 +556,37 @@ impl Kernel {
                     resources
                         .context_switch_callback()
                         .context_switch_hook(process);
+
+                    // Configure the MPU for the process to run, and activate
+                    // it. With certain memory protection mechanisms such as
+                    // RISC-V ePMP, this will make all userspace-accessible
+                    // memory inaccessible to kernel mode. When switching back
+                    // to the kernel, we must first run `disable_app_mpu` before
+                    // attempting to access any userspace memory.
                     process.setup_mpu();
                     chip.mpu().enable_app_mpu();
+
                     scheduler_timer.arm();
-                    let context_switch_reason = process.switch_to();
+                    // SAFETY: We just setup and enabled the MPU for the process,
+                    // ensuring it will be correctly configured when the process
+                    // executes.
+                    let context_switch_reason = unsafe { process.switch_to() };
                     scheduler_timer.disarm();
-                    chip.mpu().disable_app_mpu();
+
+                    // Disable the application MPU. This is necessary on systems
+                    // like RISC-V ePMP, which makes userspace memory
+                    // inaccessible to kernel mode if memory protection is
+                    // active.
+                    //
+                    // SAFETY: This function is unsafe, as calling it before switching
+                    // to a process, without first re-enabling memory
+                    // protection, could allow an application to access
+                    // kernel-private memory. Invoking this function is safe
+                    // here, as we always call `enable_app_mpu` above before
+                    // switching back to a process.
+                    unsafe {
+                        chip.mpu().disable_app_mpu();
+                    }
 
                     // Now the process has returned back to the kernel. Check
                     // why and handle the process as appropriate.
@@ -600,6 +634,12 @@ impl Kernel {
                     match process.dequeue_task() {
                         None => break,
                         Some(cb) => match cb {
+                            Task::ReturnValue(_) => {
+                                // Per TRD104, Yield-Wait does not wake the
+                                // process for events that generate Null
+                                // Upcalls.
+                                break;
+                            }
                             Task::FunctionCall(ccb) => {
                                 if config::CONFIG.trace_syscalls {
                                     debug!(
@@ -623,6 +663,10 @@ impl Kernel {
                                         // TODO(alevy): this could error for a variety of reasons.
                                         // Should we communicate the error somehow?
                                         // https://github.com/tock/tock/issues/1993
+                                        //
+                                        // SAFETY: This is NOT safe. This is a known issue with this
+                                        // implementation of IPC:
+                                        // <https://github.com/tock/tock/issues/1993>.
                                         unsafe {
                                             let _ = ipc.schedule_upcall(
                                                 process.processid(),
@@ -636,16 +680,59 @@ impl Kernel {
                         },
                     }
                 }
+                process::State::YieldedFor(upcall_id) => {
+                    // If this process is waiting for a specific upcall, see if
+                    // it is ready. If so, dequeue it and return its values to
+                    // the process without scheduling the callback.
+                    match process.remove_upcall(upcall_id) {
+                        None => break,
+                        Some(task) => {
+                            let (a0, a1, a2) = match task {
+                                // There is no callback function registered, we
+                                // just return the values provided by the driver
+                                Task::ReturnValue(rv) => {
+                                    if config::CONFIG.trace_syscalls {
+                                        debug!(
+                                            "[{:?}] Yield-WaitFor: [NU] ({:#x}, {:#x}, {:#x})",
+                                            process.processid(),
+                                            rv.argument0,
+                                            rv.argument1,
+                                            rv.argument2,
+                                        );
+                                    }
+                                    (rv.argument0, rv.argument1, rv.argument2)
+                                }
+                                // There is a registered callback function, but
+                                // since the process used `Yield-WaitFor`, we do
+                                // not execute it, we just return its arguments
+                                // values to the application.
+                                Task::FunctionCall(ccb) => {
+                                    if config::CONFIG.trace_syscalls {
+                                        debug!(
+                                            "[{:?}] Yield-WaitFor [Suppressed function_call @{:#x}] ({:#x}, {:#x}, {:#x}, {:#x})",
+                                            process.processid(),
+                                            ccb.pc,
+                                            ccb.argument0,
+                                            ccb.argument1,
+                                            ccb.argument2,
+                                            ccb.argument3,
+                                        );
+                                    }
+                                    (ccb.argument0, ccb.argument1, ccb.argument2)
+                                }
+                                Task::IPC(_) => todo!(),
+                            };
+                            process
+                                .set_syscall_return_value(SyscallReturn::YieldWaitFor(a0, a1, a2));
+                        }
+                    }
+                }
                 process::State::Faulted | process::State::Terminated => {
                     // We should never be scheduling an unrunnable process.
                     // This is a potential security flaw: panic.
                     panic!("Attempted to schedule an unrunnable process");
                 }
-                process::State::StoppedRunning => {
-                    return_reason = process::StoppedExecutingReason::Stopped;
-                    break;
-                }
-                process::State::StoppedYielded => {
+                process::State::Stopped(_) => {
                     return_reason = process::StoppedExecutingReason::Stopped;
                     break;
                 }
@@ -654,16 +741,17 @@ impl Kernel {
 
         // Check how much time the process used while it was executing, and
         // return the value so we can provide it to the scheduler.
-        let time_executed_us = timeslice_us.map_or(None, |timeslice| {
-            // Note, we cannot call `.get_remaining_us()` again if it has previously
-            // returned `None`, so we _must_ check the return reason first.
+        let time_executed_us = timeslice_us.map(|timeslice| {
+            // Note, we cannot call `.get_remaining_us()` again if it has
+            // previously returned `None`, so we _must_ check the return reason
+            // first.
             if return_reason == process::StoppedExecutingReason::TimesliceExpired {
                 // used the whole timeslice
-                Some(timeslice)
+                timeslice.get()
             } else {
                 match scheduler_timer.get_remaining_us() {
-                    Some(remaining) => Some(timeslice - remaining),
-                    None => Some(timeslice), // used whole timeslice
+                    Some(remaining) => timeslice.get() - remaining.get(),
+                    None => timeslice.get(), // used whole timeslice
                 }
             }
         });
@@ -703,10 +791,7 @@ impl Kernel {
         // immediately (assuming the process has not already exhausted its
         // timeslice) allowing the process to decide how to handle the error.
         match syscall {
-            Syscall::Yield {
-                which: _,
-                address: _,
-            } => {} // Yield is not filterable.
+            Syscall::Yield { yield_type: _ } => {} // Yield is not filterable.
             Syscall::Exit {
                 which: _,
                 completion_code: _,
@@ -750,41 +835,47 @@ impl Kernel {
                 }
                 process.set_syscall_return_value(rval);
             }
-            Syscall::Yield { which, address } => {
+            Syscall::Yield { yield_type } => {
                 if config::CONFIG.trace_syscalls {
-                    debug!("[{:?}] yield. which: {}", process.processid(), which);
+                    debug!("[{:?}] yield. which: {}", process.processid(), yield_type);
                 }
-                if which > (YieldCall::Wait as usize) {
-                    // Only 0 and 1 are valid, so this is not a valid yield
-                    // system call, Yield does not have a return value because
-                    // it can push a function call onto the stack; just return
-                    // control to the process.
-                    return;
-                }
-                if which == (YieldCall::NoWait as usize) {
-                    let upcall_triggered = process.has_tasks().into();
-                    // Set the "did I trigger upcalls" flag.
-                    //
-                    // # Safety
-                    //
-                    // If address is invalid, this does nothing. If it is valid,
-                    // we write into process memory, which is fine for the
-                    // kernel as long as no references to that memory exist. We
-                    // do not have a reference, so we can safely call
-                    // `set_byte()`. The process is expecting *address to be set
-                    // to 0 or 1, and converting a bool into a u8 gives a 0 or
-                    // 1.
-                    unsafe {
-                        process.set_byte(address, upcall_triggered);
+                match yield_type {
+                    YieldVariant::NoWait { ptr } => {
+                        // If this is a `Yield-NoWait` AND there are no pending
+                        // tasks, then return immediately. Otherwise, go into
+                        // the yielded state and execute tasks now or when they
+                        // arrive.
+                        let has_tasks = process.has_tasks();
+
+                        // Set the "did I trigger upcalls" flag.
+                        // If address is invalid does nothing.
+                        //
+                        // SAFETY: This is fine as long as no references to the
+                        // process's memory exist. We do not have a reference,
+                        // so we can safely call `set_byte()`.
+                        unsafe {
+                            process.set_byte(ptr, has_tasks as u8);
+                        }
+
+                        if has_tasks {
+                            process.set_yielded_state();
+                        }
                     }
-                }
-                let wait = which == (YieldCall::Wait as usize);
-                // If this is a yield-no-wait AND there are no pending tasks,
-                // then return immediately. Otherwise, go into the yielded state
-                // and execute tasks now or when they arrive.
-                let return_now = !wait && !process.has_tasks();
-                if !return_now {
-                    process.set_yielded_state();
+
+                    YieldVariant::Wait => {
+                        process.set_yielded_state();
+                    }
+
+                    YieldVariant::WaitFor {
+                        driver_number,
+                        subdriver_number,
+                    } => {
+                        let upcall_id = UpcallId {
+                            driver_num: driver_number,
+                            subscribe_num: subdriver_number,
+                        };
+                        process.set_yielded_for_state(upcall_id);
+                    }
                 }
             }
             Syscall::Subscribe { driver_number, .. }
@@ -801,74 +892,105 @@ impl Kernel {
                         upcall_ptr,
                         appdata,
                     } => {
-                        // A upcall is identified as a tuple of the driver number and
-                        // the subdriver number.
+                        // A upcall is identified as a tuple of the driver
+                        // number and the subdriver number.
                         let upcall_id = UpcallId {
                             driver_num: driver_number,
                             subscribe_num: subdriver_number,
                         };
 
-                        // First check if `upcall_ptr` is null. A null `upcall_ptr` will
-                        // result in `None` here and represents the special
-                        // "unsubscribe" operation.
-                        let ptr = NonNull::new(upcall_ptr);
-
-                        // For convenience create an `Upcall` type now. This is just a
-                        // data structure and doesn't do any checking or conversion.
-                        let upcall = Upcall::new(process.processid(), upcall_id, appdata, ptr);
-
-                        // If `ptr` is not null, we must first verify that the upcall
-                        // function pointer is within process accessible memory. Per
-                        // TRD104:
+                        // TODO: when the compiler supports capability types
+                        // bring this back as a NonNull
+                        // type. https://github.com/tock/tock/issues/4134.
                         //
-                        // > If the passed upcall is not valid (is outside process
-                        // > executable memory...), the kernel...MUST immediately return
-                        // > a failure with a error code of `INVALID`.
-                        let rval1 = ptr.map_or(None, |upcall_ptr_nonnull| {
-                            if !process.is_valid_upcall_function_pointer(upcall_ptr_nonnull) {
-                                Some(ErrorCode::INVAL)
-                            } else {
-                                None
-                            }
-                        });
+                        // Previously, we had a NonNull type (that had a niche)
+                        // here, and could wrap that in Option to fill the niche
+                        // and handle the Null case. CapabilityPtr is filling
+                        // the gap left by * const(), which does not have the
+                        // niche and allows NULL internally. Having a CHERI
+                        // capability type with a niche is (maybe?) predicated
+                        // on having better compiler support.
+                        // Option<NonNull<()>> is preferable here, and it should
+                        // go back to it just as soon as we can express "non
+                        // null capability". For now, checking for the null case
+                        // is handled internally in each `map_or` call.
+                        //
+                        //First check if `upcall_ptr` is null. A null
+                        //`upcall_ptr` will result in `None` here and
+                        //represents the special "unsubscribe" operation.
+                        //let ptr = NonNull::new(upcall_ptr);
 
-                        // If the upcall is either null or valid, then we continue
-                        // handling the upcall.
-                        let rval = match rval1 {
-                            Some(err) => upcall.into_subscribe_failure(err),
-                            None => {
-                                match driver {
-                                    Some(driver) => {
-                                        // At this point we must save the new upcall and return
-                                        // the old. The upcalls are stored by the core kernel in
-                                        // the grant region so we can guarantee a correct upcall
-                                        // swap. However, we do need help with initially
-                                        // allocating the grant if this driver has never been
-                                        // used before.
+                        // For convenience create an `Upcall` type now. This is
+                        // just a data structure and doesn't do any checking or
+                        // conversion.
+                        let upcall = Upcall::new(process.processid(), upcall_id, appdata, upcall_ptr);
+
+                        let rval = match driver {
+                            Some(driver) => {
+                                // If `ptr` is not null, we must first verify that the
+                                // upcall function pointer is within process accessible
+                                // memory. Per TRD104:
+                                //
+                                // > If the passed upcall is not valid (is outside
+                                // > process executable memory...), the kernel...MUST
+                                // > immediately return a failure with a error code of
+                                // > `INVALID`.
+                                let rval1 = upcall_ptr.map_or(None, |upcall_ptr_nonnull| {
+                                    if !process.is_valid_upcall_function_pointer(upcall_ptr_nonnull.as_ptr()) {
+                                        Some(ErrorCode::INVAL)
+                                    } else {
+                                        None
+                                    }
+                                });
+
+                                // If the upcall is either null or valid, then we
+                                // continue handling the upcall.
+                                match rval1 {
+                                    Some(err) => upcall.into_subscribe_failure(err),
+                                    None => {
+                                        // At this point we must save the new
+                                        // upcall and return the old. The
+                                        // upcalls are stored by the core kernel
+                                        // in the grant region so we can
+                                        // guarantee a correct upcall swap.
+                                        // However, we do need help with
+                                        // initially allocating the grant if
+                                        // this driver has never been used
+                                        // before.
                                         //
-                                        // To avoid the overhead with checking for process
-                                        // liveness and grant allocation, we assume the grant is
-                                        // initially allocated. If it turns out it isn't we ask
-                                        // the capsule to allocate the grant.
+                                        // To avoid the overhead with checking
+                                        // for process liveness and grant
+                                        // allocation, we assume the grant is
+                                        // initially allocated. If it turns out
+                                        // it isn't we ask the capsule to
+                                        // allocate the grant.
                                         match crate::grant::subscribe(process, upcall) {
                                             Ok(upcall) => upcall.into_subscribe_success(),
                                             Err((upcall, err @ ErrorCode::NOMEM)) => {
-                                                // If we get a memory error, we always try to
-                                                // allocate the grant since this could be the
-                                                // first time the grant is getting accessed.
+                                                // If we get a memory error, we
+                                                // always try to allocate the
+                                                // grant since this could be the
+                                                // first time the grant is
+                                                // getting accessed.
                                                 match try_allocate_grant(driver, process) {
                                                     AllocResult::NewAllocation => {
-                                                        // Now we try again. It is possible that
-                                                        // the capsule did not actually allocate
-                                                        // the grant, at which point this will
-                                                        // fail again and we return an error to
-                                                        // userspace.
+                                                        // Now we try again. It
+                                                        // is possible that the
+                                                        // capsule did not
+                                                        // actually allocate the
+                                                        // grant, at which point
+                                                        // this will fail again
+                                                        // and we return an
+                                                        // error to userspace.
                                                         match crate::grant::subscribe(
                                                             process, upcall,
                                                         ) {
-                                                            // An Ok() returns the previous
-                                                            // upcall, while Err() returns the
-                                                            // one that was just passed.
+                                                            // An Ok() returns
+                                                            // the previous
+                                                            // upcall, while
+                                                            // Err() returns the
+                                                            // one that was just
+                                                            // passed.
                                                             Ok(upcall) => {
                                                                 upcall.into_subscribe_success()
                                                             }
@@ -878,8 +1000,9 @@ impl Kernel {
                                                         }
                                                     }
                                                     alloc_failure => {
-                                                        // We didn't actually create a new
-                                                        // alloc, so just error.
+                                                        // We didn't actually
+                                                        // create a new alloc,
+                                                        // so just error.
                                                         match (
                                                             config::CONFIG.trace_syscalls,
                                                             alloc_failure,
@@ -903,19 +1026,20 @@ impl Kernel {
                                             }
                                         }
                                     }
-                                    None => upcall.into_subscribe_failure(ErrorCode::NODEVICE),
                                 }
-                            }
+                            },
+                            None => upcall.into_subscribe_failure(ErrorCode::NODEVICE),
                         };
 
-                        // Per TRD104, we only clear upcalls if the subscribe will
-                        // return success. At this point we know the result and clear if
-                        // necessary.
+                        // Per TRD104, we only clear upcalls if the subscribe
+                        // will return success. At this point we know the result
+                        // and clear if necessary.
                         if rval.is_success() {
-                            // Only one upcall should exist per tuple. To ensure that
-                            // there are no pending upcalls with the same identifier but
-                            // with the old function pointer, we clear them now.
-                            process.remove_pending_upcalls(upcall_id);
+                            // Only one upcall should exist per tuple. To ensure
+                            // that there are no pending upcalls with the same
+                            // identifier but with the old function pointer, we
+                            // clear them now.
+                            let _ =process.remove_pending_upcalls(upcall_id);
                         }
 
                         if config::CONFIG.trace_syscalls {
@@ -924,7 +1048,7 @@ impl Kernel {
                                 process.processid(),
                                 driver_number,
                                 subdriver_number,
-                                upcall_ptr as usize,
+                                upcall_ptr,
                                 appdata,
                                 rval
                             );
@@ -966,15 +1090,17 @@ impl Kernel {
                     } => {
                         let res = match driver {
                             Some(driver) => {
-                                // Try to create an appropriate [`ReadWriteProcessBuffer`]. This
-                                // method will ensure that the memory in question is located in
-                                // the process-accessible memory space.
+                                // Try to create an appropriate
+                                // [`ReadWriteProcessBuffer`]. This method will
+                                // ensure that the memory in question is located
+                                // in the process-accessible memory space.
                                 match process
                                     .build_readwrite_process_buffer(allow_address, allow_size)
                                 {
                                     Ok(rw_pbuf) => {
-                                        // Creating the [`ReadWriteProcessBuffer`] worked, try
-                                        // to set in grant.
+                                        // Creating the
+                                        // [`ReadWriteProcessBuffer`] worked,
+                                        // try to set in grant.
                                         match crate::grant::allow_rw(
                                             process,
                                             driver_number,
@@ -986,13 +1112,17 @@ impl Kernel {
                                                 SyscallReturn::AllowReadWriteSuccess(ptr, len)
                                             }
                                             Err((rw_pbuf, err @ ErrorCode::NOMEM)) => {
-                                                // If we get a memory error, we always try to
-                                                // allocate the grant since this could be the
-                                                // first time the grant is getting accessed.
+                                                // If we get a memory error, we
+                                                // always try to allocate the
+                                                // grant since this could be the
+                                                // first time the grant is
+                                                // getting accessed.
                                                 match try_allocate_grant(driver, process) {
                                                     AllocResult::NewAllocation => {
-                                                        // If we actually allocated a new grant,
-                                                        // try again and honor the result.
+                                                        // If we actually
+                                                        // allocated a new
+                                                        // grant, try again and
+                                                        // honor the result.
                                                         match crate::grant::allow_rw(
                                                             process,
                                                             driver_number,
@@ -1014,8 +1144,9 @@ impl Kernel {
                                                         }
                                                     }
                                                     alloc_failure => {
-                                                        // We didn't actually create a new
-                                                        // alloc, so just error.
+                                                        // We didn't actually
+                                                        // create a new alloc,
+                                                        // so just error.
                                                         match (
                                                             config::CONFIG.trace_syscalls,
                                                             alloc_failure,
@@ -1045,8 +1176,9 @@ impl Kernel {
                                     }
                                     Err(allow_error) => {
                                         // There was an error creating the
-                                        // [`ReadWriteProcessBuffer`]. Report back to the
-                                        // process with the original parameters.
+                                        // [`ReadWriteProcessBuffer`]. Report
+                                        // back to the process with the original
+                                        // parameters.
                                         SyscallReturn::AllowReadWriteFailure(
                                             allow_error,
                                             allow_address,
@@ -1084,9 +1216,10 @@ impl Kernel {
                         let res = match driver {
                             Some(d) => {
                                 // Try to create an appropriate
-                                // [`UserspaceReadableProcessBuffer`]. This method
-                                // will ensure that the memory in question is
-                                // located in the process-accessible memory space.
+                                // [`UserspaceReadableProcessBuffer`]. This
+                                // method will ensure that the memory in
+                                // question is located in the process-accessible
+                                // memory space.
                                 match process
                                     .build_readwrite_process_buffer(allow_address, allow_size)
                                 {
@@ -1102,8 +1235,8 @@ impl Kernel {
                                             Ok(returned_pbuf) => {
                                                 // The capsule has accepted the
                                                 // allow operation. Pass the
-                                                // previous buffer information back
-                                                // to the process.
+                                                // previous buffer information
+                                                // back to the process.
                                                 let (ptr, len) = returned_pbuf.consume();
                                                 SyscallReturn::UserspaceReadableAllowSuccess(
                                                     ptr, len,
@@ -1112,8 +1245,8 @@ impl Kernel {
                                             Err((rejected_pbuf, err)) => {
                                                 // The capsule has rejected the
                                                 // allow operation. Pass the new
-                                                // buffer information back to the
-                                                // process.
+                                                // buffer information back to
+                                                // the process.
                                                 let (ptr, len) = rejected_pbuf.consume();
                                                 SyscallReturn::UserspaceReadableAllowFailure(
                                                     err, ptr, len,
@@ -1162,15 +1295,17 @@ impl Kernel {
                     } => {
                         let res = match driver {
                             Some(driver) => {
-                                // Try to create an appropriate [`ReadOnlyProcessBuffer`]. This
-                                // method will ensure that the memory in question is located in
-                                // the process-accessible memory space.
+                                // Try to create an appropriate
+                                // [`ReadOnlyProcessBuffer`]. This method will
+                                // ensure that the memory in question is located
+                                // in the process-accessible memory space.
                                 match process
                                     .build_readonly_process_buffer(allow_address, allow_size)
                                 {
                                     Ok(ro_pbuf) => {
-                                        // Creating the [`ReadOnlyProcessBuffer`] worked, try to
-                                        // set in grant.
+                                        // Creating the
+                                        // [`ReadOnlyProcessBuffer`] worked, try
+                                        // to set in grant.
                                         match crate::grant::allow_ro(
                                             process,
                                             driver_number,
@@ -1182,13 +1317,17 @@ impl Kernel {
                                                 SyscallReturn::AllowReadOnlySuccess(ptr, len)
                                             }
                                             Err((ro_pbuf, err @ ErrorCode::NOMEM)) => {
-                                                // If we get a memory error, we always try to
-                                                // allocate the grant since this could be the
-                                                // first time the grant is getting accessed.
+                                                // If we get a memory error, we
+                                                // always try to allocate the
+                                                // grant since this could be the
+                                                // first time the grant is
+                                                // getting accessed.
                                                 match try_allocate_grant(driver, process) {
                                                     AllocResult::NewAllocation => {
-                                                        // If we actually allocated a new grant,
-                                                        // try again and honor the result.
+                                                        // If we actually
+                                                        // allocated a new
+                                                        // grant, try again and
+                                                        // honor the result.
                                                         match crate::grant::allow_ro(
                                                             process,
                                                             driver_number,
@@ -1210,8 +1349,9 @@ impl Kernel {
                                                         }
                                                     }
                                                     alloc_failure => {
-                                                        // We didn't actually create a new
-                                                        // alloc, so just error.
+                                                        // We didn't actually
+                                                        // create a new alloc,
+                                                        // so just error.
                                                         match (
                                                             config::CONFIG.trace_syscalls,
                                                             alloc_failure,
@@ -1241,8 +1381,9 @@ impl Kernel {
                                     }
                                     Err(allow_error) => {
                                         // There was an error creating the
-                                        // [`ReadOnlyProcessBuffer`]. Report back to the process
-                                        // with the original parameters.
+                                        // [`ReadOnlyProcessBuffer`]. Report
+                                        // back to the process with the original
+                                        // parameters.
                                         SyscallReturn::AllowReadOnlyFailure(
                                             allow_error,
                                             allow_address,
@@ -1275,8 +1416,8 @@ impl Kernel {
                     Syscall::Yield { .. }
                     | Syscall::Exit { .. }
                     | Syscall::Memop { .. } => {
-                        // These variants must not be reachable due to
-                        // the outer match statement:
+                        // These variants must not be reachable due to the outer
+                        // match statement:
                         debug_assert!(false, "Kernel system call handling invariant violated!");
                     },
                 })
@@ -1284,15 +1425,35 @@ impl Kernel {
             Syscall::Exit {
                 which,
                 completion_code,
-            } => match which {
-                // The process called the `exit-terminate` system call.
-                0 => process.terminate(Some(completion_code as u32)),
-                // The process called the `exit-restart` system call.
-                1 => process.try_restart(Some(completion_code as u32)),
-                // The process called an invalid variant of the Exit
-                // system call class.
-                _ => process.set_syscall_return_value(SyscallReturn::Failure(ErrorCode::NOSUPPORT)),
-            },
+            } => {
+                // exit try restart modifies the ID of the process.
+                let old_process_id = process.processid();
+                let optional_return_value = match which {
+                    // The process called the `exit-terminate` system call.
+                    0 => {
+                        process.terminate(Some(completion_code as u32));
+                        None
+                    }
+                    // The process called the `exit-restart` system call.
+                    1 => {
+                        process.try_restart(Some(completion_code as u32));
+                        None
+                    }
+                    // The process called an invalid variant of the Exit
+                    // system call class.
+                    _ => {
+                        let return_value = SyscallReturn::Failure(ErrorCode::NOSUPPORT);
+                        process.set_syscall_return_value(return_value);
+                        Some(return_value)
+                    }
+                };
+                if config::CONFIG.trace_syscalls {
+                    debug!(
+                        "[{:?}] exit(which: {}, completion_code: {}) = {:?}",
+                        old_process_id, which, completion_code, optional_return_value,
+                    );
+                }
+            }
         }
     }
 }

@@ -2,38 +2,46 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-//! This file contains the definition and implementation for a virtualized UDP
-//! sending interface. The [UDPSender](trait.UDPSender.html) trait provides
+//! Definition and implementation for a virtualized UDP sending
+//! interface.
+//!
+//! The [UDPSender] trait provides
 //! an interface for kernel capsules to send a UDP packet, and the
-//! [UDPSendClient](trait.UDPSendClient.html) trait is implemented by
+//! [UDPSendClient] trait is implemented by
 //! upper layer clients to allow them to receive `send_done` callbacks once
 //! transmission has completed.
-//! In order to virtualize between both apps and kernel capsules, this file
-//! uses a MuxUdpSender which treats the userspace UDP driver as a kernel capsule
-//! with a special capability that allows it to bind to arbitrary ports. Therefore
-//! the correctness of port binding / packet transmission/delivery is also dependent
-//! on the port binding logic in the driver being correct.
-//! The MuxUdpSender acts as a FIFO queue for transmitted packets, with each capsule being allowed
-//! a single outstanding / unsent packet at a time.
-//! Because the userspace driver is viewed by the MuxUdpSender as being a single capsule,
-//! the userspace driver must queue app packets on its own, as it can only pass a single
-//! packet to the MuxUdpSender queue at a time.
+//!
+//! In order to virtualize between both apps and kernel capsules, this
+//! file uses a MuxUdpSender which treats the userspace UDP driver as
+//! a kernel capsule with a special capability that allows it to bind
+//! to arbitrary ports. Therefore the correctness of port binding /
+//! packet transmission/delivery is also dependent on the port binding
+//! logic in the driver being correct.
+//!
+//! The MuxUdpSender acts as a FIFO queue for transmitted packets,
+//! with each capsule being allowed a single outstanding / unsent
+//! packet at a time.
+//!
+//! Because the userspace driver is viewed by the MuxUdpSender as
+//! being a single capsule, the userspace driver must queue app
+//! packets on its own, as it can only pass a single packet to the
+//! MuxUdpSender queue at a time.
 
+use crate::net::ipv6::TransportHeader;
 use crate::net::ipv6::ip_utils::IPAddr;
 use crate::net::ipv6::ipv6_send::{IP6SendClient, IP6Sender};
-use crate::net::ipv6::TransportHeader;
 use crate::net::network_capabilities::{NetworkCapability, UdpVisibilityCapability};
-use crate::net::udp::udp_port_table::UdpPortBindingTx;
 use crate::net::udp::UDPHeader;
+use crate::net::udp::udp_port_table::UdpPortBindingTx;
 
 use core::cell::Cell;
 
+use kernel::ErrorCode;
 use kernel::capabilities::UdpDriverCapability;
 use kernel::collections::list::{List, ListLink, ListNode};
 use kernel::debug;
 use kernel::utilities::cells::{MapCell, OptionalCell};
 use kernel::utilities::leasable_buffer::SubSliceMut;
-use kernel::ErrorCode;
 
 pub struct MuxUdpSender<'a, T: IP6Sender<'a>> {
     sender_list: List<'a, UDPSendStruct<'a, T>>,
@@ -94,8 +102,8 @@ impl<'a, T: IP6Sender<'a>> IP6SendClient for MuxUdpSender<'a, T> {
     fn send_done(&self, result: Result<(), ErrorCode>) {
         let last_sender = self.sender_list.pop_head();
         let next_sender_option = self.sender_list.head(); // must check here, because udp driver
-                                                          // could queue addl. sends in response to
-                                                          // send_done.
+        // could queue addl. sends in response to
+        // send_done.
         last_sender.map(|last_sender| {
             last_sender
                 .client
@@ -156,11 +164,13 @@ pub trait UDPSendClient {
     fn send_done(&self, result: Result<(), ErrorCode>, dgram: SubSliceMut<'static, u8>);
 }
 
-/// This trait represents the bulk of the UDP functionality. The two
-/// variants of sending a packet (either via the `send_to` or `send` methods)
-/// represent whether the caller wants to construct a custom `UDPHeader` or
-/// not. Calling `send_to` tells the UDP layer to construct a default
-/// `UDPHeader` and forward the payload to the respective destination and port.
+/// This trait represents the bulk of the UDP functionality.
+///
+/// The two variants of sending a packet (either via the `send_to` or
+/// `send` methods) represent whether the caller wants to construct a
+/// custom `UDPHeader` or not. Calling `send_to` tells the UDP layer
+/// to construct a default `UDPHeader` and forward the payload to the
+/// respective destination and port.
 pub trait UDPSender<'a> {
     /// This function sets the client for the `UDPSender` instance
     ///
@@ -353,14 +363,14 @@ impl<'a, T: IP6Sender<'a>> UDPSendStruct<'a, T> {
         udp_vis: &'static UdpVisibilityCapability,
     ) -> UDPSendStruct<'a, T> {
         UDPSendStruct {
-            udp_mux_sender: udp_mux_sender,
+            udp_mux_sender,
             client: OptionalCell::empty(),
             next: ListLink::empty(),
             tx_buffer: MapCell::empty(),
             next_dest: Cell::new(IPAddr::new()),
             next_th: OptionalCell::empty(),
             binding: MapCell::empty(),
-            udp_vis: udp_vis,
+            udp_vis,
             net_cap: OptionalCell::empty(),
         }
     }

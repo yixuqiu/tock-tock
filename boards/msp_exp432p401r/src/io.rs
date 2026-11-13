@@ -2,17 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-use crate::CHIP;
-use crate::PROCESSES;
-use crate::PROCESS_PRINTER;
-
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::ptr::addr_of;
 use core::ptr::addr_of_mut;
 use kernel::debug;
-use kernel::debug::IoWrite;
 use kernel::hil::led;
+use kernel::utilities::io_write::IoWrite;
 use msp432::gpio::IntPinNr;
 use msp432::wdt::Wdt;
 
@@ -38,23 +33,22 @@ impl IoWrite for Uart {
 }
 
 /// Panic handler
-#[no_mangle]
 #[panic_handler]
-pub unsafe fn panic_fmt(info: &PanicInfo) -> ! {
+pub fn panic_fmt(info: &PanicInfo) -> ! {
     const LED1_PIN: IntPinNr = IntPinNr::P01_0;
     let gpio_pin = msp432::gpio::IntPin::new(LED1_PIN);
     let led = &mut led::LedHigh::new(&gpio_pin);
-    let writer = &mut *addr_of_mut!(UART);
     let wdt = Wdt::new();
 
     wdt.disable();
-    debug::panic(
-        &mut [led],
-        writer,
-        info,
-        &cortexm4::support::nop,
-        &*addr_of!(PROCESSES),
-        &*addr_of!(CHIP),
-        &*addr_of!(PROCESS_PRINTER),
-    )
+    let writer = unsafe { &mut *addr_of_mut!(UART) };
+    unsafe {
+        debug::panic_old(
+            &mut [led],
+            writer,
+            info,
+            &cortexm4::support::nop,
+            crate::PANIC_RESOURCES.get(),
+        )
+    }
 }

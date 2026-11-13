@@ -22,6 +22,7 @@
 
 use capsules_core::virtualizers::virtual_i2c::{I2CDevice, MuxI2C};
 use capsules_extra::fxos8700cq::Fxos8700cq;
+use kernel::hil::i2c::I2CDevice as _;
 
 use kernel::component::Component;
 
@@ -39,7 +40,7 @@ macro_rules! fxos8700_component_static {
         let fxo = kernel::static_buf!(capsules_extra::fxos8700cq::Fxos8700cq<'static>);
 
         (i2c_device, buffer, fxo)
-    };};
+    }};
 }
 
 pub struct Fxos8700Component<I: 'static + i2c::I2CMaster<'static>> {
@@ -57,7 +58,7 @@ impl<I: 'static + i2c::I2CMaster<'static>> Fxos8700Component<I> {
         Fxos8700Component {
             i2c_mux: i2c,
             i2c_address,
-            gpio: gpio,
+            gpio,
         }
     }
 }

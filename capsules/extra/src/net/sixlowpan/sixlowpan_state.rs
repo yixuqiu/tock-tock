@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
+//! 6loWPAN compression and reception.
+//!
 //! 6loWPAN (IPv6 over Low-Power Wireless Networks) is standard for compressing
 //! and fragmenting IPv6 packets over low power wireless networks, particularly
 //! ones with MTUs (Minimum Transmission Units) smaller than 1280 octets, like
@@ -25,7 +27,7 @@
 //! Transmit
 //! --------
 //! For a layer interested in sending a packet, this library exposes a
-//! [TxState](struct.TxState.html) struct that statefully compresses an
+//! [TxState] struct that statefully compresses an
 //! [IP6Packet](struct.IP6Packet.html) struct. First, the `TxState` object
 //! is initialized for compressing a new packet by calling the `TxState.init`
 //! method. The caller then repeatedly calls `TxState.next_fragment`, which
@@ -38,7 +40,7 @@
 //! The Sixlowpan library is responsible for receiving and reassembling
 //! individual 6LoWPAN-compressed frames. Upper layers interested in receiving
 //! the fully reassembled and decompressed IPv6 packet implement the
-//! [SixlowpanRxClient](trait.SixlowpanRxClient.html) trait, which is called
+//! [SixlowpanRxClient] trait, which is called
 //! after a packet is fully received.
 //!
 //! At a high level, clients interact with this module as shown in the diagrams
@@ -234,24 +236,26 @@ use crate::net::frag_utils::Bitmap;
 use crate::net::ieee802154::{Header, KeyId, MacAddress, PanID, SecurityLevel};
 use crate::net::ipv6::IP6Packet;
 use crate::net::sixlowpan::sixlowpan_compression;
-use crate::net::sixlowpan::sixlowpan_compression::{is_lowpan, ContextStore};
+use crate::net::sixlowpan::sixlowpan_compression::{ContextStore, is_lowpan};
 use crate::net::util::{network_slice_to_u16, u16_to_network_slice};
 
 use core::cell::Cell;
 use core::cmp::min;
 
+use kernel::ErrorCode;
 use kernel::collections::list::{List, ListLink, ListNode};
 use kernel::hil::radio;
 use kernel::hil::time;
 use kernel::hil::time::{Frequency, Ticks};
 use kernel::utilities::cells::{MapCell, TakeCell};
-use kernel::ErrorCode;
 
 // Reassembly timeout in seconds
 const FRAG_TIMEOUT: u32 = 60;
 
+/// Client trait for receiving 6lowpan frames.
+///
 /// Objects that implement this trait can set themselves to be the client
-/// for the [Sixlowpan](struct.Sixlowpan.html) struct, and will then receive
+/// for the [Sixlowpan] struct, and will then receive
 /// a callback once an IPv6 packet has been fully reassembled.
 pub trait SixlowpanRxClient {
     fn receive(&self, buf: &[u8], len: usize, result: Result<(), ErrorCode>);
@@ -355,7 +359,7 @@ impl<'a> TxState<'a> {
             dgram_offset: Cell::new(0),
 
             busy: Cell::new(false),
-            sixlowpan: sixlowpan,
+            sixlowpan,
         }
     }
 
@@ -625,7 +629,7 @@ impl<'a> TxState<'a> {
 
 /// Tracks the decompression and defragmentation of an IPv6 packet
 ///
-/// A list of `RxState`s is maintained by [Sixlowpan](struct.Sixlowpan.html) to
+/// A list of `RxState`s is maintained by [Sixlowpan] to
 /// keep track of ongoing packet reassemblies. The number of `RxState`s is the
 /// number of packets that can be reassembled at the same time. Generally,
 /// two `RxState`s are sufficient for normal-case operation.
@@ -646,7 +650,7 @@ pub struct RxState<'a> {
 }
 
 impl<'a> ListNode<'a, RxState<'a>> for RxState<'a> {
-    fn next(&'a self) -> &'a ListLink<RxState<'a>> {
+    fn next(&'a self) -> &'a ListLink<'a, RxState<'a>> {
         &self.next
     }
 }
@@ -787,8 +791,8 @@ impl<'a> RxState<'a> {
 ///
 /// The `new` method creates an instance of `Sixlowpan` that can send packets.
 /// To receive packets, `Sixlowpan` needs one or more
-/// [RxState](struct.RxState.html)s which can be added with `add_rx_state`. More
-/// [RxState](struct.RxState.html)s allow the `Sixlowpan` to receive more
+/// [RxState]s which can be added with `add_rx_state`. More
+/// [RxState]s allow the `Sixlowpan` to receive more
 /// packets concurrently.
 ///
 /// Finally, `set_client` controls the client that will receive transmission
@@ -850,7 +854,7 @@ impl<'a, A: time::Alarm<'a>, C: ContextStore> SixlowpanState<'a> for Sixlowpan<'
 
     /// Adds an additional `RxState` for reassembling IPv6 packets
     ///
-    /// Each [RxState](struct.RxState.html) struct allows an additional IPv6
+    /// Each [RxState] struct allows an additional IPv6
     /// packet to be reassembled concurrently.
     fn add_rx_state(&self, rx_state: &'a RxState<'a>) {
         self.rx_states.push_head(rx_state);
@@ -871,16 +875,16 @@ impl<'a, A: time::Alarm<'a>, C: ContextStore> Sixlowpan<'a, A, C> {
     /// * `ctx_store` - Stores IPv6 address nextwork context mappings
     ///
     /// * `tx_buf` - A buffer used for storing individual fragments of a packet
-    /// in transmission. This buffer must be at least the length of an 802.15.4
-    /// frame.
+    ///   in transmission. This buffer must be at least the length of an
+    ///   802.15.4 frame.
     ///
     /// * `clock` - A implementation of `Alarm` used for tracking the timing of
-    /// frame arrival. The clock should be continue running during sleep and
-    /// have an accuracy of at least 60 seconds.
+    ///   frame arrival. The clock should be continue running during sleep and
+    ///   have an accuracy of at least 60 seconds.
     pub fn new(ctx_store: C, clock: &'a A) -> Sixlowpan<'a, A, C> {
         Sixlowpan {
-            ctx_store: ctx_store,
-            clock: clock,
+            ctx_store,
+            clock,
             tx_dgram_tag: Cell::new(0),
             rx_client: Cell::new(None),
 

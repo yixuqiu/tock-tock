@@ -31,11 +31,10 @@ impl<'a, const NUM_PINS: usize> Pwm<'a, NUM_PINS> {
         grant: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<0>>,
     ) -> Pwm<'a, NUM_PINS> {
         assert!(u16::try_from(NUM_PINS).is_ok());
-        const EMPTY: OptionalCell<ProcessId> = OptionalCell::empty();
         Pwm {
-            pwm_pins: pwm_pins,
+            pwm_pins,
             apps: grant,
-            active_process: [EMPTY; NUM_PINS],
+            active_process: [const { OptionalCell::empty() }; NUM_PINS],
         }
     }
 
@@ -61,16 +60,17 @@ impl<'a, const NUM_PINS: usize> Pwm<'a, NUM_PINS> {
 }
 
 /// Provide an interface for userland.
-impl<'a, const NUM_PINS: usize> SyscallDriver for Pwm<'a, NUM_PINS> {
+impl<const NUM_PINS: usize> SyscallDriver for Pwm<'_, NUM_PINS> {
     /// Command interface.
     ///
     /// ### `command_num`
     ///
     /// - `0`: Driver existence check.
-    /// - `1`: Start the PWM pin output. First 16 bits of `data1` are used for the duty cycle, as a
-    ///     percentage with 2 decimals, and the last 16 bits of `data1` are used for the PWM channel
-    ///     to be controlled. `data2` is used for the frequency in hertz. For the duty cycle, 100% is
-    ///     the max duty cycle for this pin.
+    /// - `1`: Start the PWM pin output. First 16 bits of `data1` are used for
+    ///   the duty cycle, as a percentage with 2 decimals, and the last 16 bits
+    ///   of `data1` are used for the PWM channel to be controlled. `data2` is
+    ///   used for the frequency in hertz. For the duty cycle, 100% is the max
+    ///   duty cycle for this pin.
     /// - `2`: Stop the PWM output.
     /// - `3`: Return the maximum possible frequency for this pin.
     /// - `4`: Return number of PWM pins if this driver is included on the platform.
@@ -112,10 +112,25 @@ impl<'a, const NUM_PINS: usize> SyscallDriver for Pwm<'a, NUM_PINS> {
                         // Duty cycle is represented as a 4 digit number, so we divide by 10000 to get the percentage of the max duty cycle.
                         // e.g.: a duty cycle of 60.5% is represented as 6050, so the actual value of the duty cycle is
                         // 6050 * max_duty_cycle / 10000 = 0.605 * max_duty_cycle
+                        //
+                        // However, the max duty cycle might be large enough to overflow a u32, so
+                        // we cast to u64 to do the calculation.
+                        const fn ratio_max_duty_cycle(
+                            duty_cycle_hundredths: usize,
+                            max_cycles: usize,
+                        ) -> usize {
+                            let cycles_hundredths: u64 =
+                                duty_cycle_hundredths as u64 * max_cycles as u64;
+                            (cycles_hundredths / 10000) as usize
+                        }
+
                         self.pwm_pins[pin]
                             .start(
                                 frequency_hz,
-                                duty_cycle * self.pwm_pins[pin].get_maximum_duty_cycle() / 10000,
+                                ratio_max_duty_cycle(
+                                    duty_cycle,
+                                    self.pwm_pins[pin].get_maximum_duty_cycle(),
+                                ),
                             )
                             .into()
                     }

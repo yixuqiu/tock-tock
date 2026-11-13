@@ -4,9 +4,9 @@
 
 //! Flash Controller (FLCTL)
 
-use kernel::utilities::registers::interfaces::ReadWriteable;
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::ReadWriteable;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
 const FLCTL_BASE: StaticRef<FlCtlRegisters> =
     unsafe { StaticRef::new(0x4001_1000u32 as *const FlCtlRegisters) };
@@ -800,6 +800,8 @@ register_bitfields![u32,
     ]
 ];
 
+/// Wait states.
+///
 /// If the clock runs with a higher frequency than the flash is able to operate, it's possible to
 /// configure a certain amount of wait-states which stall the CPU in order to access the data within
 /// the flash in a reliable way.

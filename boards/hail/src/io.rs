@@ -6,13 +6,9 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::str;
 use kernel::debug;
-use kernel::debug::IoWrite;
 use kernel::hil::led;
 use kernel::hil::uart::{self, Configure};
-
-use crate::CHIP;
-use crate::PROCESSES;
-use crate::PROCESS_PRINTER;
+use kernel::utilities::io_write::IoWrite;
 
 struct Writer {
     initialized: bool,
@@ -32,7 +28,10 @@ impl IoWrite for Writer {
         // Here, we create a second instance of the USART0 struct.
         // This is okay because we only call this during a panic, and
         // we will never actually process the interrupts
-        let uart = unsafe { sam4l::usart::USART::new_usart0(CHIP.unwrap().pm) };
+        let pm = unsafe {
+            kernel::static_init!(sam4l::pm::PowerManager, sam4l::pm::PowerManager::new())
+        };
+        let uart = sam4l::usart::USART::new_usart0(pm);
         let regs_manager = &sam4l::usart::USARTRegManager::panic_new(&uart);
         if !self.initialized {
             self.initialized = true;
@@ -56,12 +55,11 @@ impl IoWrite for Writer {
 
 /// Panic handler.
 #[cfg(not(test))]
-#[no_mangle]
 #[panic_handler]
-pub unsafe fn panic_fmt(pi: &PanicInfo) -> ! {
+pub fn panic_fmt(pi: &PanicInfo) -> ! {
     // turn off the non panic leds, just in case
 
-    use core::ptr::{addr_of, addr_of_mut};
+    use core::ptr::addr_of_mut;
     let led_green = sam4l::gpio::GPIOPin::new(sam4l::gpio::Pin::PA14);
     led_green.enable_output();
     led_green.set();
@@ -71,14 +69,14 @@ pub unsafe fn panic_fmt(pi: &PanicInfo) -> ! {
 
     let red_pin = sam4l::gpio::GPIOPin::new(sam4l::gpio::Pin::PA13);
     let led_red = &mut led::LedLow::new(&red_pin);
-    let writer = &mut *addr_of_mut!(WRITER);
-    debug::panic(
-        &mut [led_red],
-        writer,
-        pi,
-        &cortexm4::support::nop,
-        &*addr_of!(PROCESSES),
-        &*addr_of!(CHIP),
-        &*addr_of!(PROCESS_PRINTER),
-    )
+    let writer = unsafe { &mut *addr_of_mut!(WRITER) };
+    unsafe {
+        debug::panic_old(
+            &mut [led_red],
+            writer,
+            pi,
+            &cortexm4::support::nop,
+            crate::PANIC_RESOURCES.get(),
+        )
+    }
 }

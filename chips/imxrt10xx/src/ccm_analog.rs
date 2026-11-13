@@ -11,11 +11,11 @@
 //    a Groups struct.
 // 3. Remove unused
 
+use kernel::utilities::StaticRef;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, register_structs, ReadWrite, RegisterLongName, WriteOnly,
+    ReadWrite, RegisterLongName, WriteOnly, register_bitfields, register_structs,
 };
-use kernel::utilities::StaticRef;
 
 /// Many CCM_ANALOG registers are laid out with additional set, clear, and toggle
 /// registers. This groups them together into an extended register.
@@ -613,7 +613,7 @@ impl CcmAnalog {
     ///
     /// Clamps `div_sel` to [54, 108].
     pub fn restart_pll1(&self, div_sel: u32) {
-        let div_sel = div_sel.min(108).max(54);
+        let div_sel = div_sel.clamp(54, 108);
 
         // Clear all bits except powerdown
         self.registers.pll_arm.reg.write(PLL_ARM::POWERDOWN::SET);

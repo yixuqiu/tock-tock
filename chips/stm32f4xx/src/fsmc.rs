@@ -2,45 +2,47 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-use crate::rcc;
+use crate::clocks::{Stm32f4Clocks, phclk};
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
-use kernel::hil::bus8080::{Bus8080, BusWidth, Client};
+use kernel::hil::bus8080::{Bus8080, BusAddr8080, BusWidth, Client};
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
-/// FSMC peripheral interface
-#[repr(C)]
-struct FsmcBankRegisters {
-    /// SRAM/NOR-Flash chip-select control register
-    bcr1: ReadWrite<u32, BCR::Register>,
-    /// SRAM/NOR-Flash chip-select timing register
-    btr1: ReadWrite<u32, BTR::Register>,
-    /// SRAM/NOR-Flash chip-select control register
-    bcr2: ReadWrite<u32, BCR::Register>,
-    /// SRAM/NOR-Flash chip-select timing register
-    btr2: ReadWrite<u32, BTR::Register>,
-    /// SRAM/NOR-Flash chip-select control register
-    bcr3: ReadWrite<u32, BCR::Register>,
-    /// SRAM/NOR-Flash chip-select timing register
-    btr3: ReadWrite<u32, BTR::Register>,
-    /// SRAM/NOR-Flash chip-select control register
-    bcr4: ReadWrite<u32, BCR::Register>,
-    /// SRAM/NOR-Flash chip-select timing register
-    btr4: ReadWrite<u32, BTR::Register>,
-    _reseved: [u8; 228],
-    /// SRAM/NOR-Flash write timing registers
-    bwtr1: ReadWrite<u32, BWTR::Register>,
-    /// SRAM/NOR-Flash write timing registers
-    bwtr2: ReadWrite<u32, BWTR::Register>,
-    /// SRAM/NOR-Flash write timing registers
-    bwtr3: ReadWrite<u32, BWTR::Register>,
-    /// SRAM/NOR-Flash write timing registers
-    bwtr4: ReadWrite<u32, BWTR::Register>,
+register_structs! {
+    /// FSMC peripheral interface
+    FsmcBankRegisters {
+        /// SRAM/NOR-Flash chip-select control register
+        (0x000 => bcr1: ReadWrite<u32, BCR::Register>),
+        /// SRAM/NOR-Flash chip-select timing register
+        (0x004 => btr1: ReadWrite<u32, BTR::Register>),
+        /// SRAM/NOR-Flash chip-select control register
+        (0x008 => bcr2: ReadWrite<u32, BCR::Register>),
+        /// SRAM/NOR-Flash chip-select timing register
+        (0x00C => btr2: ReadWrite<u32, BTR::Register>),
+        /// SRAM/NOR-Flash chip-select control register
+        (0x010 => bcr3: ReadWrite<u32, BCR::Register>),
+        /// SRAM/NOR-Flash chip-select timing register
+        (0x014 => btr3: ReadWrite<u32, BTR::Register>),
+        /// SRAM/NOR-Flash chip-select control register
+        (0x018 => bcr4: ReadWrite<u32, BCR::Register>),
+        /// SRAM/NOR-Flash chip-select timing register
+        (0x01C => btr4: ReadWrite<u32, BTR::Register>),
+        (0x020 => _reseved: [u8; 228]),
+        /// SRAM/NOR-Flash write timing registers
+        (0x104 => bwtr1: ReadWrite<u32, BWTR::Register>),
+        /// SRAM/NOR-Flash write timing registers
+        (0x108 => bwtr2: ReadWrite<u32, BWTR::Register>),
+        /// SRAM/NOR-Flash write timing registers
+        (0x10C => bwtr3: ReadWrite<u32, BWTR::Register>),
+        /// SRAM/NOR-Flash write timing registers
+        (0x110 => bwtr4: ReadWrite<u32, BWTR::Register>),
+        (0x114 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -133,13 +135,15 @@ register_bitfields![u32,
 const FSMC_BASE: StaticRef<FsmcBankRegisters> =
     unsafe { StaticRef::new(0xA000_0000 as *const FsmcBankRegisters) };
 
-/// FSMC Bank
-#[repr(C)]
-pub struct FsmcBank {
-    /// Address
-    reg: ReadWrite<u16>,
-    /// Data
-    ram: ReadWrite<u16>,
+register_structs! {
+    /// FSMC Bank
+    pub FsmcBank {
+        /// Address
+        (0x000 => reg: ReadWrite<u16>),
+        /// Data
+        (0x002 => ram: ReadWrite<u16>),
+        (0x004 => @END),
+    }
 }
 
 #[repr(usize)]
@@ -172,13 +176,13 @@ pub struct Fsmc<'a> {
 }
 
 impl<'a> Fsmc<'a> {
-    pub fn new(bank_addr: [Option<StaticRef<FsmcBank>>; 4], rcc: &'a rcc::Rcc) -> Self {
+    pub fn new(bank_addr: [Option<StaticRef<FsmcBank>>; 4], clocks: &'a dyn Stm32f4Clocks) -> Self {
         Self {
             registers: FSMC_BASE,
             bank: bank_addr,
-            clock: FsmcClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::AHB3(rcc::HCLK3::FMC),
-                rcc,
+            clock: FsmcClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::AHB3(phclk::HCLK3::FMC),
+                clocks,
             )),
             client: OptionalCell::empty(),
 
@@ -241,7 +245,7 @@ impl<'a> Fsmc<'a> {
 
     #[inline]
     pub fn read_reg(&self, bank: FsmcBanks) -> Option<u16> {
-        self.bank[bank as usize].map_or(None, |bank| Some(bank.ram.get()))
+        self.bank[bank as usize].map(|bank| bank.ram.get())
     }
 
     #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -298,7 +302,7 @@ impl DeferredCallClient for Fsmc<'_> {
     }
 }
 
-struct FsmcClock<'a>(rcc::PeripheralClock<'a>);
+struct FsmcClock<'a>(phclk::PeripheralClock<'a>);
 
 impl ClockInterface for FsmcClock<'_> {
     fn is_enabled(&self) -> bool {
@@ -315,9 +319,9 @@ impl ClockInterface for FsmcClock<'_> {
 }
 
 impl Bus8080<'static> for Fsmc<'_> {
-    fn set_addr(&self, addr_width: BusWidth, addr: usize) -> Result<(), ErrorCode> {
-        match addr_width {
-            BusWidth::Bits8 => {
+    fn set_addr(&self, addr: BusAddr8080) -> Result<(), ErrorCode> {
+        match addr {
+            BusAddr8080::BusAddr8(addr) => {
                 self.write_reg(FsmcBanks::Bank1, addr as u16);
                 self.deferred_call.set();
                 Ok(())

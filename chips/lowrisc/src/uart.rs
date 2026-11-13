@@ -10,10 +10,10 @@ use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::hil::uart;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::StaticRef;
 
 use crate::registers::uart_regs::UartRegisters;
 use crate::registers::uart_regs::{CTRL, FIFO_CTRL, INTR, STATUS, TIMEOUT_CTRL, WDATA};
@@ -58,7 +58,7 @@ impl<'a> Uart<'a> {
     pub fn new(base: StaticRef<UartRegisters>, clock_frequency: u32) -> Uart<'a> {
         Uart {
             registers: base,
-            clock_frequency: clock_frequency,
+            clock_frequency,
             tx_client: OptionalCell::empty(),
             rx_client: OptionalCell::empty(),
             rx_deferred_call: DeferredCall::new(),
@@ -132,15 +132,13 @@ impl<'a> Uart<'a> {
     fn enable_rx_timeout(&self, interbyte_timeout: u8) {
         let regs = self.registers;
 
-        // Program the timeout value
+        // Program the timeout value and enable the RX timeout feature in a
+        // single write, as a separate write to set EN would clear VAL.
         regs.timeout_ctrl
-            .write(TIMEOUT_CTRL::VAL.val(interbyte_timeout as u32));
-
-        // Enable RX timeout feature
-        regs.timeout_ctrl.write(TIMEOUT_CTRL::EN::SET);
+            .write(TIMEOUT_CTRL::VAL.val(interbyte_timeout as u32) + TIMEOUT_CTRL::EN::SET);
 
         // Enable RX timeout interrupt
-        regs.intr_enable.write(INTR::RX_TIMEOUT::SET);
+        regs.intr_enable.modify(INTR::RX_TIMEOUT::SET);
     }
 
     fn disable_rx_timeout(&self) {
@@ -435,7 +433,7 @@ impl<'a> hil::uart::ReceiveAdvanced<'a> for Uart<'a> {
     }
 }
 
-impl<'a> DeferredCallClient for Uart<'a> {
+impl DeferredCallClient for Uart<'_> {
     fn handle_deferred_call(&self) {
         self.consume_rx();
     }

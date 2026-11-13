@@ -10,7 +10,7 @@
 //! You need a touch that provides the `hil::touch::Touch` trait.
 //! An optional gesture client and a screen can be connected to it.
 //!
-//! ```rust
+//! ```rust,ignore
 //! let touch =
 //!     components::touch::TouchComponent::new(board_kernel, ts, Some(ts), Some(screen)).finalize(());
 //! ```
@@ -98,9 +98,9 @@ impl<'a> Touch<'a> {
         grant: Grant<App, UpcallCount<3>, AllowRoCount<0>, AllowRwCount<{ rw_allow::COUNT }>>,
     ) -> Touch<'a> {
         Touch {
-            touch: touch,
-            multi_touch: multi_touch,
-            screen: screen,
+            touch,
+            multi_touch,
+            screen,
             screen_rotation_offset: Cell::new(ScreenRotation::Normal),
             apps: grant,
         }
@@ -188,7 +188,7 @@ impl<'a> Touch<'a> {
     }
 }
 
-impl<'a> hil::touch::TouchClient for Touch<'a> {
+impl hil::touch::TouchClient for Touch<'_> {
     fn touch_event(&self, mut event: TouchEvent) {
         // update rotation if there is a screen attached
         self.update_rotation(&mut event);
@@ -211,23 +211,21 @@ impl<'a> hil::touch::TouchClient for Touch<'a> {
                         Some(size) => size as usize,
                         None => 0,
                     };
-                    kernel_data
-                        .schedule_upcall(
-                            0,
-                            (
-                                event_status,
-                                (event.x as usize) << 16 | event.y as usize,
-                                pressure_size,
-                            ),
-                        )
-                        .ok();
+                    let _ = kernel_data.schedule_upcall(
+                        0,
+                        (
+                            event_status,
+                            (event.x as usize) << 16 | event.y as usize,
+                            pressure_size,
+                        ),
+                    );
                 }
             });
         }
     }
 }
 
-impl<'a> hil::touch::MultiTouchClient for Touch<'a> {
+impl hil::touch::MultiTouchClient for Touch<'_> {
     fn touch_events(&self, touch_events: &[TouchEvent], num_events: usize) {
         let len = if touch_events.len() < num_events {
             touch_events.len()
@@ -296,12 +294,8 @@ impl<'a> hil::touch::MultiTouchClient for Touch<'a> {
                         let dropped_events = app.dropped_events;
                         if num > 0 {
                             app.ack = false;
-                            kernel_data
-                                .schedule_upcall(
-                                    2,
-                                    (num, dropped_events, if num < len { len - num } else { 0 }),
-                                )
-                                .ok();
+                            let _ = kernel_data
+                                .schedule_upcall(2, (num, dropped_events, len.saturating_sub(num)));
                         }
                     } else {
                         app.dropped_events += 1;
@@ -312,7 +306,7 @@ impl<'a> hil::touch::MultiTouchClient for Touch<'a> {
     }
 }
 
-impl<'a> hil::touch::GestureClient for Touch<'a> {
+impl hil::touch::GestureClient for Touch<'_> {
     fn gesture_event(&self, event: GestureEvent) {
         for app in self.apps.iter() {
             app.enter(|_app, kernel_data| {
@@ -324,13 +318,13 @@ impl<'a> hil::touch::GestureClient for Touch<'a> {
                     GestureEvent::ZoomIn => 5,
                     GestureEvent::ZoomOut => 6,
                 };
-                kernel_data.schedule_upcall(1, (gesture_id, 0, 0)).ok();
+                let _ = kernel_data.schedule_upcall(1, (gesture_id, 0, 0));
             });
         }
     }
 }
 
-impl<'a> SyscallDriver for Touch<'a> {
+impl SyscallDriver for Touch<'_> {
     fn command(
         &self,
         command_num: usize,

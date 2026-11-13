@@ -6,10 +6,10 @@
 //!
 //! Support Single Sample for now.
 
+use kernel::ErrorCode;
 use kernel::collections::list::{List, ListLink, ListNode};
 use kernel::hil;
 use kernel::utilities::cells::OptionalCell;
-use kernel::ErrorCode;
 
 /// ADC Mux
 pub struct MuxAdc<'a, A: hil::adc::Adc<'a>> {
@@ -38,7 +38,7 @@ impl<'a, A: hil::adc::Adc<'a>> hil::adc::Client for MuxAdc<'a, A> {
 impl<'a, A: hil::adc::Adc<'a>> MuxAdc<'a, A> {
     pub const fn new(adc: &'a A) -> MuxAdc<'a, A> {
         MuxAdc {
-            adc: adc,
+            adc,
             devices: List::new(),
             inflight: OptionalCell::empty(),
         }
@@ -88,14 +88,13 @@ pub struct AdcDevice<'a, A: hil::adc::Adc<'a>> {
 
 impl<'a, A: hil::adc::Adc<'a>> AdcDevice<'a, A> {
     pub const fn new(mux: &'a MuxAdc<'a, A>, channel: A::Channel) -> AdcDevice<'a, A> {
-        let adc_user = AdcDevice {
-            mux: mux,
-            channel: channel,
+        AdcDevice {
+            mux,
+            channel,
             operation: OptionalCell::empty(),
             next: ListLink::empty(),
             client: OptionalCell::empty(),
-        };
-        adc_user
+        }
     }
 
     pub fn add_to_mux(&'a self) {

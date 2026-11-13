@@ -11,7 +11,7 @@
 //!
 //! The tests can be enabled by adding this line to the `main()`
 //!
-//! ```rust
+//! ```rust,ignore
 //! tickv_test::run_tickv_tests(kvstore)
 //! ```
 //!
@@ -33,10 +33,10 @@
 use crate::tickv::{KVSystem, KVSystemClient, KeyType};
 use core::cell::Cell;
 use core::marker::PhantomData;
+use kernel::ErrorCode;
 use kernel::debug;
 use kernel::utilities::cells::{MapCell, TakeCell};
 use kernel::utilities::leasable_buffer::SubSliceMut;
-use kernel::ErrorCode;
 
 #[derive(Clone, Copy, PartialEq)]
 enum CurrentState {
@@ -61,7 +61,7 @@ impl<'a, S: KVSystem<'static>, T: KeyType> KVSystemTest<'a, S, T> {
         debug!("---Starting TicKV Tests---");
 
         Self {
-            kv_system: kv_system,
+            kv_system,
             phantom: PhantomData,
             value: MapCell::new(value),
             ret_buffer: TakeCell::new(static_buf),
@@ -70,8 +70,8 @@ impl<'a, S: KVSystem<'static>, T: KeyType> KVSystemTest<'a, S, T> {
     }
 }
 
-impl<'a, S: KVSystem<'static, K = T>, T: KeyType + core::fmt::Debug> KVSystemClient<T>
-    for KVSystemTest<'a, S, T>
+impl<S: KVSystem<'static, K = T>, T: KeyType + core::fmt::Debug> KVSystemClient<T>
+    for KVSystemTest<'_, S, T>
 {
     fn generate_key_complete(
         &self,

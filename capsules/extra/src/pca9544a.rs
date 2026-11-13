@@ -20,7 +20,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let pca9544a_i2c = static_init!(
@@ -76,7 +76,7 @@ mod upcall {
 #[derive(Default)]
 pub struct App {}
 
-pub struct PCA9544A<'a, I: i2c::I2CDevice> {
+pub struct PCA9544A<'a, I: i2c::I2CDevice<'a>> {
     i2c: &'a I,
     state: Cell<State>,
     buffer: TakeCell<'static, [u8]>,
@@ -84,7 +84,7 @@ pub struct PCA9544A<'a, I: i2c::I2CDevice> {
     owning_process: OptionalCell<ProcessId>,
 }
 
-impl<'a, I: i2c::I2CDevice> PCA9544A<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> PCA9544A<'a, I> {
     pub fn new(
         i2c: &'a I,
         buffer: &'static mut [u8],
@@ -153,7 +153,7 @@ impl<'a, I: i2c::I2CDevice> PCA9544A<'a, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> i2c::I2CClient for PCA9544A<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> i2c::I2CClient for PCA9544A<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], _status: Result<(), i2c::Error>) {
         match self.state.get() {
             State::ReadControl(field) => {
@@ -164,12 +164,10 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for PCA9544A<'_, I> {
 
                 self.owning_process.map(|pid| {
                     let _ = self.apps.enter(pid, |_app, upcalls| {
-                        upcalls
-                            .schedule_upcall(
-                                upcall::CHANNEL_DONE,
-                                (field as usize + 1, ret as usize, 0),
-                            )
-                            .ok();
+                        let _ = upcalls.schedule_upcall(
+                            upcall::CHANNEL_DONE,
+                            (field as usize + 1, ret as usize, 0),
+                        );
                     });
                 });
 
@@ -180,9 +178,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for PCA9544A<'_, I> {
             State::Done => {
                 self.owning_process.map(|pid| {
                     let _ = self.apps.enter(pid, |_app, upcalls| {
-                        upcalls
-                            .schedule_upcall(upcall::CHANNEL_DONE, (0, 0, 0))
-                            .ok();
+                        let _ = upcalls.schedule_upcall(upcall::CHANNEL_DONE, (0, 0, 0));
                     });
                 });
 
@@ -195,7 +191,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for PCA9544A<'_, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> SyscallDriver for PCA9544A<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> SyscallDriver for PCA9544A<'a, I> {
     /// Control the I2C selector.
     ///
     /// ### `command_num`

@@ -169,7 +169,7 @@ enum State {
 #[derive(Default)]
 pub struct App {}
 
-pub struct Lsm6dsoxtrI2C<'a, I: i2c::I2CDevice> {
+pub struct Lsm6dsoxtrI2C<'a, I: i2c::I2CDevice<'a>> {
     i2c: &'a I,
     state: Cell<State>,
     config_in_progress: Cell<bool>,
@@ -187,14 +187,14 @@ pub struct Lsm6dsoxtrI2C<'a, I: i2c::I2CDevice> {
     syscall_process: OptionalCell<ProcessId>,
 }
 
-impl<'a, I: i2c::I2CDevice> Lsm6dsoxtrI2C<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> Lsm6dsoxtrI2C<'a, I> {
     pub fn new(
         i2c: &'a I,
         buffer: &'static mut [u8],
         grant: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<0>>,
     ) -> Lsm6dsoxtrI2C<'a, I> {
         Lsm6dsoxtrI2C {
-            i2c: i2c,
+            i2c,
             state: Cell::new(State::Idle),
             config_in_progress: Cell::new(false),
             gyro_data_rate: Cell::new(LSM6DSOXGyroDataRate::LSM6DSOX_GYRO_RATE_12_5_HZ),
@@ -380,7 +380,7 @@ impl<'a, I: i2c::I2CDevice> Lsm6dsoxtrI2C<'a, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> i2c::I2CClient for Lsm6dsoxtrI2C<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         match self.state.get() {
             State::IsPresent => {
@@ -405,16 +405,14 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
 
                 self.syscall_process.take().map(|pid| {
                     let _res = self.apps.enter(pid, |_app, upcalls| {
-                        upcalls
-                            .schedule_upcall(
+                        let _ = upcalls.schedule_upcall(
+                            0,
+                            (
+                                into_statuscode(status.map_err(|i2c_error| i2c_error.into())),
+                                usize::from(self.is_present.get()),
                                 0,
-                                (
-                                    into_statuscode(status.map_err(|i2c_error| i2c_error.into())),
-                                    usize::from(self.is_present.get()),
-                                    0,
-                                ),
-                            )
-                            .ok();
+                            ),
+                        );
                     });
                 });
             }
@@ -426,8 +424,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
                 let mut y: usize = 0;
                 let mut z: usize = 0;
 
-                if status == Ok(()) {
-                    self.nine_dof_client.map(|nine_dof_client| {
+                self.nine_dof_client.map(|nine_dof_client| {
+                    if status == Ok(()) {
                         let scale_factor = self.accel_scale.get() as usize;
                         x = ((((buffer[0] as u16 + ((buffer[1] as u16) << 8)) as i16) as isize)
                             * (SCALE_FACTOR_ACCEL[scale_factor] as isize)
@@ -440,12 +438,10 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
                             * (SCALE_FACTOR_ACCEL[scale_factor] as isize)
                             / 1000) as usize;
                         nine_dof_client.callback(x, y, z)
-                    });
-                } else {
-                    self.nine_dof_client.map(|client| {
-                        client.callback(0, 0, 0);
-                    });
-                };
+                    } else {
+                        nine_dof_client.callback(0, 0, 0)
+                    }
+                });
                 self.buffer.replace(buffer);
                 self.i2c.disable();
                 self.state.set(State::Idle);
@@ -455,8 +451,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
                 let mut x: usize = 0;
                 let mut y: usize = 0;
                 let mut z: usize = 0;
-                if status == Ok(()) {
-                    self.nine_dof_client.map(|nine_dof_client| {
+                self.nine_dof_client.map(|nine_dof_client| {
+                    if status == Ok(()) {
                         let scale_factor = self.gyro_range.get() as usize;
                         x = (((buffer[0] as u16 + ((buffer[1] as u16) << 8)) as i16) as isize
                             * (SCALE_FACTOR_GYRO[scale_factor] as isize)
@@ -469,12 +465,10 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
                             * (SCALE_FACTOR_GYRO[scale_factor] as isize)
                             / 100) as usize;
                         nine_dof_client.callback(x, y, z)
-                    });
-                } else {
-                    self.nine_dof_client.map(|client| {
-                        client.callback(0, 0, 0);
-                    });
-                };
+                    } else {
+                        nine_dof_client.callback(0, 0, 0)
+                    }
+                });
                 self.buffer.replace(buffer);
                 self.i2c.disable();
                 self.state.set(State::Idle);
@@ -489,9 +483,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
                         * 100) as i32),
                     Err(i2c_error) => Err(i2c_error.into()),
                 };
-                self.temperature_client.map(|client| {
-                    client.callback(temperature);
-                });
+                self.temperature_client
+                    .map(|client| client.callback(temperature));
                 self.buffer.replace(buffer);
                 self.i2c.disable();
                 self.state.set(State::Idle);
@@ -515,16 +508,14 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
                 }
                 self.syscall_process.take().map(|pid| {
                     let _res = self.apps.enter(pid, |_app, upcalls| {
-                        upcalls
-                            .schedule_upcall(
+                        let _ = upcalls.schedule_upcall(
+                            0,
+                            (
+                                into_statuscode(status.map_err(|i2c_error| i2c_error.into())),
+                                usize::from(status == Ok(())),
                                 0,
-                                (
-                                    into_statuscode(status.map_err(|i2c_error| i2c_error.into())),
-                                    usize::from(status == Ok(())),
-                                    0,
-                                ),
-                            )
-                            .ok();
+                            ),
+                        );
                     });
                 });
             }
@@ -536,16 +527,14 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
                 self.config_in_progress.set(false);
                 self.syscall_process.take().map(|pid| {
                     let _res = self.apps.enter(pid, |_app, upcalls| {
-                        upcalls
-                            .schedule_upcall(
+                        let _ = upcalls.schedule_upcall(
+                            0,
+                            (
+                                into_statuscode(status.map_err(|i2c_error| i2c_error.into())),
+                                usize::from(status == Ok(())),
                                 0,
-                                (
-                                    into_statuscode(status.map_err(|i2c_error| i2c_error.into())),
-                                    usize::from(status == Ok(())),
-                                    0,
-                                ),
-                            )
-                            .ok();
+                            ),
+                        );
                     });
                 });
             }
@@ -553,7 +542,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm6dsoxtrI2C<'_, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> SyscallDriver for Lsm6dsoxtrI2C<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> SyscallDriver for Lsm6dsoxtrI2C<'a, I> {
     fn command(
         &self,
         command_num: usize,
@@ -627,7 +616,7 @@ impl<I: i2c::I2CDevice> SyscallDriver for Lsm6dsoxtrI2C<'_, I> {
     }
 }
 
-impl<'a, I: i2c::I2CDevice> NineDof<'a> for Lsm6dsoxtrI2C<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> NineDof<'a> for Lsm6dsoxtrI2C<'a, I> {
     fn set_client(&self, nine_dof_client: &'a dyn NineDofClient) {
         self.nine_dof_client.replace(nine_dof_client);
     }
@@ -641,7 +630,7 @@ impl<'a, I: i2c::I2CDevice> NineDof<'a> for Lsm6dsoxtrI2C<'a, I> {
     }
 }
 
-impl<'a, I: i2c::I2CDevice> sensors::TemperatureDriver<'a> for Lsm6dsoxtrI2C<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> sensors::TemperatureDriver<'a> for Lsm6dsoxtrI2C<'a, I> {
     fn set_client(&self, temperature_client: &'a dyn sensors::TemperatureClient) {
         self.temperature_client.replace(temperature_client);
     }

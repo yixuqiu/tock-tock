@@ -13,10 +13,21 @@ This pull request was tested by...
 This pull request still needs...
 
 
-### Documentation Updated
-
-- [ ] Updated the relevant files in `/docs`, or no updates are required.
-
-### Formatting
+### Checklist
 
 - [ ] Ran `make prepush`.
+
+
+### PR Contents
+
+#### Documentation
+
+- [ ] Updated the relevant files in `/docs` and the [Book](https://github.com/tock/book).
+- [ ] No documentation updates are required.
+
+#### AI Use
+
+- [ ] No AI was used in this PR.
+- [ ] AI was used in this PR. I have read [Tock's AI policy](https://github.com/tock/tock/blob/master/.github/CONTRIBUTING.md#ai-policy) and have properly disclosed my AI use below. This PR comment, and any subsequent PR interactions must not be generated using AI, except for under a `<details>` drawer.
+
+<!-- Include details of AI use here, if you used any -->

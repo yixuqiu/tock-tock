@@ -7,14 +7,14 @@
 use crate::{dma, ref_module, timer};
 use core::cell::Cell;
 use core::{mem, slice};
+use kernel::ErrorCode;
 use kernel::hil;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, register_structs, ReadOnly, ReadWrite, WriteOnly,
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
 };
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
 
 const ADC_BASE: StaticRef<AdcRegisters> =
     unsafe { StaticRef::new(0x4001_2000 as *const AdcRegisters) };
@@ -577,7 +577,7 @@ enum AdcMode {
 /// This function converts a `&'static mut [u8]` slice reference to a
 /// `&'static mut [u16]` slice.
 ///
-/// ## Safety
+/// # Safety
 ///
 /// It is a necessary condition for the passed buffer to have an even
 /// length, otherwise the function will panic because the conversion
@@ -591,7 +591,7 @@ enum AdcMode {
 /// This function is necessary since the DMA returns only `u8`-buffers
 /// whereas the ADC-traits only work with `u16`-buffers.
 unsafe fn buf_u8_to_buf_u16(buf: &'static mut [u8]) -> &'static mut [u16] {
-    if (buf.len() % 2) > 0 {
+    if !buf.len().is_multiple_of(2) {
         panic!("ADC: cannot convert an u8 array with an odd length to an u16 array");
     }
 
@@ -740,7 +740,7 @@ impl<'a> Adc<'a> {
     }
 }
 
-impl<'a> dma::DmaClient for Adc<'a> {
+impl dma::DmaClient for Adc<'_> {
     fn transfer_done(
         &self,
         _tx_buf: Option<&'static mut [u8]>,

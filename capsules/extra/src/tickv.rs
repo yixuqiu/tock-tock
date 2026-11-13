@@ -10,7 +10,7 @@
 //! This capsule interfaces with flash and exposes the Tock `tickv::kv_system`
 //! interface to others.
 //!
-//! ```
+//! ```text
 //! +-----------------------+
 //! |  Capsule using K-V    |
 //! +-----------------------+
@@ -34,11 +34,11 @@
 //! ```
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil::flash::{self, Flash};
 use kernel::hil::hasher::{self, Hasher};
 use kernel::utilities::cells::{MapCell, OptionalCell, TakeCell};
 use kernel::utilities::leasable_buffer::{SubSlice, SubSliceMut};
-use kernel::ErrorCode;
 use tickv::AsyncTicKV;
 
 /// The type of keys, this should define the output size of the digest
@@ -123,8 +123,8 @@ pub trait KVSystem<'a> {
     /// the append operation will fail. To update an existing key to a new value
     /// the key must first be invalidated.
     ///
-    /// - `key`: A hashed key. This key will be used in future to retrieve
-    ///          or remove the `value`.
+    /// - `key`: A hashed key. This key will be used in future to retrieve or
+    ///   remove the `value`.
     /// - `value`: A buffer containing the data to be stored to flash.
     ///
     /// On success nothing will be returned.
@@ -235,13 +235,12 @@ impl<'a, F: Flash> TickFSFlashCtrl<'a, F> {
     }
 }
 
-impl<'a, F: Flash, const PAGE_SIZE: usize> tickv::flash_controller::FlashController<PAGE_SIZE>
-    for TickFSFlashCtrl<'a, F>
+impl<F: Flash, const PAGE_SIZE: usize> tickv::flash_controller::FlashController<PAGE_SIZE>
+    for TickFSFlashCtrl<'_, F>
 {
     fn read_region(
         &self,
         region_number: usize,
-        _offset: usize,
         _buf: &mut [u8; PAGE_SIZE],
     ) -> Result<(), tickv::error_codes::ErrorCode> {
         if self
@@ -344,49 +343,39 @@ impl<'a, F: Flash, H: Hasher<'a, 8>, const PAGE_SIZE: usize> TicKVSystem<'a, F, 
         match self.next_operation.get() {
             Operation::None | Operation::Init => {}
             Operation::GetKey => {
-                match self.get_value(
+                if let Err((key, value, error)) = self.get_value(
                     self.key_buffer.take().unwrap(),
                     self.value_buffer.take().unwrap(),
                 ) {
-                    Err((key, value, error)) => {
-                        self.client.map(move |cb| {
-                            cb.get_value_complete(Err(error), key, value);
-                        });
-                    }
-                    _ => {}
+                    self.client.map(move |cb| {
+                        cb.get_value_complete(Err(error), key, value);
+                    });
                 }
             }
             Operation::AppendKey => {
-                match self.append_key(
+                if let Err((key, value, error)) = self.append_key(
                     self.key_buffer.take().unwrap(),
                     self.value_buffer.take().unwrap(),
                 ) {
-                    Err((key, value, error)) => {
-                        self.client.map(move |cb| {
-                            cb.append_key_complete(Err(error), key, value);
-                        });
-                    }
-                    _ => {}
+                    self.client.map(move |cb| {
+                        cb.append_key_complete(Err(error), key, value);
+                    });
                 }
             }
             Operation::InvalidateKey => {
-                match self.invalidate_key(self.key_buffer.take().unwrap()) {
-                    Err((key, error)) => {
-                        self.client.map(move |cb| {
-                            cb.invalidate_key_complete(Err(error), key);
-                        });
-                    }
-                    _ => {}
+                if let Err((key, error)) = self.invalidate_key(self.key_buffer.take().unwrap()) {
+                    self.client.map(move |cb| {
+                        cb.invalidate_key_complete(Err(error), key);
+                    });
                 }
             }
-            Operation::GarbageCollect => match self.garbage_collect() {
-                Err(error) => {
+            Operation::GarbageCollect => {
+                if let Err(error) = self.garbage_collect() {
                     self.client.map(move |cb| {
                         cb.garbage_collect_complete(Err(error));
                     });
                 }
-                _ => {}
-            },
+            }
         }
         self.next_operation.set(Operation::None);
     }
@@ -535,6 +524,11 @@ impl<'a, F: Flash, H: Hasher<'a, 8>, const PAGE_SIZE: usize> flash::Client<F>
                     self.operation.set(Operation::None);
                 }
                 Ok(tickv::success_codes::SuccessCode::Queued) => {}
+                Err(tickv::error_codes::ErrorCode::ReadNotReady(_))
+                | Err(tickv::error_codes::ErrorCode::WriteNotReady(_))
+                | Err(tickv::error_codes::ErrorCode::EraseNotReady(_)) => {
+                    // Need to do another flash operation.
+                }
                 Err(e) => {
                     self.operation.set(Operation::None);
 

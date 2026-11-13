@@ -12,7 +12,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let fxos8700_i2c = static_init!(I2CDevice, I2CDevice::new(i2c_bus, 0x1e));
@@ -26,11 +26,11 @@
 //! ```
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::hil::gpio;
 use kernel::hil::i2c::{Error, I2CClient, I2CDevice};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 /// Recommended buffer length for this driver.
 pub const BUF_LEN: usize = 6;
@@ -182,7 +182,7 @@ enum State {
 }
 
 pub struct Fxos8700cq<'a> {
-    i2c: &'a dyn I2CDevice,
+    i2c: &'a dyn I2CDevice<'a>,
     interrupt_pin1: &'a dyn gpio::InterruptPin<'a>,
     state: Cell<State>,
     buffer: TakeCell<'static, [u8]>,
@@ -191,13 +191,13 @@ pub struct Fxos8700cq<'a> {
 
 impl<'a> Fxos8700cq<'a> {
     pub fn new(
-        i2c: &'a dyn I2CDevice,
+        i2c: &'a dyn I2CDevice<'a>,
         interrupt_pin1: &'a dyn gpio::InterruptPin<'a>,
         buffer: &'static mut [u8],
     ) -> Fxos8700cq<'a> {
         Fxos8700cq {
-            i2c: i2c,
-            interrupt_pin1: interrupt_pin1,
+            i2c,
+            interrupt_pin1,
             state: Cell::new(State::Disabled),
             buffer: TakeCell::new(buffer),
             callback: OptionalCell::empty(),

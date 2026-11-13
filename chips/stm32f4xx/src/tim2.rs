@@ -2,63 +2,63 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-use cortexm4::support::atomic;
-use kernel::hil::time::{
-    Alarm, AlarmClient, Counter, Freq16KHz, Frequency, OverflowClient, Ticks, Ticks32, Time,
-};
+use cortexm4f::support::with_interrupts_disabled;
+use kernel::ErrorCode;
+use kernel::hil::time::{Alarm, AlarmClient, Counter, Freq16KHz, Frequency, Ticks, Ticks32, Time};
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{ReadWrite, WriteOnly, register_bitfields, register_structs};
 
+use crate::clocks::{Stm32f4Clocks, phclk};
 use crate::nvic;
-use crate::rcc;
 
-/// General purpose timers
-#[repr(C)]
-struct Tim2Registers {
-    /// control register 1
-    cr1: ReadWrite<u32, CR1::Register>,
-    /// control register 2
-    cr2: ReadWrite<u32, CR2::Register>,
-    /// slave mode control register
-    smcr: ReadWrite<u32, SMCR::Register>,
-    /// DMA/Interrupt enable register
-    dier: ReadWrite<u32, DIER::Register>,
-    /// status register
-    sr: ReadWrite<u32, SR::Register>,
-    /// event generation register
-    egr: WriteOnly<u32, EGR::Register>,
-    /// capture/compare mode register 1 (output mode)
-    ccmr1_output: ReadWrite<u32, CCMR1_Output::Register>,
-    /// capture/compare mode register 2 (output mode)
-    ccmr2_output: ReadWrite<u32, CCMR2_Output::Register>,
-    /// capture/compare enable register
-    ccer: ReadWrite<u32, CCER::Register>,
-    /// counter
-    cnt: ReadWrite<u32, CNT::Register>,
-    /// prescaler
-    psc: ReadWrite<u32>,
-    /// auto-reload register
-    arr: ReadWrite<u32, ARR::Register>,
-    _reserved0: [u8; 4],
-    /// capture/compare register 1
-    ccr1: ReadWrite<u32, CCR1::Register>,
-    /// capture/compare register 2
-    ccr2: ReadWrite<u32, CCR2::Register>,
-    /// capture/compare register 3
-    ccr3: ReadWrite<u32, CCR3::Register>,
-    /// capture/compare register 4
-    ccr4: ReadWrite<u32, CCR4::Register>,
-    _reserved1: [u8; 4],
-    /// DMA control register
-    dcr: ReadWrite<u32, DCR::Register>,
-    /// DMA address for full transfer
-    dmar: ReadWrite<u32>,
-    /// TIM5 option register
-    or_: ReadWrite<u32>,
+register_structs! {
+    /// General purpose timers
+    Tim2Registers {
+        /// control register 1
+        (0x000 => cr1: ReadWrite<u32, CR1::Register>),
+        /// control register 2
+        (0x004 => cr2: ReadWrite<u32, CR2::Register>),
+        /// slave mode control register
+        (0x008 => smcr: ReadWrite<u32, SMCR::Register>),
+        /// DMA/Interrupt enable register
+        (0x00C => dier: ReadWrite<u32, DIER::Register>),
+        /// status register
+        (0x010 => sr: ReadWrite<u32, SR::Register>),
+        /// event generation register
+        (0x014 => egr: WriteOnly<u32, EGR::Register>),
+        /// capture/compare mode register 1 (output mode)
+        (0x018 => ccmr1_output: ReadWrite<u32, CCMR1_Output::Register>),
+        /// capture/compare mode register 2 (output mode)
+        (0x01C => ccmr2_output: ReadWrite<u32, CCMR2_Output::Register>),
+        /// capture/compare enable register
+        (0x020 => ccer: ReadWrite<u32, CCER::Register>),
+        /// counter
+        (0x024 => cnt: ReadWrite<u32, CNT::Register>),
+        /// prescaler
+        (0x028 => psc: ReadWrite<u32>),
+        /// auto-reload register
+        (0x02C => arr: ReadWrite<u32, ARR::Register>),
+        (0x030 => _reserved0: [u8; 4]),
+        /// capture/compare register 1
+        (0x034 => ccr1: ReadWrite<u32, CCR1::Register>),
+        /// capture/compare register 2
+        (0x038 => ccr2: ReadWrite<u32, CCR2::Register>),
+        /// capture/compare register 3
+        (0x03C => ccr3: ReadWrite<u32, CCR3::Register>),
+        /// capture/compare register 4
+        (0x040 => ccr4: ReadWrite<u32, CCR4::Register>),
+        (0x044 => _reserved1: [u8; 4]),
+        /// DMA control register
+        (0x048 => dcr: ReadWrite<u32, DCR::Register>),
+        /// DMA address for full transfer
+        (0x04C => dmar: ReadWrite<u32>),
+        /// TIM5 option register
+        (0x050 => or_: ReadWrite<u32>),
+        (0x054 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -319,12 +319,12 @@ pub struct Tim2<'a> {
 }
 
 impl<'a> Tim2<'a> {
-    pub const fn new(rcc: &'a rcc::Rcc) -> Self {
+    pub const fn new(clocks: &'a dyn Stm32f4Clocks) -> Self {
         Self {
             registers: TIM2_BASE,
-            clock: Tim2Clock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::APB1(rcc::PCLK1::TIM2),
-                rcc,
+            clock: Tim2Clock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::APB1(phclk::PCLK1::TIM2),
+                clocks,
             )),
             client: OptionalCell::empty(),
             irqn: nvic::TIM2,
@@ -355,7 +355,11 @@ impl<'a> Tim2<'a> {
         // enabled.
 
         self.registers.arr.set(0xFFFF_FFFF - 1);
+        self.calibrate();
+    }
 
+    // set up the prescaler for the target frequency (16KHz)
+    pub fn calibrate(&self) {
         let clk_freq = self.clock.0.get_frequency();
 
         // TIM2 uses PCLK1. Set the prescaler to the current PCLK1 frequency divided by the wanted
@@ -371,6 +375,16 @@ impl<'a> Tim2<'a> {
         self.registers.egr.write(EGR::UG::SET);
         self.registers.cr1.modify(CR1::CEN::SET);
     }
+
+    // get the value of the cnt register
+    pub fn get_timer_cnt(&self) -> u32 {
+        self.registers.cnt.get()
+    }
+
+    // set the value of the cnt register
+    pub fn set_timer_cnt(&self, value: u32) {
+        self.registers.cnt.set(value);
+    }
 }
 
 impl Time for Tim2<'_> {
@@ -383,8 +397,6 @@ impl Time for Tim2<'_> {
 }
 
 impl<'a> Counter<'a> for Tim2<'a> {
-    fn set_overflow_client(&self, _client: &'a dyn OverflowClient) {}
-
     // starts the timer
     fn start(&self) -> Result<(), ErrorCode> {
         self.start();
@@ -433,13 +445,11 @@ impl<'a> Alarm<'a> for Tim2<'a> {
     }
 
     fn disarm(&self) -> Result<(), ErrorCode> {
-        unsafe {
-            atomic(|| {
-                // Disable counter
-                self.registers.dier.modify(DIER::CC1IE::CLEAR);
-                cortexm4::nvic::Nvic::new(self.irqn).clear_pending();
-            });
-        }
+        with_interrupts_disabled(|| {
+            // Disable counter
+            self.registers.dier.modify(DIER::CC1IE::CLEAR);
+            cortexm4f::nvic::Nvic::new(self.irqn).clear_pending();
+        });
         Ok(())
     }
 
@@ -453,7 +463,7 @@ impl<'a> Alarm<'a> for Tim2<'a> {
     }
 }
 
-struct Tim2Clock<'a>(rcc::PeripheralClock<'a>);
+struct Tim2Clock<'a>(phclk::PeripheralClock<'a>);
 
 impl ClockInterface for Tim2Clock<'_> {
     fn is_enabled(&self) -> bool {

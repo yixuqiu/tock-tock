@@ -3,9 +3,10 @@
 // Copyright Tock Contributors 2022.
 
 //! Implements Type-Length-Value (TLV) encoding and decoding as outlined
-//! in the Thread 1.1.1 Specification. TLVs are used to serialize
-//! information exchanged during mesh link establishment (MLE). MLE is
-//! covered in Chapter 4.
+//! in the Thread 1.1.1 Specification.
+//!
+//! TLVs are used to serialize information exchanged during mesh link
+//! establishment (MLE). MLE is covered in Chapter 4.
 //!
 //! MLE messages consist of a command type and a series of TLV parameters.
 //!
@@ -28,7 +29,7 @@
 //!
 //! 1. Type   - A one-byte TLV type number.
 //! 2. Length - A one-byte number representing the length of the TLV
-//!             value in bytes.
+//!    value in bytes.
 //! 3. Value  - The TLV value.
 //!
 //! For some TLVs, the TLV type number is shifted left by one to leave the
@@ -62,8 +63,8 @@
 //      if either of the dataset tlvs are sent?
 
 use crate::net::stream::SResult;
-use crate::net::stream::{decode_bytes_be, decode_u16, decode_u32, decode_u8};
-use crate::net::stream::{encode_bytes, encode_bytes_be, encode_u16, encode_u32, encode_u8};
+use crate::net::stream::{decode_bytes_be, decode_u8, decode_u16, decode_u32};
+use crate::net::stream::{encode_bytes, encode_bytes_be, encode_u8, encode_u16, encode_u32};
 use core::mem;
 
 const TL_WIDTH: usize = 2; // Type and length fields of TLV are each one byte.
@@ -308,7 +309,7 @@ impl Tlv<'_> {
     /// the TLV type.
     /// `SResult::Error` is returned if the type field does not match any
     /// implemented TLV type.
-    pub fn decode(buf: &[u8]) -> SResult<Tlv> {
+    pub fn decode(buf: &[u8]) -> SResult<Tlv<'_>> {
         let (offset, tlv_type) = dec_try!(buf; decode_u8);
         let tlv_type = TlvType::from(tlv_type);
         let (offset, length) = dec_try!(buf, offset; decode_u8);
@@ -356,11 +357,11 @@ impl Tlv<'_> {
                 stream_done!(
                     offset,
                     Tlv::LeaderData {
-                        partition_id: partition_id,
-                        weighting: weighting,
-                        data_version: data_version,
-                        stable_data_version: stable_data_version,
-                        leader_router_id: leader_router_id,
+                        partition_id,
+                        weighting,
+                        data_version,
+                        stable_data_version,
+                        leader_router_id,
                     }
                 )
             }
@@ -400,15 +401,15 @@ impl Tlv<'_> {
                 stream_done!(
                     offset,
                     Tlv::Connectivity {
-                        parent_priority: parent_priority,
-                        link_quality_3: link_quality_3,
-                        link_quality_2: link_quality_2,
-                        link_quality_1: link_quality_1,
-                        leader_cost: leader_cost,
-                        id_sequence: id_sequence,
-                        active_routers: active_routers,
-                        sed_buffer_size: sed_buffer_size,
-                        sed_datagram_count: sed_datagram_count,
+                        parent_priority,
+                        link_quality_3,
+                        link_quality_2,
+                        link_quality_1,
+                        leader_cost,
+                        id_sequence,
+                        active_routers,
+                        sed_buffer_size,
+                        sed_datagram_count,
                     }
                 )
             }
@@ -652,7 +653,7 @@ impl NetworkDataTlv<'_> {
     /// otherwise.
     /// `SResult::Error` is returned if the type field does not match any
     /// implemented TLV type.
-    pub fn decode(buf: &[u8]) -> SResult<(NetworkDataTlv, bool)> {
+    pub fn decode(buf: &[u8]) -> SResult<(NetworkDataTlv<'_>, bool)> {
         let (offset, tlv_type_field) = dec_try!(buf; decode_u8);
         let tlv_type_raw = tlv_type_field >> 1;
         let tlv_type = NetworkDataTlvType::from(tlv_type_raw);
@@ -668,9 +669,9 @@ impl NetworkDataTlv<'_> {
                     offset + length as usize,
                     (
                         NetworkDataTlv::Prefix {
-                            domain_id: domain_id,
-                            prefix_length_bits: prefix_length_bits,
-                            prefix: prefix,
+                            domain_id,
+                            prefix_length_bits,
+                            prefix,
                             sub_tlvs: &buf[offset..offset + length as usize],
                         },
                         stable
@@ -685,8 +686,8 @@ impl NetworkDataTlv<'_> {
                     offset,
                     (
                         NetworkDataTlv::CommissioningData {
-                            com_length: com_length,
-                            com_data: com_data,
+                            com_length,
+                            com_data,
                         },
                         stable
                     )
@@ -704,11 +705,11 @@ impl NetworkDataTlv<'_> {
                     offset + length as usize,
                     (
                         NetworkDataTlv::Service {
-                            thread_enterprise_number: thread_enterprise_number,
-                            s_id: s_id,
-                            s_enterprise_number: s_enterprise_number,
-                            s_service_data_length: s_service_data_length,
-                            s_service_data: s_service_data,
+                            thread_enterprise_number,
+                            s_id,
+                            s_enterprise_number,
+                            s_service_data_length,
+                            s_service_data,
                             sub_tlvs: &buf[offset..offset + length as usize],
                         },
                         stable
@@ -809,7 +810,7 @@ impl PrefixSubTlv<'_> {
     /// otherwise.
     /// `SResult::Error` is returned if the type field does not match any
     /// implemented TLV type.
-    pub fn decode(buf: &[u8]) -> SResult<(PrefixSubTlv, bool)> {
+    pub fn decode(buf: &[u8]) -> SResult<(PrefixSubTlv<'_>, bool)> {
         let (offset, tlv_type_field) = dec_try!(buf; decode_u8);
         let tlv_type_raw = tlv_type_field >> 1;
         let tlv_type = PrefixSubTlvType::from(tlv_type_raw);
@@ -839,9 +840,9 @@ impl PrefixSubTlv<'_> {
                     offset,
                     (
                         PrefixSubTlv::SixLoWpanId {
-                            context_id_compress: context_id_compress,
-                            context_id: context_id,
-                            context_length: context_length,
+                            context_id_compress,
+                            context_id,
+                            context_length,
                         },
                         stable
                     )
@@ -909,8 +910,8 @@ impl HasRouteTlvValue {
         stream_done!(
             offset,
             HasRouteTlvValue {
-                r_border_router_16: r_border_router_16,
-                r_preference: r_preference,
+                r_border_router_16,
+                r_preference,
             }
         )
     }
@@ -953,8 +954,8 @@ impl BorderRouterTlvValue {
         stream_done!(
             offset,
             BorderRouterTlvValue {
-                p_border_router_16: p_border_router_16,
-                p_bits: p_bits,
+                p_border_router_16,
+                p_bits,
             }
         )
     }
@@ -1016,8 +1017,8 @@ impl ServiceSubTlv {
                     offset,
                     (
                         ServiceSubTlv::Server {
-                            s_server_16: s_server_16,
-                            s_server_data: s_server_data,
+                            s_server_16,
+                            s_server_data,
                         },
                         stable
                     )
@@ -1248,7 +1249,7 @@ impl NetworkManagementTlv<'_> {
     /// otherwise.
     /// `SResult::Error` is returned if the type field does not match any
     /// implemented TLV type.
-    pub fn decode(buf: &[u8]) -> SResult<NetworkManagementTlv> {
+    pub fn decode(buf: &[u8]) -> SResult<NetworkManagementTlv<'_>> {
         let (offset, tlv_type_raw) = dec_try!(buf; decode_u8);
         let tlv_type = NetworkManagementTlvType::from(tlv_type_raw);
         let (offset, length) = dec_try!(buf, offset; decode_u8);
@@ -1259,8 +1260,8 @@ impl NetworkManagementTlv<'_> {
                 stream_done!(
                     offset,
                     NetworkManagementTlv::Channel {
-                        channel_page: channel_page,
-                        channel: channel,
+                        channel_page,
+                        channel,
                     }
                 )
             }
@@ -1331,8 +1332,8 @@ impl NetworkManagementTlv<'_> {
                 stream_done!(
                     offset,
                     NetworkManagementTlv::SecurityPolicy {
-                        rotation_time: rotation_time,
-                        policy_bits: policy_bits,
+                        rotation_time,
+                        policy_bits,
                     }
                 )
             }
@@ -1343,7 +1344,7 @@ impl NetworkManagementTlv<'_> {
                 stream_done!(
                     offset,
                     NetworkManagementTlv::ActiveTimestamp {
-                        timestamp_seconds: timestamp_seconds,
+                        timestamp_seconds,
                         timestamp_ticks: timestamp_ticks >> 1,
                         u_bit: (timestamp_ticks & 1u16) > 0,
                     }
@@ -1360,7 +1361,7 @@ impl NetworkManagementTlv<'_> {
                 stream_done!(
                     offset,
                     NetworkManagementTlv::PendingTimestamp {
-                        timestamp_seconds: timestamp_seconds,
+                        timestamp_seconds,
                         timestamp_ticks: timestamp_ticks >> 1,
                         u_bit: (timestamp_ticks & 1u16) > 0,
                     }
@@ -1504,9 +1505,9 @@ impl ChannelMaskEntry {
         stream_done!(
             offset,
             ChannelMaskEntry {
-                channel_page: channel_page,
-                mask_length: mask_length,
-                channel_mask: channel_mask,
+                channel_page,
+                mask_length,
+                channel_mask,
             }
         )
     }

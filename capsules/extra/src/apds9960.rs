@@ -17,7 +17,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! let apds9960_i2c = static_init!(
 //!    capsules::virtual_i2c::I2CDevice,
 //!    capsules::virtual_i2c::I2CDevice::new(sensors_i2c_bus, 0x39)
@@ -44,10 +44,10 @@
 //! ```
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil::gpio;
 use kernel::hil::i2c;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 // I2C Buffer of 16 bytes
 pub const BUF_LEN: usize = 16;
@@ -110,7 +110,7 @@ enum State {
     Done,      // Final state for take_measurement() state sequence
 }
 
-pub struct APDS9960<'a, I: i2c::I2CDevice> {
+pub struct APDS9960<'a, I: i2c::I2CDevice<'a>> {
     i2c: &'a I,
     interrupt_pin: &'a dyn gpio::InterruptPin<'a>,
     prox_callback: OptionalCell<&'a dyn kernel::hil::sensors::ProximityClient>,
@@ -118,7 +118,7 @@ pub struct APDS9960<'a, I: i2c::I2CDevice> {
     buffer: TakeCell<'static, [u8]>,
 }
 
-impl<'a, I: i2c::I2CDevice> APDS9960<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> APDS9960<'a, I> {
     pub fn new(
         i2c: &'a I,
         interrupt_pin: &'a dyn gpio::InterruptPin<'a>,
@@ -126,8 +126,8 @@ impl<'a, I: i2c::I2CDevice> APDS9960<'a, I> {
     ) -> APDS9960<'a, I> {
         // setup and return struct
         APDS9960 {
-            i2c: i2c,
-            interrupt_pin: interrupt_pin,
+            i2c,
+            interrupt_pin,
             prox_callback: OptionalCell::empty(),
             state: Cell::new(State::Idle),
             buffer: TakeCell::new(buffer),
@@ -295,7 +295,7 @@ impl<'a, I: i2c::I2CDevice> APDS9960<'a, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> i2c::I2CClient for APDS9960<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> i2c::I2CClient for APDS9960<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], _status: Result<(), i2c::Error>) {
         match self.state.get() {
             State::ReadId => {
@@ -532,7 +532,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for APDS9960<'_, I> {
 }
 
 /// Interrupt Service Routine
-impl<I: i2c::I2CDevice> gpio::Client for APDS9960<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> gpio::Client for APDS9960<'a, I> {
     fn fired(&self) {
         self.buffer.take().map(|buffer| {
             // Read value in PDATA reg
@@ -554,7 +554,7 @@ impl<I: i2c::I2CDevice> gpio::Client for APDS9960<'_, I> {
 }
 
 /// Proximity Driver Trait Implementation
-impl<'a, I: i2c::I2CDevice> kernel::hil::sensors::ProximityDriver<'a> for APDS9960<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> kernel::hil::sensors::ProximityDriver<'a> for APDS9960<'a, I> {
     fn read_proximity(&self) -> Result<(), ErrorCode> {
         self.take_measurement()
     }

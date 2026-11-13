@@ -24,6 +24,7 @@ use capsules_core::virtualizers::virtual_i2c::{I2CDevice, MuxI2C};
 use capsules_extra::si7021::SI7021;
 use kernel::component::Component;
 use kernel::hil::i2c;
+use kernel::hil::i2c::I2CDevice as _;
 use kernel::hil::time::{self, Alarm};
 
 // Setup static space for the objects.
@@ -45,7 +46,7 @@ macro_rules! si7021_component_static {
         let buffer = kernel::static_buf!([u8; 14]);
 
         (alarm, i2c_device, si7021, buffer)
-    };};
+    }};
 }
 
 pub type SI7021ComponentType<A, I> = capsules_extra::si7021::SI7021<'static, A, I>;
@@ -68,7 +69,7 @@ impl<A: 'static + time::Alarm<'static>, I: 'static + i2c::I2CMaster<'static>>
         SI7021Component {
             i2c_mux: i2c,
             alarm_mux: alarm,
-            i2c_address: i2c_address,
+            i2c_address,
         }
     }
 }

@@ -11,10 +11,12 @@ use crate::gpio::RPGpioPin;
 use core::cell::Cell;
 use kernel::hil;
 use kernel::hil::usb::TransferType;
-use kernel::utilities::cells::{OptionalCell, VolatileCell};
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::cells::OptionalCell;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::{
+    InMemoryRegister, ReadWrite, register_bitfields, register_structs,
+};
 
 macro_rules! internal_err {
     [ $( $arg:expr ),+ ] => {
@@ -46,9 +48,9 @@ register_structs! {
         (0x04 => setup_l: ReadWrite<u32, SETUP_L::Register>),
         (0x08 => ep_ctrl: [Ep_ctrl; 15]),
         (0x80 => ep_buf_ctrl: [Ep_buf_ctrl; 16]),
-        (0x100 => ep0_buffer0: [VolatileCell<u8>; 0x40]),
-        (0x140 => optional_ep0_buffer0: [VolatileCell<u8>; 0x40]),
-        (0x180 => buffers: [VolatileCell<u8>; 4096-0x180]),
+        (0x100 => ep0_buffer0: [ReadWrite<u8>; 0x40]),
+        (0x140 => optional_ep0_buffer0: [ReadWrite<u8>; 0x40]),
+        (0x180 => buffers: [ReadWrite<u8>; 4096-0x180]),
         (0x1000 => @END),
     }
 }
@@ -1279,8 +1281,8 @@ pub enum EndpointType {
 }
 
 pub struct Endpoint<'a> {
-    slice_in: OptionalCell<&'a [VolatileCell<u8>]>,
-    slice_out: OptionalCell<&'a [VolatileCell<u8>]>,
+    slice_in: OptionalCell<&'a [InMemoryRegister<u8>]>,
+    slice_out: OptionalCell<&'a [InMemoryRegister<u8>]>,
     state: Cell<EndpointState>,
     // Whether a transfer is requested on this IN endpoint.
     request_transmit_in: Cell<bool>,
@@ -1316,12 +1318,11 @@ pub struct UsbCtrl<'a> {
     state: OptionalCell<UsbState>,
     client: OptionalCell<&'a dyn hil::usb::Client<'a>>,
     descriptors: [Endpoint<'a>; N_ENDPOINTS],
-    should_set_address: VolatileCell<bool>,
-    address: VolatileCell<u32>,
-    next_pid_in: [VolatileCell<u8>; 16],
-    next_pid_out: [VolatileCell<u8>; 16],
+    should_set_address: Cell<bool>,
+    address: Cell<u32>,
+    next_pid_in: [Cell<u8>; 16],
+    next_pid_out: [Cell<u8>; 16],
     errata_pin: OptionalCell<&'a RPGpioPin<'a>>,
-    counter: VolatileCell<u32>,
 }
 
 impl<'a> UsbCtrl<'a> {
@@ -1349,46 +1350,45 @@ impl<'a> UsbCtrl<'a> {
                 Endpoint::new(),
                 Endpoint::new(),
             ],
-            should_set_address: VolatileCell::new(false),
-            address: VolatileCell::new(0),
+            should_set_address: Cell::new(false),
+            address: Cell::new(0),
             next_pid_in: [
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
             ],
             next_pid_out: [
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
-                VolatileCell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
+                Cell::new(0),
             ],
             errata_pin: OptionalCell::empty(),
-            counter: VolatileCell::new(0),
         }
     }
 
@@ -1549,11 +1549,13 @@ impl<'a> UsbCtrl<'a> {
             .ep_out_buf_ctrl
             .modify(EP_BUFFER_CONTROL::DATA_PID0::SET);
 
-        self.dpsram.ep_buf_ctrl[0].ep_in_buf_ctrl.modify(
-            EP_BUFFER_CONTROL::AVAILABLE0::SET
-                + EP_BUFFER_CONTROL::TRANSFER_LENGTH0.val(64)
-                + EP_BUFFER_CONTROL::DATA_PID0::CLEAR,
-        );
+        // we leave EP0 IN unarmed at bus reset. we have nothing legitimate to send until the
+        // host sends a SETUP packet and usb_handle_setup_packet() has a respondse
+        //
+        // this used to reply to the first IN token of the data stage with whatever
+        // happened to be in the register, and kept ownership of the buffer while
+        // transmit_in_ep0() was filling it, which violates usb 2.0 spec
+        self.dpsram.ep_buf_ctrl[0].ep_in_buf_ctrl.set(0);
         self.registers.buff_status.set(0);
         self.registers.addr_endp.modify(ADDR_ENDP::ADDRESS.val(0));
 
@@ -1876,6 +1878,12 @@ impl<'a> UsbCtrl<'a> {
                             if size == 0 {
                                 // Directly handle a 0 length setup request.
                                 self.send_empty_in(endpoint);
+                                // we have to move to ReadStatus here to have
+                                // handle_ep0datadone() complete the transfer as the only
+                                // transaction left in this transfer is the IN status stage
+                                self.descriptors[endpoint]
+                                    .state
+                                    .set(EndpointState::Ctrl(CtrlState::ReadStatus));
                             } else {
                                 match self.dpsram.setup_h.read(SETUP_H::BM_REQUEST_TYPE) >> 7 {
                                     0 => {
@@ -1936,8 +1944,10 @@ impl<'a> UsbCtrl<'a> {
             }
 
             CtrlState::Init => {
-                self.send_empty_in(0);
-                self.complete_ctrl_status();
+                // the transfer that this IN packet belonged to is already completed
+                // (transmit_in_ep0() finishes a control read the moment it hands over the last packer)
+                // so we can safely ignore this IN token and move on
+                // for the data stage of the next control transfer
             }
         }
 
@@ -1976,15 +1986,6 @@ impl<'a> UsbCtrl<'a> {
                 // Now we can handle it and pass it to the client to see
                 // what the client returns.
 
-                if self.dpsram.ep0_buffer0[0].get() == 128
-                    && self.dpsram.ep0_buffer0[1].get() == 37
-                    && self.dpsram.ep0_buffer0[2].get() == 0
-                {
-                    self.dpsram.ep0_buffer0[0].set(0);
-                    self.dpsram.ep0_buffer0[1].set(194);
-                    self.dpsram.ep0_buffer0[2].set(1);
-                }
-
                 self.transmit_out_ep0();
                 self.client.map(|client| {
                     match client.ctrl_out(
@@ -2009,7 +2010,7 @@ impl<'a> UsbCtrl<'a> {
                                 .ep_in_buf_ctrl
                                 .modify(EP_BUFFER_CONTROL::STALL::SET);
                         }
-                    };
+                    }
                 });
             }
             1..=N_ENDPOINTS => {
@@ -2132,7 +2133,7 @@ impl<'a> UsbCtrl<'a> {
                         .state
                         .set(EndpointState::Ctrl(CtrlState::Init));
                 }
-            };
+            }
         });
     }
 
@@ -2203,7 +2204,6 @@ impl<'a> UsbCtrl<'a> {
                 hil::usb::InResult::Packet(size) => {
                     let slice = self.descriptors[endpoint].slice_in.unwrap_or_panic();
 
-                    self.counter.set(self.counter.get() + 1);
                     for idx in 0..size {
                         self.dpsram.buffers[(64 * (endpoint - 1)) + idx].set(slice[idx].get());
                     }
@@ -2327,7 +2327,7 @@ impl<'a> hil::usb::UsbController<'a> for UsbCtrl<'a> {
         self.client.set(client);
     }
 
-    fn endpoint_set_ctrl_buffer(&self, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_ctrl_buffer(&self, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             panic!("Endpoint buffer must be at least 8 bytes");
         }
@@ -2338,7 +2338,7 @@ impl<'a> hil::usb::UsbController<'a> for UsbCtrl<'a> {
         self.descriptors[0].slice_out.set(buf);
     }
 
-    fn endpoint_set_in_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_in_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             panic!("Endpoint buffer must be at least 8 bytes");
         }
@@ -2351,7 +2351,7 @@ impl<'a> hil::usb::UsbController<'a> for UsbCtrl<'a> {
         self.descriptors[endpoint].slice_in.set(buf);
     }
 
-    fn endpoint_set_out_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_out_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             panic!("Endpoint buffer must be at least 8 bytes");
         }

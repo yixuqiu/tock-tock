@@ -16,7 +16,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //! # use capsules::virtual_alarm::VirtualMuxAlarm;
 //!
@@ -35,11 +35,11 @@
 //! ```
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil::i2c::{Error, I2CClient, I2CDevice};
 use kernel::hil::sensors::{AmbientLight, AmbientLightClient};
 use kernel::hil::time::{self, ConvertTicks};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 /// Recommended buffer length.
 pub const BUF_LEN: usize = 3;
@@ -54,7 +54,7 @@ enum State {
 }
 
 pub struct Isl29035<'a, A: time::Alarm<'a>> {
-    i2c: &'a dyn I2CDevice,
+    i2c: &'a dyn I2CDevice<'a>,
     alarm: &'a A,
     state: Cell<State>,
     buffer: TakeCell<'static, [u8]>,
@@ -62,10 +62,14 @@ pub struct Isl29035<'a, A: time::Alarm<'a>> {
 }
 
 impl<'a, A: time::Alarm<'a>> Isl29035<'a, A> {
-    pub fn new(i2c: &'a dyn I2CDevice, alarm: &'a A, buffer: &'static mut [u8]) -> Isl29035<'a, A> {
+    pub fn new(
+        i2c: &'a dyn I2CDevice<'a>,
+        alarm: &'a A,
+        buffer: &'static mut [u8],
+    ) -> Isl29035<'a, A> {
         Isl29035 {
-            i2c: i2c,
-            alarm: alarm,
+            i2c,
+            alarm,
             state: Cell::new(State::Disabled),
             buffer: TakeCell::new(buffer),
             client: OptionalCell::empty(),

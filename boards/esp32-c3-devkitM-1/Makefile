@@ -4,9 +4,11 @@
 
 # Makefile for building the tock kernel for the ESP32-C3 platform
 
-TARGET=riscv32imc-unknown-none-elf
-PLATFORM=esp32-c3-board
 RISC_PREFIX = riscv64-linux-gnu
+
+# Newer esptool releases install the `esptool` command, older releases install
+# `esptool.py`. Use whichever is installed, preferring `esptool`.
+ESPTOOL ?= $(or $(shell command -v esptool 2>/dev/null),esptool.py)
 
 include ../Makefile.common
 
@@ -14,20 +16,19 @@ include ../Makefile.common
 .PHONY: install
 install: flash
 
-flash: $(TOCK_ROOT_DIRECTORY)target/$(TARGET)/release/$(PLATFORM).elf
-	esptool.py --port /dev/ttyUSB0 --chip esp32c3 elf2image --use_segments --output binary.hex $^ --dont-append-digest
-	esptool.py --port /dev/ttyUSB0 --chip esp32c3 write_flash --flash_mode dio --flash_size detect --flash_freq 80m  0x0 binary.hex
+.PHONY: init
+init:
+	tockloader local-board set esp32_c3_devkitm1 --binary-path esp32_c3_devkitm1.bin --arch rv32imc --app-address 0x42100000 --flash-address 0x42000000
 
-flash-app: $(TOCK_ROOT_DIRECTORY)target/$(TARGET)/release/$(PLATFORM).elf
-ifeq ($(APP),)
-	$(error "Please specify an APP to be flashed")
-endif
-	$(RISC_PREFIX)-objcopy --update-section .apps=$(APP) $^ $(TOCK_ROOT_DIRECTORY)target/$(TARGET)/release/$(PLATFORM)-app.elf
-	esptool.py --port /dev/ttyUSB0 --chip esp32c3 elf2image --use_segments --output binary.hex $(TOCK_ROOT_DIRECTORY)target/$(TARGET)/release/$(PLATFORM)-app.elf --dont-append-digest
-	esptool.py --port /dev/ttyUSB0 --chip esp32c3 write_flash --flash_mode dio --flash_size detect --flash_freq 80m 0x0 binary.hex
+# Write the kernel to the flash file with tockloader
+.PHONY: write-kernel
+write-kernel: $(TARGET_PATH)/release/$(PLATFORM).bin
+	tockloader flash --local-board --address 0x42000000 $<
+
+esp32_c3_devkitm1.bin: write-kernel
+
+flash: esp32_c3_devkitm1.bin
+	$(ESPTOOL) --chip esp32c3 write_flash 0x0 esp32_c3_devkitm1.bin
 
 test:
-	mkdir -p $(TOCK_ROOT_DIRECTORY)target/$(TARGET)/release/deps/
-	$(Q)cp layout.ld $(TOCK_ROOT_DIRECTORY)target/$(TARGET)/release/deps/
-	$(Q)cp ../kernel_layout.ld $(TOCK_ROOT_DIRECTORY)target/$(TARGET)/release/
-	$(Q)RUSTFLAGS="$(RUSTC_FLAGS_TOCK)" $(CARGO) test $(CARGO_FLAGS_TOCK_NO_BUILD_STD) $(NO_RUN) --bin $(PLATFORM) --release
+	$(Q)$(CARGO) test $(NO_RUN) --bin $(PLATFORM) --release

@@ -4,24 +4,39 @@
 
 //! Shared implementations for ARM Cortex-M4 MCUs.
 
-#![crate_name = "cortexm4"]
-#![crate_type = "rlib"]
 #![no_std]
 
 use core::fmt::Write;
 
 pub mod mpu {
+    use kernel::utilities::StaticRef;
+
     pub type MPU = cortexm::mpu::MPU<8, 32>;
+
+    const MPU_BASE_ADDRESS: StaticRef<cortexm::mpu::MpuRegisters> =
+        unsafe { StaticRef::new(0xE000ED90 as *const cortexm::mpu::MpuRegisters) };
+
+    /// Create a new MPU for the Cortex-M4 hardware.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure the hardware is a valid Cortex-M4 chip and that the
+    /// MPU hardware exists to enforce memory protection.
+    pub unsafe fn new() -> MPU {
+        unsafe { MPU::new(MPU_BASE_ADDRESS) }
+    }
 }
 
+pub use cortexm::CortexMVariant;
 pub use cortexm::dwt;
 pub use cortexm::initialize_ram_jump_to_main;
 pub use cortexm::nvic;
 pub use cortexm::scb;
+pub use cortexm::semihosting;
 pub use cortexm::support;
 pub use cortexm::systick;
+pub use cortexm::thread_id;
 pub use cortexm::unhandled_interrupt;
-pub use cortexm::CortexMVariant;
 
 // Enum with no variants to ensure that this type is not instantiable. It is
 // only used to pass architecture-specific constants and functions via the
@@ -39,7 +54,7 @@ impl cortexm::CortexMVariant for CortexM4 {
         user_stack: *const usize,
         process_regs: &mut [usize; 8],
     ) -> *const usize {
-        cortexv7m::switch_to_user_arm_v7m(user_stack, process_regs)
+        unsafe { cortexv7m::switch_to_user_arm_v7m(user_stack, process_regs) }
     }
 
     #[cfg(not(all(target_arch = "arm", target_os = "none")))]

@@ -11,20 +11,21 @@ use core::cmp;
 use core::fmt;
 use core::fmt::write;
 use core::str;
+use kernel::ProcessId;
 use kernel::capabilities::ProcessManagementCapability;
+use kernel::capabilities::ProcessStartCapability;
 use kernel::hil::time::ConvertTicks;
 use kernel::utilities::cells::MapCell;
 use kernel::utilities::cells::TakeCell;
-use kernel::ProcessId;
 
+use kernel::ErrorCode;
+use kernel::Kernel;
 use kernel::debug;
 use kernel::hil::time::{Alarm, AlarmClient};
 use kernel::hil::uart;
 use kernel::introspection::KernelInfo;
 use kernel::process::{ProcessPrinter, ProcessPrinterContext, State};
 use kernel::utilities::binary_write::BinaryWrite;
-use kernel::ErrorCode;
-use kernel::Kernel;
 
 /// Buffer to hold outgoing data that is passed to the UART hardware.
 pub const WRITE_BUF_LEN: usize = 500;
@@ -36,7 +37,7 @@ pub const QUEUE_BUF_LEN: usize = 300;
 pub const READ_BUF_LEN: usize = 4;
 /// Commands can be up to 32 bytes long: since commands themselves are 4-5
 /// characters, limiting arguments to 25 bytes or so seems fine for now.
-pub const COMMAND_BUF_LEN: usize = 32;
+pub const COMMAND_BUF_LEN: usize = 64;
 /// Default size for the history command.
 pub const DEFAULT_COMMAND_HISTORY_LEN: usize = 10;
 
@@ -52,7 +53,7 @@ const ESC: u8 = b'\x1B';
 const EOL: u8 = b'\x00';
 
 /// Backspace ANSI character
-const BS: u8 = b'\x08';
+const BACKSPACE: u8 = b'\x08';
 
 /// Delete ANSI character
 const DEL: u8 = b'\x7F';
@@ -102,6 +103,7 @@ enum EscKey {
     Home,
     End,
     Delete,
+    Backspace,
 }
 
 /// Escape state machine to check if
@@ -143,7 +145,7 @@ enum EscState {
 impl EscState {
     fn next_state(self, data: u8) -> Self {
         use self::{
-            EscKey::{Delete, Down, End, Home, Left, Right, Up},
+            EscKey::{Backspace, Delete, Down, End, Home, Left, Right, Up},
             EscState::{
                 Bracket, Bracket3, Bypass, Complete, Started, Unrecognized, UnrecognizedDone,
             },
@@ -152,7 +154,7 @@ impl EscState {
             (Bypass, ESC) | (UnrecognizedDone, ESC) | (Complete(_), ESC) => Started,
             // This is a short-circuit.
             // ASCII DEL and ANSI Escape Sequence "Delete" should be treated the same way.
-            (Bypass, DEL) | (UnrecognizedDone, DEL) | (Complete(_), DEL) => Complete(Delete),
+            (Bypass, DEL) | (UnrecognizedDone, DEL) | (Complete(_), DEL) => Complete(Backspace),
             (Bypass, _) | (UnrecognizedDone, _) | (Complete(_), _) => Bypass,
             (Started, b'[') => Bracket,
             (Bracket, b'A') => Complete(Up),
@@ -225,7 +227,7 @@ pub struct ProcessConsole<
     'a,
     const COMMAND_HISTORY_LEN: usize,
     A: Alarm<'a>,
-    C: ProcessManagementCapability,
+    C: ProcessManagementCapability + ProcessStartCapability,
 > {
     uart: &'a dyn uart::UartData<'a>,
     alarm: &'a A,
@@ -415,8 +417,8 @@ impl ConsoleWriter {
 }
 impl fmt::Write for ConsoleWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let curr = (s).as_bytes().len();
-        self.buf[self.size..self.size + curr].copy_from_slice((s).as_bytes());
+        let curr = s.len();
+        self.buf[self.size..self.size + curr].copy_from_slice(s.as_bytes());
         self.size += curr;
         Ok(())
     }
@@ -433,8 +435,12 @@ impl BinaryWrite for ConsoleWriter {
     }
 }
 
-impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCapability>
-    ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C>
+impl<
+    'a,
+    const COMMAND_HISTORY_LEN: usize,
+    A: Alarm<'a>,
+    C: ProcessManagementCapability + ProcessStartCapability,
+> ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C>
 {
     pub fn new(
         uart: &'a dyn uart::UartData<'a>,
@@ -451,8 +457,8 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
         capability: C,
     ) -> ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C> {
         ProcessConsole {
-            uart: uart,
-            alarm: alarm,
+            uart,
+            alarm,
             process_printer,
             tx_in_progress: Cell::new(false),
             tx_buffer: TakeCell::new(tx_buffer),
@@ -468,10 +474,10 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
             cursor: Cell::new(0),
             previous_byte: Cell::new(EOL),
             execute: Cell::new(false),
-            kernel: kernel,
-            kernel_addresses: kernel_addresses,
-            reset_function: reset_function,
-            capability: capability,
+            kernel,
+            kernel_addresses,
+            reset_function,
+            capability,
         }
     }
 
@@ -678,7 +684,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
 
                             if new_context.is_some() {
                                 self.writer_state.replace(WriterState::ProcessPrint {
-                                    process_id: process_id,
+                                    process_id,
                                     context: new_context,
                                 });
                             } else {
@@ -714,7 +720,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                 kernel::process::ShortId::LocallyUnique => {
                                     let _ = write(
                                         &mut console_writer,
-                                        format_args!("{}", "Unique     ",),
+                                        format_args!("{}", "Unique     "),
                                     );
                                 }
                                 kernel::process::ShortId::Fixed(id) => {
@@ -751,14 +757,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
     // Process the command in the command buffer and clear the buffer.
     fn read_command(&self) {
         self.command_buffer.map(|command| {
-            let mut terminator = 0;
-            let len = command.len();
-            for i in 0..len {
-                if command[i] == 0 {
-                    terminator = i;
-                    break;
-                }
-            }
+            let terminator = command.iter().position(|&x| x == 0).unwrap_or(0);
 
             // A command is valid only if it starts inside the buffer,
             // ends before the beginning of the buffer, and ends after
@@ -868,7 +867,10 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                             let mut console_writer = ConsoleWriter::new();
                                             let _ = write(
                                                 &mut console_writer,
-                                                format_args!("Process {} terminated\n", proc_name),
+                                                format_args!(
+                                                    "Process {} terminated\r\n",
+                                                    proc_name
+                                                ),
                                             );
 
                                             let _ = self.write_bytes(
@@ -886,7 +888,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                         if proc_name == name
                                             && proc.get_state() == State::Terminated
                                         {
-                                            proc.try_restart(None);
+                                            proc.start(&self.capability);
                                         }
                                     });
                             });
@@ -966,7 +968,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                                 self.writer_state.replace(
                                                     WriterState::ProcessPrint {
                                                         process_id: proc.processid(),
-                                                        context: context,
+                                                        context,
                                                     },
                                                 );
                                             }
@@ -1030,11 +1032,8 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
 
     fn prompt(&self) {
         // Only display the prompt in active mode.
-        match self.mode.get() {
-            ProcessConsoleState::Active => {
-                let _ = self.write_bytes(b"tock$ ");
-            }
-            _ => {}
+        if self.mode.get() == ProcessConsoleState::Active {
+            let _ = self.write_bytes(b"tock$ ");
         }
     }
 
@@ -1129,8 +1128,12 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
     }
 }
 
-impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCapability> AlarmClient
-    for ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C>
+impl<
+    'a,
+    const COMMAND_HISTORY_LEN: usize,
+    A: Alarm<'a>,
+    C: ProcessManagementCapability + ProcessStartCapability,
+> AlarmClient for ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C>
 {
     fn alarm(&self) {
         self.prompt();
@@ -1140,8 +1143,12 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
     }
 }
 
-impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCapability>
-    uart::TransmitClient for ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C>
+impl<
+    'a,
+    const COMMAND_HISTORY_LEN: usize,
+    A: Alarm<'a>,
+    C: ProcessManagementCapability + ProcessStartCapability,
+> uart::TransmitClient for ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C>
 {
     fn transmitted_buffer(
         &self,
@@ -1176,8 +1183,12 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
     }
 }
 
-impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCapability>
-    uart::ReceiveClient for ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C>
+impl<
+    'a,
+    const COMMAND_HISTORY_LEN: usize,
+    A: Alarm<'a>,
+    C: ProcessManagementCapability + ProcessStartCapability,
+> uart::ReceiveClient for ProcessConsole<'a, COMMAND_HISTORY_LEN, A, C>
 {
     fn received_buffer(
         &self,
@@ -1217,7 +1228,8 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
 
                                             // Clear the displayed command
                                             for _ in 0..index {
-                                                let _ = self.write_bytes(&[BS, SPACE, BS]);
+                                                let _ = self
+                                                    .write_bytes(&[BACKSPACE, SPACE, BACKSPACE]);
                                             }
 
                                             // Display the new command
@@ -1231,11 +1243,11 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                             self.command_index.set(next_command_len);
                                             self.cursor.set(next_command_len);
                                             command[next_command_len] = EOL;
-                                        };
+                                        }
                                     });
                                 }
                                 EscKey::Left if cursor > 0 => {
-                                    let _ = self.write_byte(BS);
+                                    let _ = self.write_byte(BACKSPACE);
                                     self.cursor.set(cursor - 1);
                                 }
                                 EscKey::Right if cursor < index => {
@@ -1244,7 +1256,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                 }
                                 EscKey::Home if cursor > 0 => {
                                     for _ in 0..cursor {
-                                        let _ = self.write_byte(BS);
+                                        let _ = self.write_byte(BACKSPACE);
                                     }
 
                                     self.cursor.set(0);
@@ -1256,6 +1268,62 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
 
                                     self.cursor.set(index);
                                 }
+                                EscKey::Backspace if cursor > 0 && cursor <= index => {
+                                    // Move the bytes one position to left
+                                    for i in (cursor - 1)..index {
+                                        command[i] = command[i + 1];
+                                        let _ = self.write_byte(command[i]);
+                                    }
+
+                                    // Now that we copied all bytes to the left, we are left over with
+                                    // a duplicate "ghost" character of the last byte,
+                                    // In case we deleted the first character, this doesn't do anything as
+                                    // the duplicate is not there.
+                                    // |abcdef -> abcdef (won't enter this match case)
+                                    // a|bcdef -> bcdef
+                                    // abc|def -> abdeff -> abdef
+
+                                    let _ = self.write_bytes(&[BACKSPACE, SPACE, BACKSPACE]);
+
+                                    // The following for statements are mandatory for correctly displaying
+                                    // the command and cursor
+                                    //
+                                    // Move the cursor to the correct position (without this,
+                                    // it will get sent all the way right)
+                                    for _ in (cursor - 1)..(index - 1) {
+                                        let _ = self.write_byte(BACKSPACE);
+                                    }
+                                    // Rewrite the command, this will move the cursor right (skipping this
+                                    // step will cause the command to not get updated correctly, for example
+                                    // abc|def -> ab|cde. This is just a visual mismatch)
+                                    for i in (cursor - 1)..(index - 1) {
+                                        let _ = self.write_byte(command[i]);
+                                    }
+                                    // Move the cursor left again (previously, the cursor was sent to the
+                                    // right by the previous for statement, so we need to move it left)
+                                    for _ in (cursor - 1)..(index - 1) {
+                                        let _ = self.write_byte(BACKSPACE);
+                                    }
+
+                                    self.cursor.set(cursor - 1);
+                                    self.command_index.set(index - 1);
+
+                                    // Remove the byte from the command in order
+                                    // not to permit accumulation of the text
+                                    if COMMAND_HISTORY_LEN > 1 {
+                                        self.command_history.map(|ht| {
+                                            if ht.cmd_is_modified {
+                                                // Copy the last command into the unfinished command
+
+                                                ht.cmds[0].clear();
+                                                ht.write_to_first(command);
+                                                ht.cmd_is_modified = false;
+                                            } else {
+                                                ht.cmds[0].delete_byte(cursor);
+                                            }
+                                        });
+                                    }
+                                }
                                 EscKey::Delete if cursor < index => {
                                     // Move the bytes one position to left
                                     for i in cursor..(index - 1) {
@@ -1266,16 +1334,16 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                     command[index - 1] = command[index];
 
                                     // Now that we copied all bytes to the left, we are left over with
-                                    // a dublicate "ghost" character of the last byte,
+                                    // a duplicate "ghost" character of the last byte,
                                     // In case we deleted the first character, this doesn't do anything as
-                                    // the dublicate is not there.
+                                    // the duplicate is not there.
                                     // |abcdef -> bcdef
                                     // abc|def -> abceff -> abcef
-                                    let _ = self.write_bytes(&[SPACE, BS]);
+                                    let _ = self.write_bytes(&[SPACE, BACKSPACE]);
 
                                     // Move the cursor to last position
                                     for _ in cursor..(index - 1) {
-                                        let _ = self.write_byte(BS);
+                                        let _ = self.write_byte(BACKSPACE);
                                     }
 
                                     self.command_index.set(index - 1);
@@ -1297,7 +1365,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                     }
                                 }
                                 _ => {}
-                            };
+                            }
                         } else if read_buf[0] == NLINE || read_buf[0] == CR {
                             if (previous_byte == NLINE || previous_byte == CR)
                                 && previous_byte != read_buf[0]
@@ -1319,12 +1387,12 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                     });
                                 }
                             }
-                        } else if read_buf[0] == BS {
+                        } else if read_buf[0] == BACKSPACE {
                             if cursor > 0 {
                                 // Backspace, echo and remove the byte
                                 // preceding the cursor
                                 // Note echo is '\b \b' to erase
-                                let _ = self.write_bytes(&[BS, SPACE, BS]);
+                                let _ = self.write_bytes(&[BACKSPACE, SPACE, BACKSPACE]);
 
                                 // Move the bytes one position to left
                                 for i in (cursor - 1)..(index - 1) {
@@ -1335,16 +1403,16 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                                 command[index - 1] = command[index];
 
                                 // Now that we copied all bytes to the left, we are left over with
-                                // a dublicate "ghost" character of the last byte,
+                                // a duplicate "ghost" character of the last byte,
                                 // In case we deleted the last character, this doesn't do anything as
-                                // the dublicate is not there.
+                                // the duplicate is not there.
                                 // abcdef| -> abcdef
                                 // abcd|ef -> abceff -> abcef
-                                let _ = self.write_bytes(&[SPACE, BS]);
+                                let _ = self.write_bytes(&[SPACE, BACKSPACE]);
 
                                 // Move the cursor to last position
                                 for _ in cursor..index {
-                                    let _ = self.write_byte(BS);
+                                    let _ = self.write_byte(BACKSPACE);
                                 }
 
                                 self.command_index.set(index - 1);
@@ -1389,7 +1457,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
 
                             // Move the cursor to the last position
                             for _ in cursor..index {
-                                let _ = self.write_byte(BS);
+                                let _ = self.write_byte(BACKSPACE);
                             }
 
                             command[cursor] = read_buf[0];
@@ -1416,7 +1484,7 @@ impl<'a, const COMMAND_HISTORY_LEN: usize, A: Alarm<'a>, C: ProcessManagementCap
                     "ProcessConsole issues reads of 1 byte, but receive_complete was length {}",
                     rx_len
                 ),
-            };
+            }
         }
         let _ = self.uart.receive_buffer(read_buf, 1);
     }

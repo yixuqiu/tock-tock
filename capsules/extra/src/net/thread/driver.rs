@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2023.
 
-//! This file contains the structs and methods associated with the Thread
-//! networking layer. This represents a first attempt in Tock
-//! to support Thread networking. The current implementation successfully
-//! joins a Tock device as a child node to a Thread parent (tested using
-//! OpenThread). This Thread capsule is a client to the UDP Mux.
-//! The associated ThreadNetwork struct must be created in the `thread_network.rs`
-//! component.
+//! Structs and methods associated with the Thread networking layer.
+//!
+//! This represents a first attempt in Tock to support Thread
+//! networking. The current implementation successfully joins a Tock
+//! device as a child node to a Thread parent (tested using
+//! OpenThread). This Thread capsule is a client to the UDP Mux.  The
+//! associated ThreadNetwork struct must be created in the
+//! `thread_network.rs` component.
 //!
 //! The Userland interface is incredibly simple at this juncture. An application
 //! can begin the Thread child/parent joining by issuing a syscall command
@@ -37,13 +38,13 @@ use crate::net::ipv6::ip_utils::IPAddr;
 use crate::net::network_capabilities::NetworkCapability;
 
 use crate::net::ieee802154;
-use crate::net::thread::thread_utils::generate_src_ipv6;
-use crate::net::thread::thread_utils::ThreadState;
 use crate::net::thread::thread_utils::MULTICAST_IPV6;
 use crate::net::thread::thread_utils::THREAD_PORT_NUMBER;
+use crate::net::thread::thread_utils::ThreadState;
+use crate::net::thread::thread_utils::generate_src_ipv6;
 use crate::net::thread::thread_utils::{
-    encode_cryp_data, form_child_id_req, form_parent_req, mac_from_ipv6, MleCommand, NetworkKey,
-    AUTH_DATA_LEN, AUX_SEC_HEADER_LENGTH, IPV6_LEN, SECURITY_SUITE_LEN,
+    AUTH_DATA_LEN, AUX_SEC_HEADER_LENGTH, IPV6_LEN, MleCommand, NetworkKey, SECURITY_SUITE_LEN,
+    encode_cryp_data, form_child_id_req, form_parent_req, mac_from_ipv6,
 };
 use crate::net::udp::udp_port_table::UdpPortManager;
 use crate::net::udp::udp_recv::UDPRecvClient;
@@ -56,7 +57,7 @@ use kernel::capabilities::UdpDriverCapability;
 use kernel::errorcode::into_statuscode;
 use kernel::grant::{AllowRoCount, AllowRwCount, Grant, UpcallCount};
 use kernel::hil::symmetric_encryption::CCMClient;
-use kernel::hil::symmetric_encryption::AES128CCM;
+use kernel::hil::symmetric_encryption::{AES128, AESCCM};
 use kernel::hil::time;
 use kernel::processbuffer::ReadableProcessBuffer;
 use kernel::syscall::{CommandReturn, SyscallDriver};
@@ -97,7 +98,7 @@ pub struct ThreadNetworkDriver<'a, A: time::Alarm<'a>> {
     sender: &'a dyn UDPSender<'a>,
 
     /// AES crypto engine for MLE encryption
-    aes_crypto: &'a dyn AES128CCM<'a>,
+    aes_crypto: &'a dyn AESCCM<'a, AES128>,
 
     /// Alarm for timeouts
     alarm: &'a A,
@@ -149,7 +150,7 @@ pub struct ThreadNetworkDriver<'a, A: time::Alarm<'a>> {
 impl<'a, A: time::Alarm<'a>> ThreadNetworkDriver<'a, A> {
     pub fn new(
         sender: &'a dyn UDPSender<'a>,
-        aes_crypto: &'a dyn AES128CCM<'a>,
+        aes_crypto: &'a dyn AESCCM<'a, AES128>,
         alarm: &'a A,
         grant: Grant<App, UpcallCount<1>, AllowRoCount<{ ro_allow::COUNT }>, AllowRwCount<0>>,
         src_mac_addr: [u8; 8],
@@ -161,18 +162,18 @@ impl<'a, A: time::Alarm<'a>> ThreadNetworkDriver<'a, A> {
         net_cap: &'static NetworkCapability,
     ) -> ThreadNetworkDriver<'a, A> {
         ThreadNetworkDriver {
-            sender: sender,
-            aes_crypto: aes_crypto,
-            alarm: alarm,
+            sender,
+            aes_crypto,
+            alarm,
             apps: grant,
-            src_mac_addr: src_mac_addr,
-            max_tx_pyld_len: max_tx_pyld_len,
-            port_table: port_table,
+            src_mac_addr,
+            max_tx_pyld_len,
+            port_table,
             send_buffer: MapCell::new(send_buffer),
             recv_buffer: MapCell::new(recv_buffer),
             state: MapCell::empty(),
-            driver_send_cap: driver_send_cap,
-            net_cap: net_cap,
+            driver_send_cap,
+            net_cap,
             frame_count: Cell::new(5),
             networkkey: MapCell::empty(),
             crypto_sizelock: MapCell::empty(),
@@ -230,7 +231,7 @@ impl<'a, A: time::Alarm<'a>> ThreadNetworkDriver<'a, A> {
                 self.state.replace(curr_state);
                 self.terminate_child_join(Err(ErrorCode::BUSY));
             }
-        };
+        }
     }
 
     fn thread_mle_send(
@@ -313,9 +314,7 @@ impl<'a, A: time::Alarm<'a>> ThreadNetworkDriver<'a, A> {
         // userland of the reason for termination with the first argument.
 
         self.apps.each(|_, _, kernel_data| {
-            kernel_data
-                .schedule_upcall(upcall::JOINCOMPLETE, (into_statuscode(res), 0, 0))
-                .ok();
+            let _ = kernel_data.schedule_upcall(upcall::JOINCOMPLETE, (into_statuscode(res), 0, 0));
         });
     }
 
@@ -461,7 +460,6 @@ impl<'a, A: time::Alarm<'a>> SyscallDriver for ThreadNetworkDriver<'a, A> {
     /// ### `command_num`
     /// - `0`: Driver Check
     /// - `1`: Add a new mle/mac networkkey and initiate a parent request.
-
     fn command(
         &self,
         command_num: usize,
@@ -620,20 +618,14 @@ impl<'a, A: time::Alarm<'a>> UDPRecvClient for ThreadNetworkDriver<'a, A> {
                         ..payload.len() - security.level.mic_len()],
                     recv_buf.take(),
                 )
-                .map_or_else(
-                    // Error check on crypto operation. If the crypto operation
-                    // fails, we log the error and replace the receive buffer for
-                    // future receptions
-                    |(_code, buf)| {
-                        // UNCOMMENT TO DEBUG THREAD alter _code to code//
-                        // kernel::debug!(
-                        //     "[Thread] DROPPED PACKET - Crypto Operation Error *{:?}",
-                        //     code
-                        // );
-                        self.recv_buffer.replace(SubSliceMut::new(buf));
-                    },
-                    |()| (),
-                )
+                .unwrap_or_else(|(_code, buf)| {
+                    // UNCOMMENT TO DEBUG THREAD alter _code to code//
+                    // kernel::debug!(
+                    //     "[Thread] DROPPED PACKET - Crypto Operation Error *{:?}",
+                    //     code
+                    // );
+                    self.recv_buffer.replace(SubSliceMut::new(buf));
+                })
             },
         );
     }
@@ -732,11 +724,11 @@ impl<'a, A: time::Alarm<'a>> CCMClient for ThreadNetworkDriver<'a, A> {
                 // Move the decrypted MLE message into the recv_buf and execute the receiving logic. Upon
                 // an error in `recv_logic`, joining the network fails and schedule termination upcall
                 self.recv_buffer.replace(assembled_subslice);
-                self.recv_logic(IPAddr(src_ipv6))
-                    .err()
-                    .map(|code| self.terminate_child_join(Err(code)));
+                if let Err(code) = self.recv_logic(IPAddr(src_ipv6)) {
+                    self.terminate_child_join(Err(code))
+                }
             }
             _ => (),
-        };
+        }
     }
 }

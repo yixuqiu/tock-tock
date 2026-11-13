@@ -3,7 +3,7 @@
 // Copyright Tock Contributors 2022.
 
 use crate::net::ieee802154::MacAddress;
-use crate::net::ipv6::ip_utils::{compute_udp_checksum, ip6_nh, IPAddr};
+use crate::net::ipv6::ip_utils::{IPAddr, compute_udp_checksum, ip6_nh};
 use crate::net::ipv6::{IP6Header, IP6Packet, TransportHeader};
 use crate::net::udp::UDPHeader;
 use crate::net::util;
@@ -94,6 +94,8 @@ pub struct Context {
     pub compress: bool,
 }
 
+/// LoWPan ContextStore
+///
 /// LoWPAN encoding requires being able to look up the existence of contexts,
 /// which are essentially IPv6 address prefixes. Any implementation must ensure
 /// that context 0 is always available and contains the mesh-local prefix.
@@ -139,11 +141,7 @@ impl ContextStore for Context {
     }
 
     fn get_context_from_id(&self, ctx_id: u8) -> Option<Context> {
-        if ctx_id == 0 {
-            Some(*self)
-        } else {
-            None
-        }
+        if ctx_id == 0 { Some(*self) } else { None }
     }
 
     fn get_context_from_prefix(&self, prefix: &[u8], prefix_len: u8) -> Option<Context> {
@@ -221,11 +219,11 @@ pub fn compress<'a>(
     };
 
     // Do not contexts that are not marked to be available for compression
-    src_ctx = src_ctx.and_then(|ctx| if ctx.compress { Some(ctx) } else { None });
-    dst_ctx = dst_ctx.and_then(|ctx| if ctx.compress { Some(ctx) } else { None });
+    src_ctx = src_ctx.filter(|&ctx| ctx.compress);
+    dst_ctx = dst_ctx.filter(|&ctx| ctx.compress);
 
     // Context Identifier Extension
-    compress_cie(&src_ctx, &dst_ctx, buf, &mut written);
+    compress_cie(src_ctx.as_ref(), dst_ctx.as_ref(), buf, &mut written);
 
     // Traffic Class & Flow Label
     compress_tf(&ip6_header, buf, &mut written);
@@ -243,19 +241,19 @@ pub fn compress<'a>(
     compress_src(
         &ip6_header.src_addr,
         &src_mac_addr,
-        &src_ctx,
+        src_ctx.as_ref(),
         buf,
         &mut written,
     );
 
     // Destination Address
     if ip6_header.dst_addr.is_multicast() {
-        compress_multicast(&ip6_header.dst_addr, &dst_ctx, buf, &mut written);
+        compress_multicast(&ip6_header.dst_addr, dst_ctx.as_ref(), buf, &mut written);
     } else {
         compress_dst(
             &ip6_header.dst_addr,
             &dst_mac_addr,
-            &dst_ctx,
+            dst_ctx.as_ref(),
             buf,
             &mut written,
         );
@@ -291,8 +289,8 @@ pub fn compress<'a>(
 }
 
 fn compress_cie(
-    src_ctx: &Option<Context>,
-    dst_ctx: &Option<Context>,
+    src_ctx: Option<&Context>,
+    dst_ctx: Option<&Context>,
     buf: &mut [u8],
     written: &mut usize,
 ) {
@@ -378,7 +376,7 @@ fn compress_hl(ip6_header: &IP6Header, buf: &mut [u8], written: &mut usize) {
 fn compress_src(
     src_ip_addr: &IPAddr,
     src_mac_addr: &MacAddress,
-    src_ctx: &Option<Context>,
+    src_ctx: Option<&Context>,
     buf: &mut [u8],
     written: &mut usize,
 ) {
@@ -445,7 +443,7 @@ fn compress_iid(
 fn compress_dst(
     dst_ip_addr: &IPAddr,
     dst_mac_addr: &MacAddress,
-    dst_ctx: &Option<Context>,
+    dst_ctx: Option<&Context>,
     buf: &mut [u8],
     written: &mut usize,
 ) {
@@ -470,7 +468,7 @@ fn compress_dst(
 // Compresses multicast destination addresses
 fn compress_multicast(
     dst_ip_addr: &IPAddr,
-    dst_ctx: &Option<Context>,
+    dst_ctx: Option<&Context>,
     buf: &mut [u8],
     written: &mut usize,
 ) {
@@ -587,10 +585,10 @@ fn compress_udp_checksum(udp_header: &UDPHeader, buf: &mut [u8], written: &mut u
 /// * `dst_mac_addr` - the 16-bit MAC address of the frame receiver.
 ///
 /// * `out_buf` - A buffer to write the output to. Must be at least large enough
-/// to store an IPv6 header (XX bytes).
+///   to store an IPv6 header (XX bytes).
 ///
 /// * `dgram_size` - If `is_fragment` is `true`, this is used as the IPv6
-/// packets total payload size. Otherwise, this is ignored.
+///   packets total payload size. Otherwise, this is ignored.
 ///
 /// * `is_fragment` - ???
 ///
@@ -601,7 +599,7 @@ fn compress_udp_checksum(udp_header: &UDPHeader, buf: &mut [u8], written: &mut u
 /// * `consumed` is the number of header bytes consumed from the 6LoWPAN header
 ///
 /// * `written` is the number of uncompressed header bytes written into
-/// `out_buf`.
+///   `out_buf`.
 pub fn decompress(
     ctx_store: &dyn ContextStore,
     buf: &[u8],
@@ -761,7 +759,7 @@ pub fn decompress(
                 // Length in 8-octet units after the first 8 octets
                 // (per the IPv6 ext hdr spec)
                 let mut hdr_len_field = (len - 6) / 8;
-                if (len - 6) % 8 != 0 {
+                if !(len - 6).is_multiple_of(8) {
                     hdr_len_field += 1;
                 }
 
@@ -973,7 +971,7 @@ fn decompress_multicast(
             iphc::DAM_INLINE => {
                 // DAC = 1, DAM = 00: 48 bits
                 // ffXX:XXLL:PPPP:PPPP:PPPP:PPPP:XXXX:XXXX
-                let prefix_bytes = ((ctx.prefix_len + 7) / 8) as usize;
+                let prefix_bytes = ctx.prefix_len.div_ceil(8) as usize;
                 if prefix_bytes > 8 {
                     // The maximum prefix length for this mode is 64 bits.
                     // If the specified prefix exceeds this length, the

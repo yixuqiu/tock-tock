@@ -9,7 +9,7 @@
 //!
 //! You need a device that provides the `hil::sensors::AirQualityDriver` trait.
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
@@ -58,7 +58,7 @@ impl<'a> AirQualitySensor<'a> {
         grant: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<0>>,
     ) -> AirQualitySensor<'a> {
         AirQualitySensor {
-            driver: driver,
+            driver,
             apps: grant,
             busy: Cell::new(false),
         }
@@ -99,13 +99,11 @@ impl hil::sensors::AirQualityClient for AirQualitySensor<'_> {
         for cntr in self.apps.iter() {
             cntr.enter(|app, upcalls| {
                 if app.operation == Operation::CO2 {
-                    value
-                        .map(|co2| {
-                            self.busy.set(false);
-                            app.operation = Operation::None;
-                            upcalls.schedule_upcall(0, (co2 as usize, 0, 0)).ok();
-                        })
-                        .ok();
+                    let _ = value.map(|co2| {
+                        self.busy.set(false);
+                        app.operation = Operation::None;
+                        let _ = upcalls.schedule_upcall(0, (co2 as usize, 0, 0));
+                    });
                 }
             });
         }
@@ -115,13 +113,11 @@ impl hil::sensors::AirQualityClient for AirQualitySensor<'_> {
         for cntr in self.apps.iter() {
             cntr.enter(|app, upcalls| {
                 if app.operation == Operation::TVOC {
-                    value
-                        .map(|tvoc| {
-                            self.busy.set(false);
-                            app.operation = Operation::None;
-                            upcalls.schedule_upcall(0, (tvoc as usize, 0, 0)).ok();
-                        })
-                        .ok();
+                    let _ = value.map(|tvoc| {
+                        self.busy.set(false);
+                        app.operation = Operation::None;
+                        let _ = upcalls.schedule_upcall(0, (tvoc as usize, 0, 0));
+                    });
                 }
             });
         }

@@ -18,10 +18,11 @@
 //!
 //! There is one ReadWrite and one ReadOnly allow buffers, both at index `0`.
 //!
-//! * ReadOnly: Advertising data, containing the full _payload_ (i.e. excluding the header) the
-//!             process wishes to advertise.
-//! * ReadWrite: Passive scanning buffer, which is populated during BLE scans with complete (i.e.
-//!              including headers) advertising packets received on channels 37, 38 and 39.
+//! * ReadOnly: Advertising data, containing the full _payload_ (i.e. excluding
+//!   the header) the process wishes to advertise.
+//! * ReadWrite: Passive scanning buffer, which is populated during BLE scans
+//!   with complete (i.e. including headers) advertising packets received on
+//!   channels 37, 38 and 39.
 //!
 //! The possible return codes from the 'allow' system call indicate the following:
 //!
@@ -37,8 +38,8 @@
 //!  The `subscribe` system call supports two arguments `subscribe number' and `callback`.
 //!  The `subscribe` is used to specify the specific operation, currently:
 //!
-//! * 0: provides a callback user-space when a device scanning for advertisements
-//!      and the callback is used to invoke user-space processes.
+//! * 0: provides a callback user-space when a device scanning for
+//!   advertisements and the callback is used to invoke user-space processes.
 //!
 //! The possible return codes from the `allow` system call indicate the following:
 //!
@@ -67,7 +68,7 @@
 //! You need a device that provides the `kernel::BleAdvertisementDriver` trait along with a virtual
 //! timer to perform events and not block the entire kernel
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //! # use capsules::virtual_alarm::VirtualMuxAlarm;
 //!
@@ -269,7 +270,7 @@ impl App {
                             let adv_data_len =
                                 cmp::min(kernel_tx.len() - PACKET_ADDR_LEN - 2, adv_data.len());
                             let adv_data_corrected =
-                                adv_data.get_to(..adv_data_len).ok_or(ErrorCode::SIZE)?;
+                                adv_data.get(..adv_data_len).ok_or(ErrorCode::SIZE)?;
                             let payload_len = adv_data_corrected.len() + PACKET_ADDR_LEN;
                             {
                                 let (header, payload) = kernel_tx.split_at_mut(2);
@@ -358,11 +359,11 @@ where
         alarm: &'a A,
     ) -> BLE<'a, B, A> {
         BLE {
-            radio: radio,
+            radio,
             busy: Cell::new(false),
             app: container,
             kernel_tx: kernel::utilities::cells::TakeCell::new(tx_buf),
-            alarm: alarm,
+            alarm,
             sending_app: OptionalCell::empty(),
             receiving_app: OptionalCell::empty(),
         }
@@ -508,12 +509,10 @@ where
                         .unwrap_or(false);
 
                     if success {
-                        kernel_data
-                            .schedule_upcall(
-                                0,
-                                (kernel::errorcode::into_statuscode(result), len as usize, 0),
-                            )
-                            .ok();
+                        let _ = kernel_data.schedule_upcall(
+                            0,
+                            (kernel::errorcode::into_statuscode(result), len as usize, 0),
+                        );
                     }
                 }
 

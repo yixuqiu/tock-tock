@@ -24,12 +24,12 @@ use crate::types;
 /// we can skip over it and check for the next app.
 /// - Err(InitialTbfParseError::InvalidHeader(app_length))
 pub fn parse_tbf_header_lengths(
-    app: &'static [u8; 8],
+    app: &[u8; 8],
 ) -> Result<(u16, u16, u32), types::InitialTbfParseError> {
     // Version is the first 16 bits of the app TBF contents. We need this to
     // correctly parse the other lengths.
     //
-    // ## Safety
+    // # Safety
     // We trust that the version number has been checked prior to running this
     // parsing code. That is, whatever loaded this application has verified that
     // the version is valid and therefore we can trust it.
@@ -47,9 +47,11 @@ pub fn parse_tbf_header_lengths(
             let tbf_size = u32::from_le_bytes([app[4], app[5], app[6], app[7]]);
 
             // Check that the header length isn't greater than the entire app,
-            // and is at least as large as the v2 required header (which is 16
-            // bytes). If that at least looks good then return the sizes.
-            if u32::from(tbf_header_size) > tbf_size || tbf_header_size < 16 {
+            // and is at least as large as the v2 required header. If that at
+            // least looks good then return the sizes.
+            if u32::from(tbf_header_size) > tbf_size
+                || usize::from(tbf_header_size) < types::TBF_HEADER_V2_BASE_SIZE
+            {
                 Err(types::InitialTbfParseError::InvalidHeader(tbf_size))
             } else {
                 Ok((version, tbf_header_size, tbf_size))
@@ -69,9 +71,9 @@ pub fn parse_tbf_header_lengths(
 /// should use the `parse_tbf_header_lengths()` function to determine this
 /// length to create the correct sized slice.
 pub fn parse_tbf_header(
-    header: &'static [u8],
+    header: &[u8],
     version: u16,
-) -> Result<types::TbfHeader, types::TbfParseError> {
+) -> Result<types::TbfHeader<'_>, types::TbfParseError> {
     match version {
         2 => {
             // Get the required base. This will succeed because we parsed the
@@ -83,11 +85,11 @@ pub fn parse_tbf_header(
             let mut checksum: u32 = 0;
 
             // Get an iterator across 4 byte fields in the header.
-            let header_iter = header.chunks_exact(4);
+            let (header_chunks, _remainder) = header.as_chunks::<4>();
 
             // Iterate all chunks and XOR the chunks to compute the checksum.
-            for (i, chunk) in header_iter.enumerate() {
-                let word = u32::from_le_bytes(chunk.try_into()?);
+            for (i, chunk) in header_chunks.iter().enumerate() {
+                let word = u32::from_le_bytes(*chunk);
                 if i == 3 {
                     // Skip the checksum field.
                 } else {
@@ -107,7 +109,7 @@ pub fn parse_tbf_header(
             // continue to hold the remainder of the header we have not
             // processed.
             let mut remaining = header
-                .get(16..)
+                .get(types::TBF_HEADER_V2_BASE_SIZE..)
                 .ok_or(types::TbfParseError::NotEnoughFlash)?;
 
             // If there is nothing left in the header then this is just a
@@ -122,12 +124,13 @@ pub fn parse_tbf_header(
                 // options.
                 let mut main_pointer: Option<types::TbfHeaderV2Main> = None;
                 let mut program_pointer: Option<types::TbfHeaderV2Program> = None;
-                let mut wfr_pointer: Option<&'static [u8]> = None;
+                let mut wfr_pointer: Option<&[u8]> = None;
                 let mut app_name_str = "";
-                let mut fixed_address_pointer: Option<&'static [u8]> = None;
-                let mut permissions_pointer: Option<&'static [u8]> = None;
-                let mut storage_permissions_pointer: Option<&'static [u8]> = None;
+                let mut fixed_address_pointer: Option<&[u8]> = None;
+                let mut permissions_pointer: Option<&[u8]> = None;
+                let mut storage_permissions_pointer: Option<&[u8]> = None;
                 let mut kernel_version: Option<types::TbfHeaderV2KernelVersion> = None;
+                let mut short_id: Option<types::TbfHeaderV2ShortId> = None;
 
                 // Iterate the remainder of the header looking for TLV entries.
                 while remaining.len() > 0 {
@@ -180,9 +183,10 @@ pub fn parse_tbf_header(
                         }
                         types::TbfHeaderTypes::TbfHeaderWriteableFlashRegions => {
                             // Length must be a multiple of the size of a region definition.
-                            if tlv_header.length as usize
-                                % mem::size_of::<types::TbfHeaderV2WriteableFlashRegion>()
-                                == 0
+                            if (tlv_header.length as usize)
+                                .is_multiple_of(mem::size_of::<
+                                    types::TbfHeaderV2WriteableFlashRegion,
+                                >())
                             {
                                 // Capture a slice with just the wfr information.
                                 let wfr_slice = remaining
@@ -256,6 +260,22 @@ pub fn parse_tbf_header(
                             }
                         }
 
+                        types::TbfHeaderTypes::TbfHeaderShortId => {
+                            let entry_len = mem::size_of::<types::TbfHeaderV2ShortId>();
+                            if tlv_header.length as usize == entry_len {
+                                short_id = Some(
+                                    remaining
+                                        .get(0..entry_len)
+                                        .ok_or(types::TbfParseError::NotEnoughFlash)?
+                                        .try_into()?,
+                                );
+                            } else {
+                                return Err(types::TbfParseError::BadTlvEntry(
+                                    tlv_header.tipe as usize,
+                                ));
+                            }
+                        }
+
                         _ => {}
                     }
 
@@ -278,7 +298,8 @@ pub fn parse_tbf_header(
                     fixed_addresses: fixed_address_pointer,
                     permissions: permissions_pointer,
                     storage_permissions: storage_permissions_pointer,
-                    kernel_version: kernel_version,
+                    kernel_version,
+                    short_id,
                 };
 
                 Ok(types::TbfHeader::TbfHeaderV2(tbf_header))

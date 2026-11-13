@@ -16,7 +16,7 @@
 //! Usage
 //! -----
 //!
-//! ```
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let app_flash_buffer = static_init!([u8; 512], [0; 512]);
@@ -85,7 +85,7 @@ impl<'a> AppFlash<'a> {
         buffer: &'static mut [u8],
     ) -> AppFlash<'a> {
         AppFlash {
-            driver: driver,
+            driver,
             apps: grant,
             current_app: OptionalCell::empty(),
             buffer: TakeCell::new(buffer),
@@ -127,7 +127,12 @@ impl<'a> AppFlash<'a> {
                                             *c = d[i].get();
                                         }
 
-                                        self.driver.write(buffer, flash_address, length)
+                                        self.driver.write(buffer, flash_address, length).map_err(
+                                            |(e, buf)| {
+                                                self.buffer.replace(buf);
+                                                e
+                                            },
+                                        )
                                     })
                             })
                         })
@@ -157,7 +162,7 @@ impl hil::nonvolatile_storage::NonvolatileStorageClient for AppFlash<'_> {
         // Notify the current application that the command finished.
         self.current_app.take().map(|processid| {
             let _ = self.apps.enter(processid, |_app, upcalls| {
-                upcalls.schedule_upcall(upcall::WRITE_DONE, (0, 0, 0)).ok();
+                let _ = upcalls.schedule_upcall(upcall::WRITE_DONE, (0, 0, 0));
             });
         });
 
@@ -174,7 +179,7 @@ impl hil::nonvolatile_storage::NonvolatileStorageClient for AppFlash<'_> {
                         .get_readonly_processbuffer(ro_allow::BUFFER)
                         .and_then(|buffer| {
                             buffer.enter(|app_buffer| {
-                                self.buffer.take().map_or(false, |buffer| {
+                                self.buffer.take().is_some_and(|buffer| {
                                     if app_buffer.len() != 512 {
                                         false
                                     } else {
@@ -185,12 +190,12 @@ impl hil::nonvolatile_storage::NonvolatileStorageClient for AppFlash<'_> {
                                             *c = d[i].get();
                                         }
 
-                                        if let Ok(()) =
-                                            self.driver.write(buffer, flash_address, length)
-                                        {
-                                            true
-                                        } else {
-                                            false
+                                        match self.driver.write(buffer, flash_address, length) {
+                                            Ok(()) => true,
+                                            Err((_e, buf)) => {
+                                                self.buffer.replace(buf);
+                                                false
+                                            }
                                         }
                                     }
                                 })

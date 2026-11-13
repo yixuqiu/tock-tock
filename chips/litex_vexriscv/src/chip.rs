@@ -9,8 +9,8 @@ use core::ptr::addr_of;
 use kernel::debug;
 use kernel::platform::chip::InterruptService;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
-use rv32i::csr::{mcause, mie::mie, CSR};
-use rv32i::pmp::{kernel_protection::KernelProtectionPMP, PMPUserMPU};
+use rv32i::csr::{CSR, mcause, mie::mie};
+use rv32i::pmp::{PMPUserMPU, kernel_protection::KernelProtectionPMP};
 use rv32i::syscall::SysCall;
 
 use crate::interrupt_controller::VexRiscvInterruptController;
@@ -62,6 +62,9 @@ impl<I: 'static + InterruptService> LiteXVexRiscv<I> {
 impl<I: 'static + InterruptService> kernel::platform::chip::Chip for LiteXVexRiscv<I> {
     type MPU = PMPUserMPU<4, KernelProtectionPMP<16>>;
     type UserspaceKernelBoundary = SysCall;
+    type ThreadIdProvider = rv32i::thread_id::RiscvThreadIdProvider;
+
+    fn init() {}
 
     fn mpu(&self) -> &Self::MPU {
         &self.pmp_mpu
@@ -94,20 +97,23 @@ impl<I: 'static + InterruptService> kernel::platform::chip::Chip for LiteXVexRis
         }
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        rv32i::support::atomic(f)
+        rv32i::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, writer: &mut dyn Write) {
+    unsafe fn print_state(this: Option<&Self>, writer: &mut dyn Write) {
         let _ = writer.write_fmt(format_args!(
             "\r\n---| LiteX configuration for {} |---",
-            self.soc_identifier,
+            this.map_or("unknown board (in trap handler thread)", |t| t
+                .soc_identifier),
         ));
         rv32i::print_riscv_state(writer);
-        let _ = writer.write_fmt(format_args!("{}", self.pmp_mpu.pmp));
+        if let Some(t) = this {
+            let _ = writer.write_fmt(format_args!("{}", t.pmp_mpu.pmp));
+        }
     }
 }
 
@@ -161,12 +167,12 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             //
             // If no interrupt was saved, reenable interrupts
             // immediately
-            if !INTERRUPT_CONTROLLER.save_pending() {
+            if !(*addr_of!(INTERRUPT_CONTROLLER)).save_pending() {
                 CSR.mie.modify(mie::mext::SET);
             }
         }
 
-        mcause::Interrupt::Unknown => {
+        mcause::Interrupt::Unknown(_) => {
             debug!("interrupt of unknown cause");
         }
     }
@@ -176,7 +182,7 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
 ///
 /// This gets called when an interrupt occurs while the chip is in
 /// kernel mode.
-#[export_name = "_start_trap_rust_from_kernel"]
+#[export_name = "start_trap_rust_from_kernel"]
 pub unsafe extern "C" fn start_trap_rust() {
     match mcause::Trap::from(CSR.mcause.extract()) {
         mcause::Trap::Interrupt(interrupt) => {
@@ -189,6 +195,7 @@ pub unsafe extern "C" fn start_trap_rust() {
 }
 
 /// Function that gets called if an interrupt occurs while an app was running.
+///
 /// mcause is passed in, and this function should correctly handle disabling the
 /// interrupt that fired so that it does not trigger again.
 #[export_name = "_disable_interrupt_trap_rust_from_app"]
@@ -202,3 +209,11 @@ pub unsafe extern "C" fn disable_interrupt_trap_handler(mcause_val: u32) {
         }
     }
 }
+
+/// Array used to track the "trap handler active" state per hart.
+///
+/// The `riscv` crate requires chip crates to allocate an array to
+/// track whether any given hart is currently in a trap handler. The
+/// array must be zero-initialized.
+#[export_name = "_trap_handler_active"]
+static mut TRAP_HANDLER_ACTIVE: [usize; 1] = [0; 1];

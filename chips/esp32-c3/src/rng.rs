@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil::entropy::{self, Client32, Continue, Entropy32};
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::Readable;
-use kernel::utilities::registers::{register_structs, ReadOnly};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{ReadOnly, register_structs};
 
 const RNG_DATA_REG: StaticRef<RngRegister> =
     unsafe { StaticRef::new(0x6002_60B0 as *const RngRegister) };
@@ -27,7 +27,7 @@ pub struct Rng<'a> {
     deferred_call: DeferredCall,
 }
 
-impl<'a> Rng<'_> {
+impl<'a> Rng<'a> {
     pub fn new() -> Rng<'a> {
         Rng {
             register: RNG_DATA_REG,
@@ -38,7 +38,7 @@ impl<'a> Rng<'_> {
     }
 }
 
-impl<'a> DeferredCallClient for Rng<'a> {
+impl DeferredCallClient for Rng<'_> {
     fn register(&'static self) {
         self.deferred_call.register(self);
     }
@@ -48,7 +48,7 @@ impl<'a> DeferredCallClient for Rng<'a> {
         self.client.map(|client| {
             if let Continue::More = client.entropy_available(&mut RngIter(self), Ok(())) {
                 self.deferred_call.set();
-            };
+            }
         });
     }
 }

@@ -8,56 +8,42 @@
 
 use core::cell::Cell;
 use core::ops::{Index, IndexMut};
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
-use kernel::utilities::cells::VolatileCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
-const NVMC_BASE: StaticRef<NvmcRegisters> =
-    unsafe { StaticRef::new(0x4001E400 as *const NvmcRegisters) };
-
-#[repr(C)]
-struct NvmcRegisters {
-    /// Ready flag
-    /// Address 0x400 - 0x404
-    pub ready: ReadOnly<u32, Ready::Register>,
-    _reserved0: [u32; 4],
-    /// Ready flag
-    /// Address 0x408 - 0x40C
-    pub ready_next: ReadOnly<u32, Ready::Register>,
-    /// Reserved
-    _reserved1: [u32; 59],
-    /// Configuration register
-    /// Address: 0x504 - 0x508
-    pub config: ReadWrite<u32, Configuration::Register>,
-    /// Register for erasing a page in Code area
-    /// Address: 0x508 - 0x50C
-    pub erasepage: ReadWrite<u32, ErasePage::Register>,
-    /// Register for erasing all non-volatile user memory
-    /// Address: 0x50C - 0x510
-    pub eraseall: ReadWrite<u32, EraseAll::Register>,
-    _reserved2: u32,
-    /// Register for erasing User Information Configuration Registers
-    /// Address: 0x514 - 0x518
-    pub eraseuicr: ReadWrite<u32, EraseUicr::Register>,
-    /// Reserved
-    _reserved3: [u32; 10],
-    /// Configuration register
-    /// Address: 0x540 - 0x544
-    pub icachecnf: ReadWrite<u32, CacheConfiguration::Register>,
-    /// Reserved
-    _reserved4: u32,
-    /// Configuration register
-    /// Address: 0x548 - 0x54c
-    pub ihit: ReadWrite<u32, CacheHit::Register>,
-    /// Configuration register
-    /// Address: 0x54C - 0x550
-    pub imiss: ReadWrite<u32, CacheMiss::Register>,
+register_structs! {
+    pub NvmcRegisters {
+        /// Ready flag
+        (0x000 => ready: ReadOnly<u32, Ready::Register>),
+        (0x004 => _reserved0),
+        /// Ready flag
+        (0x014 => ready_next: ReadOnly<u32, Ready::Register>),
+        (0x018 => _reserved1),
+        /// Configuration register
+        (0x104 => config: ReadWrite<u32, Configuration::Register>),
+        /// Register for erasing a page in Code area
+        (0x108 => erasepage: ReadWrite<u32, ErasePage::Register>),
+        /// Register for erasing all non-volatile user memory
+        (0x10C => eraseall: ReadWrite<u32, EraseAll::Register>),
+        (0x110 => _reserved2),
+        /// Register for erasing User Information Configuration Registers
+        (0x114 => eraseuicr: ReadWrite<u32, EraseUicr::Register>),
+        (0x118 => _reserved3),
+        /// Configuration register
+        (0x140 => icachecnf: ReadWrite<u32, CacheConfiguration::Register>),
+        (0x144 => _reserved4),
+        /// Configuration register
+        (0x148 => ihit: ReadWrite<u32, CacheHit::Register>),
+        /// Configuration register
+        (0x14C => imiss: ReadWrite<u32, CacheMiss::Register>),
+        (0x150 => @END),
+    }
 }
 
 register_bitfields! [u32,
@@ -209,9 +195,9 @@ pub struct Nvmc {
 }
 
 impl Nvmc {
-    pub fn new() -> Self {
+    pub fn new(registers: StaticRef<NvmcRegisters>) -> Self {
         Self {
-            registers: NVMC_BASE,
+            registers,
             client: OptionalCell::empty(),
             buffer: TakeCell::empty(),
             state: Cell::new(FlashState::Ready),
@@ -270,6 +256,16 @@ impl Nvmc {
         }
     }
 
+    fn is_page_blank(&self, page_number: usize) -> bool {
+        let address = (page_number * PAGE_SIZE) as *const u32;
+        for i in 0..(PAGE_SIZE / 4) {
+            if unsafe { core::ptr::read(address.add(i)) } != 0xFFFFFFFF {
+                return false;
+            }
+        }
+        true
+    }
+
     fn erase_page_helper(&self, page_number: usize) {
         // Put the NVMC in erase mode.
         self.registers.config.write(Configuration::WEN::Een);
@@ -295,7 +291,7 @@ impl Nvmc {
         unsafe {
             for i in 0..buffer.len() {
                 buffer[i] = *byte;
-                byte = byte.offset(1);
+                byte = byte.add(1);
             }
         }
 
@@ -315,8 +311,11 @@ impl Nvmc {
         page_number: usize,
         data: &'static mut NrfPage,
     ) -> Result<(), (ErrorCode, &'static mut NrfPage)> {
-        // Need to erase the page first.
-        self.erase_page_helper(page_number);
+        // Need to erase the page if the page is not filled
+        // with 0xFF.
+        if !self.is_page_blank(page_number) {
+            self.erase_page_helper(page_number);
+        }
 
         // Put the NVMC in write mode.
         self.registers.config.write(Configuration::WEN::Wen);
@@ -328,7 +327,7 @@ impl Nvmc {
                 | (data[i + 3] as u32) << 24;
 
             let address = ((page_number * PAGE_SIZE) + i) as u32;
-            let location = unsafe { &*(address as *const VolatileCell<u32>) };
+            let location = unsafe { &*(address as *const ReadWrite<u32>) };
             location.set(word);
             while !self.registers.ready.is_set(Ready::READY) {}
         }
@@ -350,7 +349,9 @@ impl Nvmc {
 
     fn erase_page(&self, page_number: usize) -> Result<(), ErrorCode> {
         // Do the basic erase.
-        self.erase_page_helper(page_number);
+        if !self.is_page_blank(page_number) {
+            self.erase_page_helper(page_number);
+        }
 
         // Mark that we want to trigger a pseudo interrupt so that we can issue
         // the callback even though the NVMC is completely blocking.

@@ -16,61 +16,62 @@
 //!
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil::date_time;
 use kernel::hil::date_time::{DateTimeClient, DateTimeValues, DayOfWeek, Month};
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
-use stm32f4xx::rcc;
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
+use stm32f4xx::clocks::{Stm32f4Clocks, phclk};
 
-/// Register block to control RTC
-#[repr(C)]
-pub struct RtcRegisters {
-    /// The RTC_TR is the calendar time shadow register. This register must be written in initialization mode only.
-    rtc_tr: ReadWrite<u32, RTC_TR::Register>,
-    /// The RTC_DR is the calendar date shadow register. This register must be written in initialization mode only.
-    rtc_dr: ReadWrite<u32, RTC_DR::Register>,
-    /// RTC control register
-    rtc_cr: ReadWrite<u32, RTC_CR::Register>,
-    /// RTC initialization and status register
-    rtc_isr: ReadWrite<u32, RTC_ISR::Register>,
-    /// RTC prescaler register
-    rtc_prer: ReadWrite<u32, RTC_PRER::Register>,
-    /// RTC wakeup timer register
-    rtc_wutr: ReadWrite<u32, RTC_WUTR::Register>,
-    /// RTC calibration register
-    rtc_calibr: ReadWrite<u32, RTC_CALIBR::Register>,
-    /// RTC alarm A register
-    rtc_alrmar: ReadWrite<u32, RTC_ALRMAR::Register>,
-    /// RTC alarm B register
-    rtc_alrmbr: ReadWrite<u32, RTC_ALRMBR::Register>,
-    /// RTC write protection register
-    rtc_wpr: ReadWrite<u32, RTC_WPR::Register>,
-    /// RTC sub second register
-    rtc_ssr: ReadWrite<u32, RTC_SSR::Register>,
-    /// RTC shift control register
-    rtc_shiftr: ReadWrite<u32, RTC_SHIFTR::Register>,
-    /// RTC time stamp time register
-    rtc_tstr: ReadWrite<u32, RTC_TSTR::Register>,
-    /// RTC time stamp date register
-    rtc_tsdr: ReadWrite<u32, RTC_TSDR::Register>,
-    /// RTC time stamp sub second register
-    rtc_tsssr: ReadWrite<u32, RTC_TSSSR::Register>,
-    /// RTC calibration register
-    rtc_calr: ReadWrite<u32, RTC_CALR::Register>,
-    /// RTC tamper and alternate function configuration register
-    rtc_tafcr: ReadWrite<u32, RTC_TAFCR::Register>,
-    /// RTC alarm A sub second register
-    rtc_alrmassr: ReadWrite<u32, RTC_ALRMASSR::Register>,
-    /// RTC alarm B sub second register
-    rtc_alrmbssr: ReadWrite<u32, RTC_ALRMBSSR::Register>,
-
-    /// The application can write or read data to and from these registers
-    rtc_bkpxr: [ReadWrite<u32, RTC_BKPXR::Register>; 19],
+register_structs! {
+    /// Register block to control RTC
+    pub RtcRegisters {
+        /// The RTC_TR is the calendar time shadow register. This register must be written in initialization mode only.
+        (0x000 => rtc_tr: ReadWrite<u32, RTC_TR::Register>),
+        /// The RTC_DR is the calendar date shadow register. This register must be written in initialization mode only.
+        (0x004 => rtc_dr: ReadWrite<u32, RTC_DR::Register>),
+        /// RTC control register
+        (0x008 => rtc_cr: ReadWrite<u32, RTC_CR::Register>),
+        /// RTC initialization and status register
+        (0x00C => rtc_isr: ReadWrite<u32, RTC_ISR::Register>),
+        /// RTC prescaler register
+        (0x010 => rtc_prer: ReadWrite<u32, RTC_PRER::Register>),
+        /// RTC wakeup timer register
+        (0x014 => rtc_wutr: ReadWrite<u32, RTC_WUTR::Register>),
+        /// RTC calibration register
+        (0x018 => rtc_calibr: ReadWrite<u32, RTC_CALIBR::Register>),
+        /// RTC alarm A register
+        (0x01C => rtc_alrmar: ReadWrite<u32, RTC_ALRMAR::Register>),
+        /// RTC alarm B register
+        (0x020 => rtc_alrmbr: ReadWrite<u32, RTC_ALRMBR::Register>),
+        /// RTC write protection register
+        (0x024 => rtc_wpr: ReadWrite<u32, RTC_WPR::Register>),
+        /// RTC sub second register
+        (0x028 => rtc_ssr: ReadWrite<u32, RTC_SSR::Register>),
+        /// RTC shift control register
+        (0x02C => rtc_shiftr: ReadWrite<u32, RTC_SHIFTR::Register>),
+        /// RTC time stamp time register
+        (0x030 => rtc_tstr: ReadWrite<u32, RTC_TSTR::Register>),
+        /// RTC time stamp date register
+        (0x034 => rtc_tsdr: ReadWrite<u32, RTC_TSDR::Register>),
+        /// RTC time stamp sub second register
+        (0x038 => rtc_tsssr: ReadWrite<u32, RTC_TSSSR::Register>),
+        /// RTC calibration register
+        (0x03C => rtc_calr: ReadWrite<u32, RTC_CALR::Register>),
+        /// RTC tamper and alternate function configuration register
+        (0x040 => rtc_tafcr: ReadWrite<u32, RTC_TAFCR::Register>),
+        /// RTC alarm A sub second register
+        (0x044 => rtc_alrmassr: ReadWrite<u32, RTC_ALRMASSR::Register>),
+        /// RTC alarm B sub second register
+        (0x048 => rtc_alrmbssr: ReadWrite<u32, RTC_ALRMBSSR::Register>),
+        /// The application can write or read data to and from these registers
+        (0x04C => rtc_bkpxr: [ReadWrite<u32, RTC_BKPXR::Register>; 19]),
+        (0x098 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -365,8 +366,8 @@ RTC_BKPXR[
 pub struct Rtc<'a> {
     registers: StaticRef<RtcRegisters>,
     client: OptionalCell<&'a dyn date_time::DateTimeClient>,
-    pub clock: rcc::PeripheralClock<'a>,
-    pub pwr_clock: rcc::PeripheralClock<'a>,
+    pub clock: phclk::PeripheralClock<'a>,
+    pub pwr_clock: phclk::PeripheralClock<'a>,
     time: Cell<DateTimeValues>,
 
     deferred_call: DeferredCall,
@@ -379,7 +380,7 @@ enum DeferredCallTask {
     Set,
 }
 
-impl<'a> DeferredCallClient for Rtc<'a> {
+impl DeferredCallClient for Rtc<'_> {
     fn handle_deferred_call(&self) {
         self.deferred_call_task.take().map(|value| match value {
             DeferredCallTask::Get => self
@@ -397,12 +398,12 @@ const RTC_BASE: StaticRef<RtcRegisters> =
     unsafe { StaticRef::new(0x40002800 as *const RtcRegisters) };
 
 impl<'a> Rtc<'a> {
-    pub fn new(rcc: &'a rcc::Rcc) -> Rtc<'a> {
+    pub fn new(clocks: &'a dyn Stm32f4Clocks) -> Rtc<'a> {
         Rtc {
             registers: RTC_BASE,
             client: OptionalCell::empty(),
-            clock: rcc::PeripheralClock::new(rcc::PeripheralClockType::RTC, rcc),
-            pwr_clock: rcc::PeripheralClock::new(rcc::PeripheralClockType::PWR, rcc),
+            clock: phclk::PeripheralClock::new(phclk::PeripheralClockType::RTC, clocks),
+            pwr_clock: phclk::PeripheralClock::new(phclk::PeripheralClockType::PWR, clocks),
             time: Cell::new(DateTimeValues {
                 year: 0,
                 month: Month::January,
@@ -594,9 +595,8 @@ impl<'a> Rtc<'a> {
         self.pwr_clock.enable();
 
         // Enable access to the backup domain
-        match crate::pwr::enable_backup_access() {
-            Err(e) => panic!("{:?}", e),
-            _ => (),
+        if let Err(e) = crate::pwr::enable_backup_access() {
+            panic!("{:?}", e)
         }
 
         self.clock.enable();

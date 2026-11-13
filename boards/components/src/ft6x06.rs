@@ -22,6 +22,7 @@ use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::gpio;
 use kernel::hil::i2c;
+use kernel::hil::i2c::I2CDevice as _;
 
 // Setup static space for the objects.
 #[macro_export]
@@ -39,7 +40,7 @@ macro_rules! ft6x06_component_static {
         );
 
         (i2c_device, ft6x06, buffer, events_buffer)
-    };};
+    }};
 }
 
 pub struct Ft6x06Component<I: 'static + i2c::I2CMaster<'static>> {

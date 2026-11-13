@@ -6,18 +6,18 @@
 
 use core::cell::Cell;
 use core::ops::Index;
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::hil::digest::{self, DigestData, DigestHash};
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::leasable_buffer::SubSlice;
 use kernel::utilities::leasable_buffer::SubSliceMut;
 use kernel::utilities::leasable_buffer::SubSliceMutImmut;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, register_structs, ReadOnly, ReadWrite, WriteOnly,
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
 };
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
 
 register_structs! {
     pub HmacRegisters {
@@ -115,7 +115,7 @@ impl Hmac<'_> {
             regs.msg_fifo.set(d);
         }
 
-        if (count % 4) != 0 {
+        if !count.is_multiple_of(4) {
             for i in 0..(count % 4) {
                 let data_idx = (count - (count % 4)) + i;
                 regs.msg_fifo_8.set(data[data_idx]);
@@ -127,7 +127,7 @@ impl Hmac<'_> {
     // Return true if processing more data, false if the buffer
     // is completely processed.
     fn data_progress(&self) -> bool {
-        self.data.take().map_or(false, |buf| match buf {
+        self.data.take().is_some_and(|buf| match buf {
             SubSliceMutImmut::Immutable(mut b) => {
                 if b.len() == 0 {
                     self.data.set(Some(SubSliceMutImmut::Immutable(b)));
@@ -401,7 +401,7 @@ impl hil::digest::HmacSha256 for Hmac<'_> {
             key_idx = i + 1;
         }
 
-        if (key.len() % 4) != 0 {
+        if !key.len().is_multiple_of(4) {
             let mut k = 0;
 
             for i in 0..(key.len() % 4) {
@@ -428,6 +428,24 @@ impl hil::digest::HmacSha384 for Hmac<'_> {
 
 impl hil::digest::HmacSha512 for Hmac<'_> {
     fn set_mode_hmacsha512(&self, _key: &[u8]) -> Result<(), ErrorCode> {
+        Err(ErrorCode::NOSUPPORT)
+    }
+}
+
+impl hil::digest::HmacMd5 for Hmac<'_> {
+    fn set_mode_hmacmd5(&self, _key: &[u8]) -> Result<(), ErrorCode> {
+        Err(ErrorCode::NOSUPPORT)
+    }
+}
+
+impl hil::digest::HmacSha1 for Hmac<'_> {
+    fn set_mode_hmacsha1(&self, _key: &[u8]) -> Result<(), ErrorCode> {
+        Err(ErrorCode::NOSUPPORT)
+    }
+}
+
+impl hil::digest::HmacSha224 for Hmac<'_> {
+    fn set_mode_hmacsha224(&self, _key: &[u8]) -> Result<(), ErrorCode> {
         Err(ErrorCode::NOSUPPORT)
     }
 }
@@ -459,6 +477,24 @@ impl hil::digest::Sha384 for Hmac<'_> {
 
 impl hil::digest::Sha512 for Hmac<'_> {
     fn set_mode_sha512(&self) -> Result<(), ErrorCode> {
+        Err(ErrorCode::NOSUPPORT)
+    }
+}
+
+impl hil::digest::Md5 for Hmac<'_> {
+    fn set_mode_md5(&self) -> Result<(), ErrorCode> {
+        Err(ErrorCode::NOSUPPORT)
+    }
+}
+
+impl hil::digest::Sha1 for Hmac<'_> {
+    fn set_mode_sha1(&self) -> Result<(), ErrorCode> {
+        Err(ErrorCode::NOSUPPORT)
+    }
+}
+
+impl hil::digest::Sha224 for Hmac<'_> {
+    fn set_mode_sha224(&self) -> Result<(), ErrorCode> {
         Err(ErrorCode::NOSUPPORT)
     }
 }

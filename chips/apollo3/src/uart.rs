@@ -9,13 +9,14 @@ use kernel::ErrorCode;
 
 use kernel::hil;
 use kernel::hil::uart;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
+use kernel::utilities::io_write::IoWrite;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
-const UART0_BASE: StaticRef<UartRegisters> =
+pub const UART0_BASE: StaticRef<UartRegisters> =
     unsafe { StaticRef::new(0x4001_C000 as *const UartRegisters) };
 
 pub const UART1_BASE: StaticRef<UartRegisters> =
@@ -185,6 +186,21 @@ pub struct UartParams {
 }
 
 impl Uart<'_> {
+    pub fn new(base: StaticRef<UartRegisters>) -> Self {
+        Self {
+            registers: base,
+            clock_frequency: 24_000_000,
+            tx_client: OptionalCell::empty(),
+            rx_client: OptionalCell::empty(),
+            tx_buffer: TakeCell::empty(),
+            tx_len: Cell::new(0),
+            tx_index: Cell::new(0),
+            rx_buffer: TakeCell::empty(),
+            rx_len: Cell::new(0),
+            rx_index: Cell::new(0),
+        }
+    }
+
     // unsafe bc of UART0_BASE usage, called twice would alias location
     pub fn new_uart_0() -> Self {
         Self {
@@ -326,13 +342,20 @@ impl Uart<'_> {
         let regs = self.registers;
         let irq = regs.ies.extract();
 
-        if irq.is_set(IES::TXIS) || irq.is_set(IES::TXCMPMIS) {
+        if irq.is_set(IES::TXCMPMIS) {
             // TXRIS Interrupt
             self.disable_tx_interrupt();
 
             if self.tx_index.get() >= self.tx_len.get() {
                 // We sent everything to the UART hardware, now from an
                 // interrupt callback we can issue the callback.
+
+                // Disable the UART
+                if self.rx_buffer.is_none() {
+                    regs.cr.modify(CR::UARTEN::CLEAR);
+                }
+                regs.cr.modify(CR::TXE::CLEAR);
+
                 self.tx_client.map(|client| {
                     self.tx_buffer.take().map(|tx_buf| {
                         client.transmitted_buffer(tx_buf, self.tx_len.get(), Ok(()));
@@ -344,12 +367,18 @@ impl Uart<'_> {
             }
         }
 
-        if irq.is_set(IES::RXIS) || irq.is_set(IES::RTIS) {
+        if irq.is_set(IES::RTIS) {
             self.disable_rx_interrupt();
 
             self.rx_progress();
 
             if self.rx_index.get() >= self.rx_len.get() {
+                // Disable the UART
+                if self.tx_buffer.is_none() {
+                    regs.cr.modify(CR::UARTEN::CLEAR);
+                }
+                regs.cr.modify(CR::RXE::CLEAR);
+
                 self.rx_client.map(|client| {
                     self.rx_buffer.take().map(|rx_buf| {
                         client.received_buffer(
@@ -394,10 +423,6 @@ impl hil::uart::Configure for Uart<'_> {
         // Set 8 data bits, no parity, 1 stop bit and no flow control
         regs.lcrh.modify(LCRH::WLEN.val(3) + LCRH::FEN::SET);
 
-        // Enable the UART
-        regs.cr
-            .modify(CR::UARTEN::SET + CR::RXE::SET + CR::TXE::SET);
-
         // Disable interrupts
         regs.ier.set(0x00);
         regs.iec.set(0xFF);
@@ -425,6 +450,9 @@ impl<'a> hil::uart::Transmit<'a> for Uart<'a> {
             self.tx_buffer.replace(tx_data);
             self.tx_len.set(tx_len);
             self.tx_index.set(0);
+
+            // Enable the UART
+            self.registers.cr.modify(CR::UARTEN::SET + CR::TXE::SET);
 
             self.tx_progress();
             Ok(())
@@ -458,6 +486,9 @@ impl<'a> hil::uart::Receive<'a> for Uart<'a> {
             self.rx_len.set(rx_len);
             self.rx_index.set(0);
 
+            // Enable the UART
+            self.registers.cr.modify(CR::UARTEN::SET + CR::RXE::SET);
+
             self.rx_progress();
             Ok(())
         }
@@ -469,5 +500,62 @@ impl<'a> hil::uart::Receive<'a> for Uart<'a> {
 
     fn receive_word(&self) -> Result<(), ErrorCode> {
         Err(ErrorCode::FAIL)
+    }
+}
+
+/// A synchronous writer for the apollo3 useful for panics.
+///
+/// For boards that want to use the UART to display panic messages, this
+/// provides an implementation of
+/// [`PanicWriter`](kernel::platform::chip::PanicWriter) with synchronous
+/// output.
+///
+/// This is only to be used by panic messages and is not used within the normal
+/// operation of the Tock kernel.
+struct UartPanicWriter<'a> {
+    uart: Uart<'a>,
+}
+
+impl IoWrite for UartPanicWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> usize {
+        self.uart.transmit_sync(buf);
+        buf.len()
+    }
+}
+
+impl core::fmt::Write for UartPanicWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Configuration for the synchronous UART panic writer.
+///
+/// This captures everything needed to setup the UART for panic display, even
+/// if the normal kernel had initialized it differently.
+pub struct UartPanicWriterConfig {
+    pub registers: StaticRef<UartRegisters>,
+    pub params: hil::uart::Parameters,
+}
+
+impl kernel::platform::chip::PanicWriter for Uart<'_> {
+    type Config = UartPanicWriterConfig;
+
+    fn create_panic_writer(
+        config: Self::Config,
+        _panic: &core::panic::PanicInfo,
+    ) -> impl IoWrite + core::fmt::Write {
+        use hil::uart::Configure as _;
+
+        let uart = Uart::new(config.registers);
+
+        // Configure the UART correctly for panics.
+        let _ = uart.configure(config.params);
+
+        // Enable the UART for transmission.
+        uart.registers.cr.modify(CR::UARTEN::SET + CR::TXE::SET);
+
+        UartPanicWriter { uart }
     }
 }

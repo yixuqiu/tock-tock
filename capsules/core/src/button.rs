@@ -11,15 +11,15 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let button_pins = static_init!(
 //!     [&'static sam4l::gpio::GPIOPin; 1],
 //!     [&sam4l::gpio::PA[16]]);
 //! let button = static_init!(
-//!     capsules::button::Button<'static>,
-//!     capsules::button::Button::new(button_pins, board_kernel.create_grant(&grant_cap)));
+//!     capsules_core::button::Button<'static>,
+//!     capsules_core::button::Button::new(button_pins, board_kernel.create_grant(&grant_cap)));
 //! for btn in button_pins.iter() {
 //!     btn.set_client(button);
 //! }
@@ -67,14 +67,17 @@ use kernel::{ErrorCode, ProcessId};
 use crate::driver;
 pub const DRIVER_NUM: usize = driver::NUM::Button as usize;
 
-/// This capsule keeps track for each app of which buttons it has a registered
-/// interrupt for. `SubscribeMap` is a bit array where bits are set to one if
+/// Keeps track which buttons each app has a registered interrupt for.
+///
+/// `SubscribeMap` is a bit array where bits are set to one if
 /// that app has an interrupt registered for that button.
 pub type SubscribeMap = u32;
 
-/// This capsule keeps track for each app of which buttons it has a registered
-/// interrupt for. `SubscribeMap` is a bit array where bits are set to one if
-/// that app has an interrupt registered for that button.
+/// Keeps track for each app of which buttons it has a registered
+/// interrupt for.
+///
+/// `SubscribeMap` is a bit array where bits are set to one if that
+/// app has an interrupt registered for that button.
 #[derive(Default)]
 pub struct App {
     subscribe_map: u32,
@@ -106,10 +109,7 @@ impl<'a, P: gpio::InterruptPin<'a>> Button<'a, P> {
             pin.set_floating_state(floating_state);
         }
 
-        Self {
-            pins: pins,
-            apps: grant,
-        }
+        Self { pins, apps: grant }
     }
 
     fn get_button_state(&self, pin_num: u32) -> gpio::ActivationState {
@@ -236,9 +236,8 @@ impl<'a, P: gpio::InterruptPin<'a>> gpio::ClientWithValue for Button<'a, P> {
         self.apps.each(|_, cntr, upcalls| {
             if cntr.subscribe_map & (1 << pin_num) != 0 {
                 interrupt_count.set(interrupt_count.get() + 1);
-                upcalls
-                    .schedule_upcall(UPCALL_NUM, (pin_num as usize, button_state as usize, 0))
-                    .ok();
+                let _ = upcalls
+                    .schedule_upcall(UPCALL_NUM, (pin_num as usize, button_state as usize, 0));
             }
         });
 

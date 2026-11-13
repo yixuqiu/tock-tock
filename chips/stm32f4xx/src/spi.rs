@@ -5,41 +5,44 @@
 use core::cell::Cell;
 use core::cmp;
 use kernel::ErrorCode;
+use kernel::utilities::leasable_buffer::SubSliceMut;
 
 use kernel::hil;
 use kernel::hil::gpio::Output;
 use kernel::hil::spi::{self, ClockPhase, ClockPolarity, SpiMasterClient};
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
+use crate::clocks::phclk;
 use crate::dma;
 use crate::dma::{Dma1, Dma1Peripheral};
-use crate::rcc;
 
-/// Serial peripheral interface
-#[repr(C)]
-pub struct SpiRegisters {
-    /// control register 1
-    cr1: ReadWrite<u32, CR1::Register>,
-    /// control register 2
-    cr2: ReadWrite<u32, CR2::Register>,
-    /// status register
-    sr: ReadWrite<u32, SR::Register>,
-    /// data register
-    dr: ReadWrite<u32, DR::Register>,
-    /// CRC polynomial register
-    crcpr: ReadWrite<u32>,
-    /// RX CRC register
-    rxcrcr: ReadOnly<u32>,
-    /// TX CRC register
-    txcrcr: ReadOnly<u32>,
-    /// I2S configuration register
-    i2scfgr: ReadWrite<u32, I2SCFGR::Register>,
-    /// I2S prescaler register
-    i2spr: ReadWrite<u32, I2SPR::Register>,
+register_structs! {
+    /// Serial peripheral interface
+    pub SpiRegisters {
+        /// control register 1
+        (0x000 => cr1: ReadWrite<u32, CR1::Register>),
+        /// control register 2
+        (0x004 => cr2: ReadWrite<u32, CR2::Register>),
+        /// status register
+        (0x008 => sr: ReadWrite<u32, SR::Register>),
+        /// data register
+        (0x00C => dr: ReadWrite<u32, DR::Register>),
+        /// CRC polynomial register
+        (0x010 => crcpr: ReadWrite<u32>),
+        /// RX CRC register
+        (0x014 => rxcrcr: ReadOnly<u32>),
+        /// TX CRC register
+        (0x018 => txcrcr: ReadOnly<u32>),
+        /// I2S configuration register
+        (0x01C => i2scfgr: ReadWrite<u32, I2SCFGR::Register>),
+        /// I2S prescaler register
+        (0x020 => i2spr: ReadWrite<u32, I2SPR::Register>),
+        (0x024 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -187,9 +190,9 @@ impl<'a> Spi<'a> {
             master_client: OptionalCell::empty(),
 
             tx_dma: OptionalCell::empty(),
-            tx_dma_pid: tx_dma_pid,
+            tx_dma_pid,
             rx_dma: OptionalCell::empty(),
-            rx_dma_pid: rx_dma_pid,
+            rx_dma_pid,
 
             dma_len: Cell::new(0),
             transfers_in_progress: Cell::new(0),
@@ -287,29 +290,21 @@ impl<'a> Spi<'a> {
 
     fn read_write_bytes(
         &self,
-        write_buffer: Option<&'static mut [u8]>,
-        read_buffer: Option<&'static mut [u8]>,
-        len: usize,
+        write_buffer: SubSliceMut<'static, u8>,
+        read_buffer: Option<SubSliceMut<'static, u8>>,
     ) -> Result<
         (),
         (
             ErrorCode,
-            Option<&'static mut [u8]>,
-            Option<&'static mut [u8]>,
+            SubSliceMut<'static, u8>,
+            Option<SubSliceMut<'static, u8>>,
         ),
     > {
-        if write_buffer.is_none() && read_buffer.is_none() {
-            return Err((ErrorCode::INVAL, write_buffer, read_buffer));
-        }
-
         self.active_slave.map(|p| {
             p.clear();
         });
 
-        let mut count: usize = len;
-        write_buffer
-            .as_ref()
-            .map(|buf| count = cmp::min(count, buf.len()));
+        let mut count: usize = write_buffer.len();
         read_buffer
             .as_ref()
             .map(|buf| count = cmp::min(count, buf.len()));
@@ -322,19 +317,17 @@ impl<'a> Spi<'a> {
             self.transfers_in_progress
                 .set(self.transfers_in_progress.get() + 1);
             self.rx_dma.map(move |dma| {
-                dma.do_transfer(rx_buffer, count);
+                dma.do_transfer(rx_buffer);
             });
             self.enable_rx();
         });
 
-        write_buffer.map(|tx_buffer| {
-            self.transfers_in_progress
-                .set(self.transfers_in_progress.get() + 1);
-            self.tx_dma.map(move |dma| {
-                dma.do_transfer(tx_buffer, count);
-            });
-            self.enable_tx();
+        self.transfers_in_progress
+            .set(self.transfers_in_progress.get() + 1);
+        self.tx_dma.map(move |dma| {
+            dma.do_transfer(write_buffer);
         });
+        self.enable_tx();
 
         Ok(())
     }
@@ -371,48 +364,24 @@ impl<'a> spi::SpiMaster<'a> for Spi<'a> {
         self.registers.sr.is_set(SR::BSY)
     }
 
-    fn write_byte(&self, out_byte: u8) -> Result<(), ErrorCode> {
-        // loop till TXE (Transmit Buffer Empty) becomes 1
-        while !self.registers.sr.is_set(SR::TXE) {}
-
-        self.registers.dr.modify(DR::DR.val(out_byte as u32));
-        Ok(())
-    }
-
-    fn read_byte(&self) -> Result<u8, ErrorCode> {
-        self.read_write_byte(0)
-    }
-
-    fn read_write_byte(&self, val: u8) -> Result<u8, ErrorCode> {
-        match self.write_byte(val) {
-            Ok(()) => {
-                // loop till RXNE becomes 1
-                while !self.registers.sr.is_set(SR::RXNE) {}
-
-                Ok(self.registers.dr.read(DR::DR) as u8)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
     fn read_write_bytes(
         &self,
-        write_buffer: &'static mut [u8],
-        read_buffer: Option<&'static mut [u8]>,
-        len: usize,
-    ) -> Result<(), (ErrorCode, &'static mut [u8], Option<&'static mut [u8]>)> {
+        write_buffer: SubSliceMut<'static, u8>,
+        read_buffer: Option<SubSliceMut<'static, u8>>,
+    ) -> Result<
+        (),
+        (
+            ErrorCode,
+            SubSliceMut<'static, u8>,
+            Option<SubSliceMut<'static, u8>>,
+        ),
+    > {
         // If busy, don't start
         if self.is_busy() {
             return Err((ErrorCode::BUSY, write_buffer, read_buffer));
         }
 
-        if let Err((e, write_buffer, read_buffer)) =
-            self.read_write_bytes(Some(write_buffer), read_buffer, len)
-        {
-            Err((e, write_buffer.unwrap(), read_buffer))
-        } else {
-            Ok(())
-        }
+        self.read_write_bytes(write_buffer, read_buffer)
     }
 
     /// We *only* support 1Mhz and 4MHz. If `rate` is set to any value other than
@@ -503,14 +472,14 @@ impl<'a> dma::StreamClient<'a, Dma1<'a>> for Spi<'a> {
 
             self.master_client.map(|client| {
                 tx_buffer.map(|t| {
-                    client.read_write_done(t, rx_buffer, length, Ok(()));
+                    client.read_write_done(t, rx_buffer, Ok(length));
                 });
             });
         }
     }
 }
 
-pub struct SpiClock<'a>(pub rcc::PeripheralClock<'a>);
+pub struct SpiClock<'a>(pub phclk::PeripheralClock<'a>);
 
 impl ClockInterface for SpiClock<'_> {
     fn is_enabled(&self) -> bool {

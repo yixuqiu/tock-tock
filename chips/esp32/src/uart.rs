@@ -8,11 +8,11 @@ use core::cell::Cell;
 use kernel::ErrorCode;
 
 use kernel::hil;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
 pub const UART0_BASE: StaticRef<UartRegisters> =
     unsafe { StaticRef::new(0x6000_0000 as *const UartRegisters) };
@@ -217,11 +217,6 @@ pub struct Uart<'a> {
     rx_buffer: TakeCell<'static, [u8]>,
     rx_index: Cell<usize>,
     rx_len: Cell<usize>,
-}
-
-#[derive(Copy, Clone)]
-pub struct UartParams {
-    pub baud_rate: u32,
 }
 
 impl<'a> Uart<'a> {
@@ -472,5 +467,63 @@ impl<'a> hil::uart::Receive<'a> for Uart<'a> {
 
     fn receive_abort(&self) -> Result<(), ErrorCode> {
         Err(ErrorCode::FAIL)
+    }
+}
+
+use kernel::utilities::io_write::IoWrite;
+
+/// A synchronous writer for the esp32 useful for panics.
+///
+/// For boards that want to use the UART to display panic messages, this
+/// provides an implementation of
+/// [`PanicWriter`](kernel::platform::chip::PanicWriter) with synchronous
+/// output.
+///
+/// This is only to be used by panic messages and is not used within the normal
+/// operation of the Tock kernel.
+///
+/// TODO: Validate this [`UartPanicWriter`] is always sound to create.
+struct UartPanicWriter<'a> {
+    uart: Uart<'a>,
+}
+
+impl IoWrite for UartPanicWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> usize {
+        self.uart.transmit_sync(buf);
+        buf.len()
+    }
+}
+
+impl core::fmt::Write for UartPanicWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Configuration for the synchronous UART panic writer.
+///
+/// This captures everything needed to setup the UART for panic display, even
+/// if the normal kernel had initialized it differently.
+pub struct UartPanicWriterConfig {
+    pub registers: StaticRef<UartRegisters>,
+    pub params: kernel::hil::uart::Parameters,
+}
+
+impl kernel::platform::chip::PanicWriter for Uart<'_> {
+    type Config = UartPanicWriterConfig;
+
+    fn create_panic_writer(
+        config: Self::Config,
+        _panic: &core::panic::PanicInfo,
+    ) -> impl IoWrite + core::fmt::Write {
+        use kernel::hil::uart::Configure as _;
+
+        let uart = Uart::new(config.registers);
+
+        // Configure the UART correctly for panics.
+        let _ = uart.configure(config.params);
+
+        UartPanicWriter { uart }
     }
 }

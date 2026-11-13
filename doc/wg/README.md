@@ -83,7 +83,10 @@ Existing Working Groups
 
 - [Core](core/README.md)
 - [OpenTitan](opentitan/README.md)
+- [Network](network/README.md)
 - [Documentation](documentation/README.md)
+- [x86](x86/README.md)
+- [Cryptography](cryptography/README.md)
 
 
 Retired Working Groups

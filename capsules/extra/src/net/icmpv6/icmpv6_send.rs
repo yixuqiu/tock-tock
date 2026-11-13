@@ -2,24 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-//! This file contains the definition and implementation of a simple ICMPv6
-//! sending interface. The [ICMP6Sender](trait.ICMP6Sender.html) trait provides
-//! an interface for an upper layer to send an ICMPv6 packet, and the
-//! [ICMP6SendClient](trait.ICMP6SendClient.html) trait is implemented by the
-//! upper layer to allow them to receive the `send_done` callback once
-//! transmission has completed.
+//! Definition and implementation of a simple ICMPv6 sending
+//! interface.
 //!
-//! - Author: Conor McAvity <cmcavity@stanford.edu>
+//! The [ICMP6Sender] trait provides an
+//! interface for an upper layer to send an ICMPv6 packet, and the
+//! [ICMP6SendClient] trait is implemented
+//! by the upper layer to allow them to receive the `send_done`
+//! callback once transmission has completed.
+// - Author: Conor McAvity <cmcavity@stanford.edu>
 
 use crate::net::icmpv6::ICMP6Header;
+use crate::net::ipv6::TransportHeader;
 use crate::net::ipv6::ip_utils::IPAddr;
 use crate::net::ipv6::ipv6_send::{IP6SendClient, IP6Sender};
-use crate::net::ipv6::TransportHeader;
 use crate::net::network_capabilities::NetworkCapability;
 
+use kernel::ErrorCode;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::leasable_buffer::SubSliceMut;
-use kernel::ErrorCode;
 
 /// A trait for a client of an `ICMP6Sender`.
 pub trait ICMP6SendClient {
@@ -70,7 +71,7 @@ pub struct ICMP6SendStruct<'a, T: IP6Sender<'a>> {
 impl<'a, T: IP6Sender<'a>> ICMP6SendStruct<'a, T> {
     pub fn new(ip_send_struct: &'a T) -> ICMP6SendStruct<'a, T> {
         ICMP6SendStruct {
-            ip_send_struct: ip_send_struct,
+            ip_send_struct,
             client: OptionalCell::empty(),
         }
     }

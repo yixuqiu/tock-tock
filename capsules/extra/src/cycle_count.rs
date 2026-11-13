@@ -20,7 +20,7 @@ pub const DRIVER_NUM: usize = driver::NUM::CycleCount as usize;
 use kernel::grant::{AllowRoCount, AllowRwCount, Grant, UpcallCount};
 use kernel::syscall::{CommandReturn, SyscallDriver};
 use kernel::utilities::cells::OptionalCell;
-use kernel::{hil, ErrorCode, ProcessId};
+use kernel::{ErrorCode, ProcessId, hil};
 
 #[derive(Default)]
 pub struct App;
@@ -44,7 +44,7 @@ impl<'a, P: hil::hw_debug::CycleCounter> CycleCount<'a, P> {
     }
 }
 
-impl<'a, P: hil::hw_debug::CycleCounter> SyscallDriver for CycleCount<'a, P> {
+impl<P: hil::hw_debug::CycleCounter> SyscallDriver for CycleCount<'_, P> {
     /// Control the CycleCount system.
     ///
     /// ### `command_num`

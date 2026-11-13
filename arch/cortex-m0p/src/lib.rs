@@ -4,78 +4,123 @@
 
 //! Shared implementations for ARM Cortex-M0+ MCUs.
 
-#![crate_name = "cortexm0p"]
-#![crate_type = "rlib"]
 #![no_std]
 
 use core::fmt::Write;
 
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-use core::arch::global_asm;
-
 pub mod mpu {
+    use kernel::utilities::StaticRef;
+
     pub type MPU = cortexm::mpu::MPU<8, 256>;
+
+    const MPU_BASE_ADDRESS: StaticRef<cortexm::mpu::MpuRegisters> =
+        unsafe { StaticRef::new(0xE000ED90 as *const cortexm::mpu::MpuRegisters) };
+
+    /// Create a new MPU for the Cortex-M0+ hardware.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure the hardware is a valid Cortex-M0+ chip and that the
+    /// MPU hardware exists to enforce memory protection.
+    pub unsafe fn new() -> MPU {
+        unsafe { MPU::new(MPU_BASE_ADDRESS) }
+    }
 }
 
 // Re-export the base generic cortex-m functions here as they are
 // valid on cortex-m0.
 pub use cortexm::support;
 
+pub use cortexm::CortexMVariant;
 pub use cortexm::initialize_ram_jump_to_main;
 pub use cortexm::interrupt_mask;
 pub use cortexm::nvic;
 pub use cortexm::scb;
+pub use cortexm::semihosting;
 pub use cortexm::systick;
+pub use cortexm::thread_id;
 pub use cortexm::unhandled_interrupt;
-pub use cortexm::CortexMVariant;
 use cortexm0::CortexM0;
 
 // Mock implementation for tests on Travis-CI.
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-pub unsafe extern "C" fn svc_handler_m0p() {
+pub unsafe extern "C" fn svc_handler() {
     unimplemented!()
 }
 
+/// # Safety
+///
+/// - INPUTS:
+///   - This reads the `lr`, which is part of the calling convention.
+/// - OUTPUTS:
+///   - This writes to `r0`, a caller-saved register.
+///   - This writes to `r1`, a caller-saved register.
+/// - This does not fall-through, it branches in both branches.
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-extern "C" {
-    pub fn svc_handler_m0p();
-}
+#[unsafe(naked)]
+pub unsafe extern "C" fn svc_handler() {
+    use core::arch::naked_asm;
+    naked_asm!(
+        "
+    // First check to see which direction we are going in.
+    //
+    // We use `SVC_SWITCH_TO_APP`, which is set by the `switch_to_user` code,
+    // to reliably determine if we should switch from kernel to user, or if this
+    // is an `svc` issued from a userspace app. Upon switching to an app, we're
+    // responsible for clearing `SVC_SWITCH_TO_APP`.
+    //
+    // This used to use the link register (containing EXC_RETURN)'s SPSEL bit,
+    // but that turns out to be unreliable with tail-chained exception handlers.
+    // See the doc comment on `SVC_SWITCH_TO_APP` for more information.
+    ldr r0, ={svc_switch_to_app}      // r0 = &SVC_SWITCH_TO_APP
+    ldr r1, [r0]                      // r1 = SVC_SWITCH_TO_APP
+    cmp r1, #0                        // r1 == 0 (coming from app)
+    beq 300f // to_kernel
 
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-global_asm!(
-    "
-  .section .svc_handler_m0p, \"ax\"
-  .global svc_handler_m0p
-  .thumb_func
-svc_handler_m0p:
-  ldr r0, 100f // EXC_RETURN_MSP
-  cmp lr, r0
-  bne 300f // to_kernel
+    // If we get here, then this is a context switch from the kernel to the
+    // application. We must clear `SVC_SWITCH_TO_APP`, such that we reliably
+    // recognize the next `svc` as coming from an app.
+    movs r1, #0                       // r1 = 0 (coming from app)
+    str r1, [r0]                      // *&SVC_SWITCH_TO_APP = 0
 
-  // If we get here, then this is a context switch from the kernel to the
-  // application. Set thread mode to unprivileged to run the application.
-  movs r0, #1
-  msr CONTROL, r0
-  ldr r1, 200f // EXC_RETURN_PSP
-  bx r1
+    // Set thread mode to unprivileged to run the application.
+    //
+    // On v6m:
+    //  - CONTROL[0] is nPriv, which we want to set to 1 here
+    //  - CONTROL[1] is SPSEL, but **ignores writes in handler mode**
+    //  - CONTROL[2:31] are RAZ/WI ; UNK/SBZP (ARM DDI 0419E §B1.4.5)
+    // so it is safe to simply write the register without reading it first.
+    movs r0, #1
+    msr CONTROL, r0
+    ldr r1, 200f // EXC_RETURN_PSP
+    bx r1
 
 300: // to_kernel
-  ldr r0, =SYSCALL_FIRED
-  movs r1, #1
-  str r1, [r0, #0]
-  // Set thread mode to privileged as we switch back to the kernel.
-  movs r0, #0
-  msr CONTROL, r0
-  ldr r1, 100f // EXC_RETURN_MSP
-  bx r1
+    ldr r0, ={syscall_fired}
+    movs r1, #1
+    str r1, [r0, #0]
+    // Set thread mode to privileged as we switch back to the kernel.
+    //
+    // On v6m:
+    //  - CONTROL[0] is nPriv, which we want to set to 0 here
+    //  - CONTROL[1] is SPSEL, but **ignores writes in handler mode**
+    //  - CONTROL[2:31] are RAZ/WI ; UNK/SBZP (ARM DDI 0419E §B1.4.5)
+    // so it is safe to simply write the register without reading it first.
+    movs r0, #0
+    msr CONTROL, r0
+    ldr r1, 100f // EXC_RETURN_MSP
+    bx r1
 
-.align 4
+    .align 4
 100: // EXC_RETURN_MSP
-  .word 0xFFFFFFF9
+    .word 0xFFFFFFF9
 200: // EXC_RETURN_PSP
-  .word 0xFFFFFFFD
-  "
-);
+    .word 0xFFFFFFFD
+        ",
+        syscall_fired = sym cortexm::syscall::SYSCALL_FIRED,
+        svc_switch_to_app = sym cortexm::syscall::SVC_SWITCH_TO_APP,
+    );
+}
 
 // Enum with no variants to ensure that this type is not instantiable. It is
 // only used to pass architecture-specific constants and functions via the
@@ -85,7 +130,7 @@ pub enum CortexM0P {}
 impl cortexm::CortexMVariant for CortexM0P {
     const GENERIC_ISR: unsafe extern "C" fn() = CortexM0::GENERIC_ISR;
     const SYSTICK_HANDLER: unsafe extern "C" fn() = CortexM0::SYSTICK_HANDLER;
-    const SVC_HANDLER: unsafe extern "C" fn() = svc_handler_m0p;
+    const SVC_HANDLER: unsafe extern "C" fn() = svc_handler;
     const HARD_FAULT_HANDLER: unsafe extern "C" fn() = CortexM0::HARD_FAULT_HANDLER;
 
     #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -93,7 +138,7 @@ impl cortexm::CortexMVariant for CortexM0P {
         user_stack: *const usize,
         process_regs: &mut [usize; 8],
     ) -> *const usize {
-        CortexM0::switch_to_user(user_stack, process_regs)
+        unsafe { CortexM0::switch_to_user(user_stack, process_regs) }
     }
 
     #[cfg(not(all(target_arch = "arm", target_os = "none")))]

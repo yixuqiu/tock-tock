@@ -7,41 +7,43 @@ use core::cell::Cell;
 use kernel::hil;
 use kernel::hil::i2c::{self, Error, I2CHwMasterClient, I2CMaster};
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
-use crate::rcc;
+use crate::clocks::{Stm32f4Clocks, phclk};
 
 pub enum I2CSpeed {
     Speed100k,
     Speed400k,
 }
 
-/// Inter-Integrated Circuit
-#[repr(C)]
-struct I2CRegisters {
-    /// control register 1
-    cr1: ReadWrite<u32, CR1::Register>,
-    /// control register 2
-    cr2: ReadWrite<u32, CR2::Register>,
-    /// own address register 1
-    oar1: ReadWrite<u32, OAR1::Register>,
-    /// own address register 2
-    oar2: ReadWrite<u32, OAR2::Register>,
-    /// data register
-    dr: ReadWrite<u32, DR::Register>,
-    /// status register 1
-    sr1: ReadWrite<u32, SR1::Register>,
-    /// status register 2
-    sr2: ReadWrite<u32, SR2::Register>,
-    /// clock control register
-    ccr: ReadWrite<u32, CCR::Register>,
-    /// tRise register
-    trise: ReadWrite<u32, TRISE::Register>,
-    /// filter register
-    fltr: ReadWrite<u32, FLTR::Register>,
+register_structs! {
+    /// Inter-Integrated Circuit
+    I2CRegisters {
+        /// control register 1
+        (0x000 => cr1: ReadWrite<u32, CR1::Register>),
+        /// control register 2
+        (0x004 => cr2: ReadWrite<u32, CR2::Register>),
+        /// own address register 1
+        (0x008 => oar1: ReadWrite<u32, OAR1::Register>),
+        /// own address register 2
+        (0x00C => oar2: ReadWrite<u32, OAR2::Register>),
+        /// data register
+        (0x010 => dr: ReadWrite<u32, DR::Register>),
+        /// status register 1
+        (0x014 => sr1: ReadWrite<u32, SR1::Register>),
+        /// status register 2
+        (0x018 => sr2: ReadWrite<u32, SR2::Register>),
+        /// clock control register
+        (0x01C => ccr: ReadWrite<u32, CCR::Register>),
+        /// tRise register
+        (0x020 => trise: ReadWrite<u32, TRISE::Register>),
+        /// filter register
+        (0x024 => fltr: ReadWrite<u32, FLTR::Register>),
+        (0x028 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -210,12 +212,12 @@ enum I2CStatus {
 }
 
 impl<'a> I2C<'a> {
-    pub fn new(rcc: &'a rcc::Rcc) -> Self {
+    pub fn new(clocks: &'a dyn Stm32f4Clocks) -> Self {
         Self {
             registers: I2C1_BASE,
-            clock: I2CClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::APB1(rcc::PCLK1::I2C1),
-                rcc,
+            clock: I2CClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::APB1(phclk::PCLK1::I2C1),
+                clocks,
             )),
 
             master_client: OptionalCell::empty(),
@@ -472,7 +474,7 @@ impl<'a> i2c::I2CMaster<'a> for I2C<'a> {
     }
 }
 
-struct I2CClock<'a>(rcc::PeripheralClock<'a>);
+struct I2CClock<'a>(phclk::PeripheralClock<'a>);
 
 impl ClockInterface for I2CClock<'_> {
     fn is_enabled(&self) -> bool {

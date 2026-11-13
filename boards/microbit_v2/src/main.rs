@@ -7,18 +7,16 @@
 //! It is based on nRF52833 SoC (Cortex M4 core with a BLE).
 
 #![no_std]
-// Disable this attribute when documenting, as a workaround for
-// https://github.com/rust-lang/rust/issues/62184.
-#![cfg_attr(not(doc), no_main)]
+#![no_main]
 #![deny(missing_docs)]
-
-use core::ptr::{addr_of, addr_of_mut};
 
 use kernel::capabilities;
 use kernel::component::Component;
+use kernel::debug::PanicResources;
 use kernel::hil::time::Counter;
+use kernel::platform::chip::Chip;
 use kernel::platform::{KernelResources, SyscallDriverLookup};
-use kernel::scheduler::round_robin::RoundRobinSched;
+use kernel::utilities::single_thread_value::SingleThreadValue;
 
 #[allow(unused_imports)]
 use kernel::{create_capability, debug, debug_gpio, debug_verbose, static_init};
@@ -45,8 +43,10 @@ const GPIO_P8: Pin = Pin::P0_10;
 const GPIO_P9: Pin = Pin::P0_09;
 const GPIO_P16: Pin = Pin::P1_02;
 
-const UART_TX_PIN: Pin = Pin::P0_06;
-const UART_RX_PIN: Pin = Pin::P1_08;
+/// UART transmit pin.
+pub const UART_TX_PIN: Pin = Pin::P0_06;
+/// UART receive pin.
+pub const UART_RX_PIN: Pin = Pin::P1_08;
 
 /// LED matrix
 const LED_MATRIX_COLS: [Pin; 5] = [Pin::P0_28, Pin::P0_11, Pin::P0_31, Pin::P1_05, Pin::P0_30];
@@ -65,85 +65,84 @@ pub mod io;
 
 // State for loading and holding applications.
 // How should the kernel respond when a process faults.
-const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
+const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
+    capsules_system::process_policies::PanicFaultPolicy {};
 
 // Number of concurrent processes this platform supports.
 const NUM_PROCS: usize = 4;
 
-static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
-    [None; NUM_PROCS];
+type ChipHw = nrf52833::chip::NRF52<'static, Nrf52833DefaultPeripherals<'static>>;
+type ProcessPrinterInUse = capsules_system::process_printer::ProcessPrinterText;
 
-static mut CHIP: Option<&'static nrf52833::chip::NRF52<Nrf52833DefaultPeripherals>> = None;
-static mut PROCESS_PRINTER: Option<&'static kernel::process::ProcessPrinterText> = None;
+/// Resources for when a board panics used by io.rs.
+static PANIC_RESOURCES: SingleThreadValue<PanicResources<ChipHw, ProcessPrinterInUse>> =
+    SingleThreadValue::new();
 
-/// Dummy buffer that causes the linker to reserve enough space for the stack.
-#[no_mangle]
-#[link_section = ".stack_buffer"]
-pub static mut STACK_MEMORY: [u8; 0x2000] = [0; 0x2000];
-// debug mode requires more stack space
-// pub static mut STACK_MEMORY: [u8; 0x2000] = [0; 0x2000];
+kernel::stack_size! {0x2000}
 
 type TemperatureDriver =
     components::temperature::TemperatureComponentType<nrf52::temperature::Temp<'static>>;
 type RngDriver = components::rng::RngComponentType<nrf52833::trng::Trng<'static>>;
+type Ieee802154RawDriver =
+    components::ieee802154::Ieee802154RawComponentType<nrf52833::ieee802154_radio::Radio<'static>>;
+
+type SchedulerInUse = components::sched::round_robin::RoundRobinComponentType;
+
+//------------------------------------------------------------------------------
+// SYSCALL DRIVER TYPE DEFINITIONS
+//------------------------------------------------------------------------------
+
+type BleHw = nrf52::ble_radio::Radio<'static>;
+type AlarmHw = nrf52833::rtc::Rtc<'static>;
+type GpioHw = nrf52::gpio::GPIOPin<'static>;
+type I2cHw = nrf52833::i2c::TWI<'static>;
+type PwmHw = nrf52833::pwm::Pwm;
+type LedMatrixLed = capsules_extra::led_matrix::LedMatrixLed<
+    'static,
+    GpioHw,
+    capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<'static, AlarmHw>,
+>;
+
+type BleDriver = components::ble::BLEComponentType<BleHw, AlarmHw>;
+type AlarmDriver = components::alarm::AlarmDriverComponentType<AlarmHw>;
+type GpioDriver = components::gpio::GpioComponentType<GpioHw>;
+type LedDriver = components::led::LedsComponentType<LedMatrixLed, 25>;
+type ButtonDriver = components::button::ButtonComponentType<GpioHw>;
+type ConsoleDriver = components::console::ConsoleComponentType;
+type Eui64Driver = components::eui64::Eui64ComponentType;
+type NineDofDriver = components::ninedof::NineDofComponentType;
+type AdcDriver = components::adc::AdcVirtualComponentType;
+type PwmDriver = components::pwm::PwmDriverComponentType<1>;
+type AppFlashDriver = components::app_flash_driver::AppFlashComponentType;
+type SoundPressureDriver = components::sound_pressure::SoundPressureComponentType;
+type Lsm303agrDriver = capsules_extra::lsm303agr::Lsm303agrI2C<
+    'static,
+    capsules_core::virtualizers::virtual_i2c::I2CDevice<'static, I2cHw>,
+>;
+type BuzzerDriver = components::buzzer::BuzzerComponentType<AlarmHw, PwmHw>;
 
 /// Supported drivers by the platform
 pub struct MicroBit {
-    ble_radio: &'static capsules_extra::ble_advertising_driver::BLE<
-        'static,
-        nrf52::ble_radio::Radio<'static>,
-        capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
-            'static,
-            nrf52::rtc::Rtc<'static>,
-        >,
-    >,
-    console: &'static capsules_core::console::Console<'static>,
-    gpio: &'static capsules_core::gpio::GPIO<'static, nrf52::gpio::GPIOPin<'static>>,
-    led: &'static capsules_core::led::LedDriver<
-        'static,
-        capsules_extra::led_matrix::LedMatrixLed<
-            'static,
-            nrf52::gpio::GPIOPin<'static>,
-            capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
-                'static,
-                nrf52::rtc::Rtc<'static>,
-            >,
-        >,
-        25,
-    >,
-    button: &'static capsules_core::button::Button<'static, nrf52::gpio::GPIOPin<'static>>,
+    ble_radio: &'static BleDriver,
+    eui64: &'static Eui64Driver,
+    ieee802154: &'static Ieee802154RawDriver,
+    console: &'static ConsoleDriver,
+    gpio: &'static GpioDriver,
+    led: &'static LedDriver,
+    button: &'static ButtonDriver,
     rng: &'static RngDriver,
-    ninedof: &'static capsules_extra::ninedof::NineDof<'static>,
-    lsm303agr: &'static capsules_extra::lsm303agr::Lsm303agrI2C<
-        'static,
-        capsules_core::virtualizers::virtual_i2c::I2CDevice<'static, nrf52833::i2c::TWI<'static>>,
-    >,
+    ninedof: &'static NineDofDriver,
+    lsm303agr: &'static Lsm303agrDriver,
     temperature: &'static TemperatureDriver,
     ipc: kernel::ipc::IPC<{ NUM_PROCS as u8 }>,
-    adc: &'static capsules_core::adc::AdcVirtualized<'static>,
-    alarm: &'static capsules_core::alarm::AlarmDriver<
-        'static,
-        capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
-            'static,
-            nrf52::rtc::Rtc<'static>,
-        >,
-    >,
-    buzzer_driver: &'static capsules_extra::buzzer_driver::Buzzer<
-        'static,
-        capsules_extra::buzzer_pwm::PwmBuzzer<
-            'static,
-            capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
-                'static,
-                nrf52833::rtc::Rtc<'static>,
-            >,
-            capsules_core::virtualizers::virtual_pwm::PwmPinUser<'static, nrf52833::pwm::Pwm>,
-        >,
-    >,
-    pwm: &'static capsules_extra::pwm::Pwm<'static, 1>,
-    app_flash: &'static capsules_extra::app_flash_driver::AppFlash<'static>,
-    sound_pressure: &'static capsules_extra::sound_pressure::SoundPressureSensor<'static>,
+    adc: &'static AdcDriver,
+    alarm: &'static AlarmDriver,
+    buzzer_driver: &'static BuzzerDriver,
+    pwm: &'static PwmDriver,
+    app_flash: &'static AppFlashDriver,
+    sound_pressure: &'static SoundPressureDriver,
 
-    scheduler: &'static RoundRobinSched<'static>,
+    scheduler: &'static SchedulerInUse,
     systick: cortexm4::systick::SysTick,
 }
 
@@ -168,6 +167,8 @@ impl SyscallDriverLookup for MicroBit {
             capsules_extra::pwm::DRIVER_NUM => f(Some(self.pwm)),
             capsules_extra::app_flash_driver::DRIVER_NUM => f(Some(self.app_flash)),
             capsules_extra::sound_pressure::DRIVER_NUM => f(Some(self.sound_pressure)),
+            capsules_extra::eui64::DRIVER_NUM => f(Some(self.eui64)),
+            capsules_extra::ieee802154::DRIVER_NUM => f(Some(self.ieee802154)),
             kernel::ipc::DRIVER_NUM => f(Some(&self.ipc)),
             _ => f(None),
         }
@@ -180,7 +181,7 @@ impl KernelResources<nrf52833::chip::NRF52<'static, Nrf52833DefaultPeripherals<'
     type SyscallDriverLookup = Self;
     type SyscallFilter = ();
     type ProcessFault = ();
-    type Scheduler = RoundRobinSched<'static>;
+    type Scheduler = SchedulerInUse;
     type SchedulerTimer = cortexm4::systick::SysTick;
     type WatchDog = ();
     type ContextSwitchCallback = ();
@@ -217,20 +218,68 @@ unsafe fn start() -> (
     MicroBit,
     &'static nrf52833::chip::NRF52<'static, Nrf52833DefaultPeripherals<'static>>,
 ) {
-    nrf52833::init();
+    ChipHw::init();
 
-    let nrf52833_peripherals = static_init!(
-        Nrf52833DefaultPeripherals,
-        Nrf52833DefaultPeripherals::new()
+    // Initialize deferred calls very early.
+    kernel::deferred_call::initialize_deferred_call_state::<
+        <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+    >();
+
+    // Bind global variables to this thread.
+    let _ = PANIC_RESOURCES
+        .bind_to_thread::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(
+            PanicResources::new(),
+        );
+
+    let ieee802154_ack_buf = static_init!(
+        [u8; nrf52833::ieee802154_radio::ACK_BUF_SIZE],
+        [0; nrf52833::ieee802154_radio::ACK_BUF_SIZE]
     );
+    let aes_ecb_buf = static_init!([u8; 48], [0; 48]);
+    let ficr = static_init!(
+        nrf52833::ficr::Ficr,
+        nrf52833::ficr::Ficr::new(nrf52833::chip::FICR_BASE)
+    );
+
+    // SAFETY: This is the only copy and only user of the DMA peripherals.
+    let peripherals =
+        unsafe { Nrf52833DefaultPeripherals::new(ficr, ieee802154_ack_buf, aes_ecb_buf) };
+    // Initialize chip peripheral drivers
+    let nrf52833_peripherals = static_init!(Nrf52833DefaultPeripherals, peripherals);
 
     // set up circular peripheral dependencies
     nrf52833_peripherals.init();
 
     let base_peripherals = &nrf52833_peripherals.nrf52;
 
-    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&*addr_of!(PROCESSES)));
+    // Create an array to hold process references.
+    let processes = components::process_array::ProcessArrayComponent::new()
+        .finalize(components::process_array_component_static!(NUM_PROCS));
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.processes.put(processes.as_slice());
+    });
 
+    // Setup space to store the core kernel data structure.
+    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(processes.as_slice()));
+
+    //--------------------------------------------------------------------------
+    // RAW 802.15.4
+    //--------------------------------------------------------------------------
+
+    let device_id = ficr.id();
+
+    let eui64 = components::eui64::Eui64Component::new(u64::from_le_bytes(device_id))
+        .finalize(components::eui64_component_static!());
+
+    let ieee802154 = components::ieee802154::Ieee802154RawComponent::new(
+        board_kernel,
+        capsules_extra::ieee802154::DRIVER_NUM,
+        &nrf52833_peripherals.ieee802154_radio,
+        create_capability!(capabilities::MemoryAllocationCapability),
+    )
+    .finalize(components::ieee802154_raw_component_static!(
+        nrf52833::ieee802154_radio::Radio,
+    ));
     //--------------------------------------------------------------------------
     // CAPABILITIES
     //--------------------------------------------------------------------------
@@ -246,13 +295,16 @@ unsafe fn start() -> (
     //--------------------------------------------------------------------------
 
     // Configure kernel debug GPIOs as early as possible. These are used by the
-    // `debug_gpio!(0, toggle)` macro. We uconfigure these early so that the
-    // macro is available during most of the setup code and kernel exection.
-    kernel::debug::assign_gpios(
-        Some(&nrf52833_peripherals.gpio_port[LED_KERNEL_PIN]),
-        None,
-        None,
+    // `debug_gpio!(0, toggle)` macro. We configure these early so that the
+    // macro is available during most of the setup code and kernel execution.
+    let debug_gpios = static_init!(
+        [&'static dyn kernel::hil::gpio::Pin; 1],
+        [&nrf52833_peripherals.gpio_port[LED_KERNEL_PIN]]
     );
+    kernel::debug::initialize_debug_gpio::<
+        <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+    >();
+    kernel::debug::assign_gpios(debug_gpios);
 
     //--------------------------------------------------------------------------
     // GPIO
@@ -272,6 +324,7 @@ unsafe fn start() -> (
             9 => &nrf52833_peripherals.gpio_port[GPIO_P9],
             16 => &nrf52833_peripherals.gpio_port[GPIO_P16],
         ),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::gpio_component_static!(nrf52833::gpio::GPIOPin));
 
@@ -299,6 +352,7 @@ unsafe fn start() -> (
                 kernel::hil::gpio::FloatingState::PullNone
             ), // Touch Logo
         ),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::button_component_static!(
         nrf52833::gpio::GPIOPin
@@ -317,6 +371,7 @@ unsafe fn start() -> (
         board_kernel,
         capsules_core::alarm::DRIVER_NUM,
         mux_alarm,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::alarm_component_static!(nrf52::rtc::Rtc));
 
@@ -324,87 +379,42 @@ unsafe fn start() -> (
     // PWM & BUZZER
     //--------------------------------------------------------------------------
 
-    use kernel::hil::buzzer::Buzzer;
-    use kernel::hil::time::Alarm;
-
     let mux_pwm = components::pwm::PwmMuxComponent::new(&base_peripherals.pwm0)
-        .finalize(components::pwm_mux_component_static!(nrf52833::pwm::Pwm));
+        .finalize(components::pwm_mux_component_static!(PwmHw));
 
     let virtual_pwm_buzzer = components::pwm::PwmPinUserComponent::new(
         mux_pwm,
-        nrf52833::pinmux::Pinmux::new(SPEAKER_PIN as u32),
+        nrf52833::pinmux::Pinmux::new(SPEAKER_PIN),
     )
-    .finalize(components::pwm_pin_user_component_static!(
-        nrf52833::pwm::Pwm
-    ));
+    .finalize(components::pwm_pin_user_component_static!(PwmHw));
 
-    let virtual_alarm_buzzer = static_init!(
-        capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<'static, nrf52833::rtc::Rtc>,
-        capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm::new(mux_alarm)
-    );
-    virtual_alarm_buzzer.setup();
-
-    let pwm_buzzer = static_init!(
-        capsules_extra::buzzer_pwm::PwmBuzzer<
-            'static,
-            capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
-                'static,
-                nrf52833::rtc::Rtc,
-            >,
-            capsules_core::virtualizers::virtual_pwm::PwmPinUser<'static, nrf52833::pwm::Pwm>,
-        >,
-        capsules_extra::buzzer_pwm::PwmBuzzer::new(
-            virtual_pwm_buzzer,
-            virtual_alarm_buzzer,
-            capsules_extra::buzzer_pwm::DEFAULT_MAX_BUZZ_TIME_MS,
-        )
-    );
-
-    let buzzer_driver = static_init!(
-        capsules_extra::buzzer_driver::Buzzer<
-            'static,
-            capsules_extra::buzzer_pwm::PwmBuzzer<
-                'static,
-                capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
-                    'static,
-                    nrf52833::rtc::Rtc,
-                >,
-                capsules_core::virtualizers::virtual_pwm::PwmPinUser<'static, nrf52833::pwm::Pwm>,
-            >,
-        >,
-        capsules_extra::buzzer_driver::Buzzer::new(
-            pwm_buzzer,
-            capsules_extra::buzzer_driver::DEFAULT_MAX_BUZZ_TIME_MS,
-            board_kernel.create_grant(
-                capsules_extra::buzzer_driver::DRIVER_NUM,
-                &memory_allocation_capability
-            )
-        )
-    );
-
-    pwm_buzzer.set_client(buzzer_driver);
-
-    virtual_alarm_buzzer.set_alarm_client(pwm_buzzer);
-
-    let virtual_pwm_driver = components::pwm::PwmPinUserComponent::new(
-        mux_pwm,
-        nrf52833::pinmux::Pinmux::new(GPIO_P8 as u32),
+    let buzzer_driver = components::buzzer::BuzzerComponent::new(
+        board_kernel,
+        capsules_extra::buzzer_driver::DRIVER_NUM,
+        mux_alarm,
+        virtual_pwm_buzzer,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
-    .finalize(components::pwm_pin_user_component_static!(
-        nrf52833::pwm::Pwm
-    ));
+    .finalize(components::buzzer_component_static!(AlarmHw, PwmHw));
 
-    let pwm =
-        components::pwm::PwmDriverComponent::new(board_kernel, capsules_extra::pwm::DRIVER_NUM)
-            .finalize(components::pwm_driver_component_helper!(virtual_pwm_driver));
+    let virtual_pwm_driver =
+        components::pwm::PwmPinUserComponent::new(mux_pwm, nrf52833::pinmux::Pinmux::new(GPIO_P8))
+            .finalize(components::pwm_pin_user_component_static!(PwmHw));
+
+    let pwm = components::pwm::PwmDriverComponent::new(
+        board_kernel,
+        capsules_extra::pwm::DRIVER_NUM,
+        create_capability!(capabilities::MemoryAllocationCapability),
+    )
+    .finalize(components::pwm_driver_component_helper!(virtual_pwm_driver));
 
     //--------------------------------------------------------------------------
     // UART & CONSOLE & DEBUG
     //--------------------------------------------------------------------------
 
     base_peripherals.uarte0.initialize(
-        nrf52::pinmux::Pinmux::new(UART_TX_PIN as u32),
-        nrf52::pinmux::Pinmux::new(UART_RX_PIN as u32),
+        nrf52::pinmux::Pinmux::new(UART_TX_PIN),
+        nrf52::pinmux::Pinmux::new(UART_RX_PIN),
         None,
         None,
     );
@@ -418,11 +428,17 @@ unsafe fn start() -> (
         board_kernel,
         capsules_core::console::DRIVER_NUM,
         uart_mux,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::console_component_static!());
     // Create the debugger object that handles calls to `debug!()`.
-    components::debug_writer::DebugWriterComponent::new(uart_mux)
-        .finalize(components::debug_writer_component_static!());
+    components::debug_writer::DebugWriterComponent::new::<
+        <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+    >(
+        uart_mux,
+        create_capability!(capabilities::SetDebugWriterCapability),
+    )
+    .finalize(components::debug_writer_component_static!());
 
     //--------------------------------------------------------------------------
     // RANDOM NUMBERS
@@ -432,6 +448,7 @@ unsafe fn start() -> (
         board_kernel,
         capsules_core::rng::DRIVER_NUM,
         &base_peripherals.trng,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::rng_component_static!(nrf52833::trng::Trng));
 
@@ -439,15 +456,13 @@ unsafe fn start() -> (
     // SENSORS
     //--------------------------------------------------------------------------
 
-    base_peripherals.twi0.configure(
-        nrf52833::pinmux::Pinmux::new(I2C_SCL_PIN as u32),
-        nrf52833::pinmux::Pinmux::new(I2C_SDA_PIN as u32),
+    base_peripherals.twi1.configure(
+        nrf52833::pinmux::Pinmux::new(I2C_SCL_PIN),
+        nrf52833::pinmux::Pinmux::new(I2C_SDA_PIN),
     );
 
-    let sensors_i2c_bus = components::i2c::I2CMuxComponent::new(&base_peripherals.twi0, None)
-        .finalize(components::i2c_mux_component_static!(
-            nrf52833::i2c::TWI<'static>
-        ));
+    let sensors_i2c_bus = components::i2c::I2CMuxComponent::new(&base_peripherals.twi1, None)
+        .finalize(components::i2c_mux_component_static!(I2cHw));
 
     // LSM303AGR
 
@@ -457,17 +472,15 @@ unsafe fn start() -> (
         None,
         board_kernel,
         capsules_extra::lsm303agr::DRIVER_NUM,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
-    .finalize(components::lsm303agr_component_static!(
-        nrf52833::i2c::TWI<'static>
-    ));
+    .finalize(components::lsm303agr_component_static!(I2cHw));
 
     if let Err(error) = lsm303agr.configure(
         capsules_extra::lsm303xx::Lsm303AccelDataRate::DataRate25Hz,
         false,
         capsules_extra::lsm303xx::Lsm303Scale::Scale2G,
         false,
-        true,
         capsules_extra::lsm303xx::Lsm303MagnetoDataRate::DataRate3_0Hz,
         capsules_extra::lsm303xx::Lsm303Range::Range1_9G,
     ) {
@@ -477,6 +490,7 @@ unsafe fn start() -> (
     let ninedof = components::ninedof::NineDofComponent::new(
         board_kernel,
         capsules_extra::ninedof::DRIVER_NUM,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::ninedof_component_static!(lsm303agr));
 
@@ -486,6 +500,7 @@ unsafe fn start() -> (
         board_kernel,
         capsules_extra::temperature::DRIVER_NUM,
         &base_peripherals.temp,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::temperature_component_static!(
         nrf52833::temperature::Temp
@@ -500,28 +515,31 @@ unsafe fn start() -> (
         .finalize(components::adc_mux_component_static!(nrf52833::adc::Adc));
 
     // Comment out the following to use P0, P1 and P2 as GPIO
-    let adc_syscall =
-        components::adc::AdcVirtualComponent::new(board_kernel, capsules_core::adc::DRIVER_NUM)
-            .finalize(components::adc_syscall_component_helper!(
-                // ADC Ring 0 (P0)
-                components::adc::AdcComponent::new(
-                    adc_mux,
-                    nrf52833::adc::AdcChannelSetup::new(nrf52833::adc::AdcChannel::AnalogInput0)
-                )
-                .finalize(components::adc_component_static!(nrf52833::adc::Adc)),
-                // ADC Ring 1 (P1)
-                components::adc::AdcComponent::new(
-                    adc_mux,
-                    nrf52833::adc::AdcChannelSetup::new(nrf52833::adc::AdcChannel::AnalogInput1)
-                )
-                .finalize(components::adc_component_static!(nrf52833::adc::Adc)),
-                // ADC Ring 2 (P2)
-                components::adc::AdcComponent::new(
-                    adc_mux,
-                    nrf52833::adc::AdcChannelSetup::new(nrf52833::adc::AdcChannel::AnalogInput2)
-                )
-                .finalize(components::adc_component_static!(nrf52833::adc::Adc))
-            ));
+    let adc_syscall = components::adc::AdcVirtualComponent::new(
+        board_kernel,
+        capsules_core::adc::DRIVER_NUM,
+        create_capability!(capabilities::MemoryAllocationCapability),
+    )
+    .finalize(components::adc_syscall_component_helper!(
+        // ADC Ring 0 (P0)
+        components::adc::AdcComponent::new(
+            adc_mux,
+            nrf52833::adc::AdcChannelSetup::new(nrf52833::adc::AdcChannel::AnalogInput0)
+        )
+        .finalize(components::adc_component_static!(nrf52833::adc::Adc)),
+        // ADC Ring 1 (P1)
+        components::adc::AdcComponent::new(
+            adc_mux,
+            nrf52833::adc::AdcChannelSetup::new(nrf52833::adc::AdcChannel::AnalogInput1)
+        )
+        .finalize(components::adc_component_static!(nrf52833::adc::Adc)),
+        // ADC Ring 2 (P2)
+        components::adc::AdcComponent::new(
+            adc_mux,
+            nrf52833::adc::AdcChannelSetup::new(nrf52833::adc::AdcChannel::AnalogInput2)
+        )
+        .finalize(components::adc_component_static!(nrf52833::adc::Adc))
+    ));
 
     // Microphone
 
@@ -551,6 +569,7 @@ unsafe fn start() -> (
         board_kernel,
         capsules_extra::sound_pressure::DRIVER_NUM,
         adc_microphone,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::sound_pressure_component_static!());
 
@@ -572,6 +591,7 @@ unsafe fn start() -> (
         board_kernel,
         capsules_extra::app_flash_driver::DRIVER_NUM,
         virtual_app_flash,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::app_flash_component_static!(
         capsules_core::virtualizers::virtual_flash::FlashUser<'static, nrf52833::nvmc::Nvmc>,
@@ -587,9 +607,10 @@ unsafe fn start() -> (
         capsules_extra::ble_advertising_driver::DRIVER_NUM,
         &base_peripherals.ble_radio,
         mux_alarm,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::ble_component_static!(
-        nrf52833::rtc::Rtc,
+        AlarmHw,
         nrf52833::ble_radio::Radio
     ));
 
@@ -627,20 +648,9 @@ unsafe fn start() -> (
     ));
 
     let led = static_init!(
-        capsules_core::led::LedDriver<
-            'static,
-            capsules_extra::led_matrix::LedMatrixLed<
-                'static,
-                nrf52::gpio::GPIOPin<'static>,
-                capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
-                    'static,
-                    nrf52::rtc::Rtc<'static>,
-                >,
-            >,
-            25,
-        >,
+        capsules_core::led::LedDriver<'static, LedMatrixLed, 25>,
         capsules_core::led::LedDriver::new(components::led_matrix_leds!(
-            nrf52::gpio::GPIOPin<'static>,
+            GpioHw,
             capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm<
                 'static,
                 nrf52::rtc::Rtc<'static>,
@@ -679,17 +689,29 @@ unsafe fn start() -> (
     //--------------------------------------------------------------------------
     let process_printer = components::process_printer::ProcessPrinterTextComponent::new()
         .finalize(components::process_printer_text_component_static!());
-    PROCESS_PRINTER = Some(process_printer);
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.printer.put(process_printer);
+    });
 
+    kernel::create_typed_capability!(process_console_cap, ProcessConsoleCap:
+        kernel::capabilities::ProcessManagementCapability,
+        kernel::capabilities::ProcessStartCapability
+    );
     let _process_console = components::process_console::ProcessConsoleComponent::new(
         board_kernel,
         uart_mux,
         mux_alarm,
         process_printer,
-        Some(cortexm4::support::reset),
+        Some(|| {
+            cortexm4::support::reset(&kernel::create_capability!(
+                kernel::capabilities::CpuStateControlCapability
+            ))
+        }),
+        process_console_cap,
     )
     .finalize(components::process_console_component_static!(
-        nrf52833::rtc::Rtc
+        AlarmHw,
+        ProcessConsoleCap
     ));
     let _ = _process_console.start();
 
@@ -705,11 +727,13 @@ unsafe fn start() -> (
     while !base_peripherals.clock.low_started() {}
     while !base_peripherals.clock.high_started() {}
 
-    let scheduler = components::sched::round_robin::RoundRobinComponent::new(&*addr_of!(PROCESSES))
+    let scheduler = components::sched::round_robin::RoundRobinComponent::new(processes)
         .finalize(components::round_robin_component_static!(NUM_PROCS));
 
     let microbit = MicroBit {
         ble_radio,
+        ieee802154,
+        eui64,
         console,
         gpio,
         button,
@@ -738,7 +762,9 @@ unsafe fn start() -> (
         nrf52833::chip::NRF52<Nrf52833DefaultPeripherals>,
         nrf52833::chip::NRF52::new(nrf52833_peripherals)
     );
-    CHIP = Some(chip);
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.chip.put(chip);
+    });
 
     debug!("Initialization complete. Entering main loop.");
 
@@ -769,7 +795,6 @@ unsafe fn start() -> (
             core::ptr::addr_of_mut!(_sappmem),
             core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
         ),
-        &mut *addr_of_mut!(PROCESSES),
         &FAULT_RESPONSE,
         &process_management_capability,
     )
@@ -782,7 +807,17 @@ unsafe fn start() -> (
 }
 
 /// Main function called after RAM initialized.
-#[no_mangle]
+///
+/// # Safety
+///
+/// ## `no_mangle`
+///
+/// We use `main` as a symbol in the arch crate's initialization routine to jump
+/// here. We guarantee no other symbol has the same name.
+///
+/// Note: this requires a global/uniqueness guarantee.
+/// See <https://github.com/tock/tock/issues/5250>.
+#[unsafe(no_mangle)]
 pub unsafe fn main() {
     let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
 

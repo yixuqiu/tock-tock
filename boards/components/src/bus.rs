@@ -32,14 +32,13 @@ use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::bus8080;
 use kernel::hil::i2c;
+use kernel::hil::i2c::I2CDevice as _;
 use kernel::hil::spi::{self, ClockPhase, ClockPolarity, SpiMasterDevice};
 
 // Setup static space for the objects.
 #[macro_export]
 macro_rules! bus8080_bus_component_static {
-    ($B:ty $(,)?) => {{
-        kernel::static_buf!(capsules_extra::bus::Bus8080Bus<'static, $B>)
-    };};
+    ($B:ty $(,)?) => {{ kernel::static_buf!(capsules_extra::bus::Bus8080Bus<'static, $B>) }};
 }
 
 #[macro_export]
@@ -57,7 +56,7 @@ macro_rules! spi_bus_component_static {
         );
 
         (spi, bus, address_buffer)
-    };};
+    }};
 }
 
 #[macro_export]
@@ -73,7 +72,7 @@ macro_rules! i2c_master_bus_component_static {
         );
 
         (bus, i2c_device, address_buffer)
-    };};
+    }};
 }
 
 pub struct Bus8080BusComponent<B: 'static + bus8080::Bus8080<'static>> {
@@ -160,10 +159,7 @@ pub struct I2CMasterBusComponent<I: 'static + i2c::I2CMaster<'static>> {
 
 impl<I: 'static + i2c::I2CMaster<'static>> I2CMasterBusComponent<I> {
     pub fn new(i2c_mux: &'static MuxI2C<'static, I>, address: u8) -> I2CMasterBusComponent<I> {
-        I2CMasterBusComponent {
-            i2c_mux: i2c_mux,
-            address: address,
-        }
+        I2CMasterBusComponent { i2c_mux, address }
     }
 }
 

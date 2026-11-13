@@ -2,20 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-use kernel::utilities::registers::{register_bitfields, LocalRegisterCopy};
+use kernel::utilities::registers::{LocalRegisterCopy, register_bitfields};
 
 register_bitfields![usize,
     pub mcause [
         is_interrupt OFFSET(crate::XLEN - 1) NUMBITS(1) [],
         reason OFFSET(0) NUMBITS(crate::XLEN - 1) []
     ],
-    // Per the spec, implementations are allowed to use the higher bits of the
-    // interrupt/exception reason for their own purposes.  For regular parsing,
-    // we only concern ourselves with the "standard" values.
-    reason [
-        reserved OFFSET(4) NUMBITS(crate::XLEN - 5) [],
-        std OFFSET(0) NUMBITS(4) []
-    ]
 ];
 
 /// Trap Cause
@@ -27,10 +20,11 @@ pub enum Trap {
 
 impl From<LocalRegisterCopy<usize, mcause::Register>> for Trap {
     fn from(val: LocalRegisterCopy<usize, mcause::Register>) -> Self {
+        let code = val.read(mcause::reason);
         if val.is_set(mcause::is_interrupt) {
-            Trap::Interrupt(Interrupt::from_reason(val.read(mcause::reason)))
+            Trap::Interrupt(Interrupt::try_from(code).unwrap_or(Interrupt::Unknown(code)))
         } else {
-            Trap::Exception(Exception::from_reason(val.read(mcause::reason)))
+            Trap::Exception(Exception::try_from(code).unwrap_or(Exception::Unknown))
         }
     }
 }
@@ -53,7 +47,7 @@ pub enum Interrupt {
     UserExternal,
     SupervisorExternal,
     MachineExternal,
-    Unknown,
+    Unknown(usize),
 }
 
 /// Exception
@@ -76,10 +70,11 @@ pub enum Exception {
     Unknown,
 }
 
-impl Interrupt {
-    fn from_reason(val: usize) -> Self {
-        let reason = LocalRegisterCopy::<usize, reason::Register>::new(val);
-        match reason.read(reason::std) {
+impl TryFrom<usize> for Interrupt {
+    type Error = usize;
+
+    fn try_from(code: usize) -> Result<Self, Self::Error> {
+        Ok(match code {
             0 => Interrupt::UserSoft,
             1 => Interrupt::SupervisorSoft,
             3 => Interrupt::MachineSoft,
@@ -89,15 +84,16 @@ impl Interrupt {
             8 => Interrupt::UserExternal,
             9 => Interrupt::SupervisorExternal,
             11 => Interrupt::MachineExternal,
-            _ => Interrupt::Unknown,
-        }
+            _ => return Err(code),
+        })
     }
 }
 
-impl Exception {
-    fn from_reason(val: usize) -> Self {
-        let reason = LocalRegisterCopy::<usize, reason::Register>::new(val);
-        match reason.read(reason::std) {
+impl TryFrom<usize> for Exception {
+    type Error = usize;
+
+    fn try_from(code: usize) -> Result<Self, Self::Error> {
+        Ok(match code {
             0 => Exception::InstructionMisaligned,
             1 => Exception::InstructionFault,
             2 => Exception::IllegalInstruction,
@@ -112,7 +108,7 @@ impl Exception {
             12 => Exception::InstructionPageFault,
             13 => Exception::LoadPageFault,
             15 => Exception::StorePageFault,
-            _ => Exception::Unknown,
-        }
+            _ => return Err(code),
+        })
     }
 }

@@ -11,7 +11,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::{hil, static_init};
 //! # use capsules::nrf51822_serialization;
 //! # use capsules::nrf51822_serialization::Nrf51822Serialization;
@@ -107,8 +107,8 @@ impl<'a> Nrf51822Serialization<'a> {
         rx_buffer: &'static mut [u8],
     ) -> Nrf51822Serialization<'a> {
         Nrf51822Serialization {
-            uart: uart,
-            reset_pin: reset_pin,
+            uart,
+            reset_pin,
             apps: grant,
             active_app: OptionalCell::empty(),
             tx_buffer: TakeCell::new(tx_buffer),
@@ -280,9 +280,7 @@ impl uart::TransmitClient for Nrf51822Serialization<'_> {
         self.active_app.map(|processid| {
             let _ = self.apps.enter(processid, |_app, kernel_data| {
                 // Call the callback after TX has finished
-                kernel_data
-                    .schedule_upcall(upcall::TX_DONE_RX_READY, (1, 0, 0))
-                    .ok();
+                let _ = kernel_data.schedule_upcall(upcall::TX_DONE_RX_READY, (1, 0, 0));
             });
         });
     }
@@ -331,9 +329,7 @@ impl uart::ReceiveClient for Nrf51822Serialization<'_> {
                 // Note: This indicates how many bytes were received by
                 // hardware, regardless of how much space (if any) was
                 // available in the buffer provided by the app.
-                kernel_data
-                    .schedule_upcall(upcall::TX_DONE_RX_READY, (4, rx_len, len))
-                    .ok();
+                let _ = kernel_data.schedule_upcall(upcall::TX_DONE_RX_READY, (4, rx_len, len));
             }) {
                 // The app we had as active no longer exists. Clear that and
                 // stop receiving. This puts us back in an idle state. A new app

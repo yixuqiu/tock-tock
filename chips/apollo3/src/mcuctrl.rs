@@ -5,9 +5,9 @@
 //! MCU Control driver.
 
 use kernel::debug;
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
 const MCUCTRL_BASE: StaticRef<McuCtrlRegisters> =
     unsafe { StaticRef::new(0x4002_0000 as *const McuCtrlRegisters) };
@@ -131,6 +131,12 @@ impl McuCtrl {
                 debug!("Apollo3 chip revision: A rev0");
             }
         }
+    }
+
+    pub fn disable_ble(&self) {
+        self.registers
+            .featureenable
+            .modify(FEATUREENABLE::BLEREQ::CLEAR);
     }
 
     pub fn enable_ble(&self) {

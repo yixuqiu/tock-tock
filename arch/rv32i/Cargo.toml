@@ -6,11 +6,12 @@
 name = "rv32i"
 version.workspace = true
 authors.workspace = true
-edition.workspace = true
+edition = "2024"
 
 [dependencies]
 kernel = { path = "../../kernel" }
-tock-registers = { path = "../../libraries/tock-register-interface" }
-riscv-csr = { path = "../../libraries/riscv-csr" }
 riscv = { path = "../riscv" }
 
+
+[lints]
+workspace = true

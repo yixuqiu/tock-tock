@@ -8,9 +8,14 @@ pub mod adc;
 pub mod chip;
 pub mod clocks;
 mod deferred_calls;
+pub mod dma;
 pub mod gpio;
 pub mod i2c;
 pub mod interrupts;
+pub mod pio;
+pub mod pio_gspi;
+pub mod pio_pwm;
+pub mod pio_spi;
 pub mod pwm;
 pub mod resets;
 pub mod rtc;
@@ -23,7 +28,7 @@ pub mod usb;
 pub mod watchdog;
 pub mod xosc;
 
-use cortexm0p::{initialize_ram_jump_to_main, unhandled_interrupt, CortexM0P, CortexMVariant};
+use cortexm0p::{CortexM0P, CortexMVariant, initialize_ram_jump_to_main, unhandled_interrupt};
 
 extern "C" {
     // _estack is not really a function, but it makes the types work
@@ -101,18 +106,4 @@ extern "C" {
     static mut _etext: usize;
     static mut _srelocate: usize;
     static mut _erelocate: usize;
-}
-
-pub unsafe fn init() {
-    cortexm0p::nvic::disable_all();
-    cortexm0p::nvic::clear_all_pending();
-    let sio = gpio::SIO::new();
-    let processor = sio.get_processor();
-    match processor {
-        chip::Processor::Processor0 => {}
-        _ => panic!(
-            "Kernel should run only using processor 0 (now processor {})",
-            processor as u8
-        ),
-    }
 }

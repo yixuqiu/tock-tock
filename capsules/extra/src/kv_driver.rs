@@ -8,7 +8,7 @@
 //! `StoragePermissions` so processes must have the required permissions in
 //! their TBF headers to use this interface.
 //!
-//! ```
+//! ```rust,ignore
 //! +===============+
 //! ||  Userspace  ||
 //! +===============+
@@ -88,6 +88,7 @@ enum UserSpaceOp {
     Delete,
     Add,
     Update,
+    GarbageCollect,
 }
 
 /// Contents of the grant for each app.
@@ -266,6 +267,11 @@ impl<'a, V: kv::KVPermissions<'a>> KVStoreDriver<'a, V> {
                                 return e;
                             }
                         }
+                        Some(UserSpaceOp::GarbageCollect) => {
+                            self.kv.garbage_collect()?;
+                            return Ok(());
+                        }
+
                         _ => {}
                     }
 
@@ -318,12 +324,10 @@ impl<'a, V: kv::KVPermissions<'a>> kv::KVClient for KVStoreDriver<'a, V> {
                     app.op.clear();
 
                     if let Err(e) = result {
-                        upcalls
-                            .schedule_upcall(
-                                upcalls::VALUE,
-                                (errorcode::into_statuscode(e.into()), 0, 0),
-                            )
-                            .ok();
+                        let _ = upcalls.schedule_upcall(
+                            upcalls::VALUE,
+                            (errorcode::into_statuscode(e.into()), 0, 0),
+                        );
                     } else {
                         let value_len = value.len();
                         let ret = upcalls
@@ -346,12 +350,10 @@ impl<'a, V: kv::KVPermissions<'a>> kv::KVClient for KVStoreDriver<'a, V> {
                         // error and only read the portion that would fit in the
                         // buffer if the value was larger than the provided
                         // processbuffer.
-                        upcalls
-                            .schedule_upcall(
-                                upcalls::VALUE,
-                                (errorcode::into_statuscode(ret), value_len, 0),
-                            )
-                            .ok();
+                        let _ = upcalls.schedule_upcall(
+                            upcalls::VALUE,
+                            (errorcode::into_statuscode(ret), value_len, 0),
+                        );
                     }
                 }
 
@@ -379,9 +381,10 @@ impl<'a, V: kv::KVPermissions<'a>> kv::KVClient for KVStoreDriver<'a, V> {
             self.apps.enter(id, move |app, upcalls| {
                 if app.op.contains(&UserSpaceOp::Set) {
                     app.op.clear();
-                    upcalls
-                        .schedule_upcall(upcalls::VALUE, (errorcode::into_statuscode(result), 0, 0))
-                        .ok();
+                    let _ = upcalls.schedule_upcall(
+                        upcalls::VALUE,
+                        (errorcode::into_statuscode(result), 0, 0),
+                    );
                 }
             })
         });
@@ -406,9 +409,10 @@ impl<'a, V: kv::KVPermissions<'a>> kv::KVClient for KVStoreDriver<'a, V> {
             self.apps.enter(id, move |app, upcalls| {
                 if app.op.contains(&UserSpaceOp::Add) {
                     app.op.clear();
-                    upcalls
-                        .schedule_upcall(upcalls::VALUE, (errorcode::into_statuscode(result), 0, 0))
-                        .ok();
+                    let _ = upcalls.schedule_upcall(
+                        upcalls::VALUE,
+                        (errorcode::into_statuscode(result), 0, 0),
+                    );
                 }
             })
         });
@@ -433,9 +437,10 @@ impl<'a, V: kv::KVPermissions<'a>> kv::KVClient for KVStoreDriver<'a, V> {
             self.apps.enter(id, move |app, upcalls| {
                 if app.op.contains(&UserSpaceOp::Update) {
                     app.op.clear();
-                    upcalls
-                        .schedule_upcall(upcalls::VALUE, (errorcode::into_statuscode(result), 0, 0))
-                        .ok();
+                    let _ = upcalls.schedule_upcall(
+                        upcalls::VALUE,
+                        (errorcode::into_statuscode(result), 0, 0),
+                    );
                 }
             })
         });
@@ -453,9 +458,29 @@ impl<'a, V: kv::KVPermissions<'a>> kv::KVClient for KVStoreDriver<'a, V> {
             self.apps.enter(id, move |app, upcalls| {
                 if app.op.contains(&UserSpaceOp::Delete) {
                     app.op.clear();
-                    upcalls
-                        .schedule_upcall(upcalls::VALUE, (errorcode::into_statuscode(result), 0, 0))
-                        .ok();
+                    let _ = upcalls.schedule_upcall(
+                        upcalls::VALUE,
+                        (errorcode::into_statuscode(result), 0, 0),
+                    );
+                }
+            })
+        });
+
+        // We have completed the operation so see if there is a queued operation
+        // to run next.
+        self.processid.clear();
+        self.check_queue();
+    }
+
+    fn garbage_collection_complete(&self, result: Result<(), ErrorCode>) {
+        self.processid.map(move |id| {
+            self.apps.enter(id, move |app, upcalls| {
+                if app.op.contains(&UserSpaceOp::GarbageCollect) {
+                    app.op.clear();
+                    let _ = upcalls.schedule_upcall(
+                        upcalls::VALUE,
+                        (errorcode::into_statuscode(result), 0, 0),
+                    );
                 }
             })
         });
@@ -479,8 +504,8 @@ impl<'a, V: kv::KVPermissions<'a>> SyscallDriver for KVStoreDriver<'a, V> {
             // check if present
             0 => CommandReturn::success(),
 
-            // get, set, delete, add, update
-            1 | 2 | 3 | 4 | 5 => {
+            // get, set, delete, add, update, garbage collect
+            1 | 2 | 3 | 4 | 5 | 6 => {
                 if self.processid.is_none() {
                     // Nothing is using the KV store, so we can handle this
                     // request.
@@ -491,6 +516,7 @@ impl<'a, V: kv::KVPermissions<'a>> SyscallDriver for KVStoreDriver<'a, V> {
                         3 => app.op.set(UserSpaceOp::Delete),
                         4 => app.op.set(UserSpaceOp::Add),
                         5 => app.op.set(UserSpaceOp::Update),
+                        6 => app.op.set(UserSpaceOp::GarbageCollect),
                         _ => {}
                     });
                     let ret = self.run();
@@ -520,6 +546,7 @@ impl<'a, V: kv::KVPermissions<'a>> SyscallDriver for KVStoreDriver<'a, V> {
                                     3 => app.op.set(UserSpaceOp::Delete),
                                     4 => app.op.set(UserSpaceOp::Add),
                                     5 => app.op.set(UserSpaceOp::Update),
+                                    6 => app.op.set(UserSpaceOp::GarbageCollect),
                                     _ => {}
                                 }
                                 CommandReturn::success()

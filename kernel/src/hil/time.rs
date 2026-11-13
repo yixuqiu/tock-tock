@@ -21,7 +21,6 @@ use core::fmt;
 
 /// An integer type defining the width of a time value, which allows
 /// clients to know when wraparound will occur.
-
 pub trait Ticks: Clone + Copy + From<u32> + fmt::Debug + Ord + PartialOrd + Eq {
     /// Width of the actual underlying timer in bits.
     ///
@@ -169,7 +168,6 @@ pub trait ConvertTicks<T: Ticks> {
     /// Returns the number of ticks in the provided number of milliseconds,
     /// rounding down any fractions. If the value overflows Ticks it
     /// returns `Ticks::max_value()`.
-
     fn ticks_from_ms(&self, ms: u32) -> T;
 
     /// Returns the number of ticks in the provided number of microseconds,
@@ -236,25 +234,22 @@ pub trait OverflowClient {
 
 /// Represents a free-running hardware counter that can be started and stopped.
 pub trait Counter<'a>: Time {
-    /// Specify the callback for when the counter overflows its maximum
-    /// value (defined by `Ticks`). If there was a previously registered
-    /// callback this call replaces it.
-    fn set_overflow_client(&self, client: &'a dyn OverflowClient);
-
     /// Starts the free-running hardware counter. Valid `Result<(), ErrorCode>` values are:
     ///   - `Ok(())`: the counter is now running
     ///   - `Err(ErrorCode::OFF)`: underlying clocks or other hardware resources
-    ///   are not on, such that the counter cannot start.
+    ///     are not on, such that the counter cannot start.
     ///   - `Err(ErrorCode::FAIL)`: unidentified failure, counter is not running.
+    ///
     /// After a successful call to `start`, `is_running` MUST return true.
     fn start(&self) -> Result<(), ErrorCode>;
 
     /// Stops the free-running hardware counter. Valid `Result<(), ErrorCode>` values are:
     ///   - `Ok(())`: the counter is now stopped. No further
-    ///   overflow callbacks will be invoked.
+    ///     overflow callbacks will be invoked.
     ///   - `Err(ErrorCode::BUSY)`: the counter is in use in a way that means it
-    ///   cannot be stopped and is busy.
+    ///     cannot be stopped and is busy.
     ///   - `Err(ErrorCode::FAIL)`: unidentified failure, counter is running.
+    ///
     /// After a successful call to `stop`, `is_running` MUST return false.
     fn stop(&self) -> Result<(), ErrorCode>;
 
@@ -263,12 +258,21 @@ pub trait Counter<'a>: Time {
     /// If a client needs to reset and clear pending callbacks it should
     /// call `stop` before `reset`.
     /// Valid `Result<(), ErrorCode>` values are:
-    ///    - `Ok(())`: the counter was reset to 0.
-    ///    - `Err(ErrorCode::FAIL)`: the counter was not reset to 0.
+    ///   - `Ok(())`: the counter was reset to 0.
+    ///   - `Err(ErrorCode::FAIL)`: the counter was not reset to 0.
     fn reset(&self) -> Result<(), ErrorCode>;
 
     /// Returns whether the counter is currently running.
     fn is_running(&self) -> bool;
+}
+
+/// Extension trait for counters that support hardware overflow notifications.
+#[deprecated(
+    note = "set_overflow_client never used so moved to an independent trait. Set to be removed in future releases unless a concrete use case is raised.",
+    since = "2.3.0"
+)]
+pub trait CounterOverflow<'a>: Counter<'a> {
+    fn set_overflow_client(&self, client: &'a dyn OverflowClient);
 }
 
 /// Callback handler for when an Alarm fires (a `Counter` reaches a specific
@@ -281,14 +285,14 @@ pub trait AlarmClient {
 }
 
 /// Interface for receiving notification when a particular time
-/// (`Counter` value) is reached. Clients use the
-/// [`AlarmClient`](trait.AlarmClient.html) trait to signal when the
-/// counter has reached a pre-specified value set in
+/// (`Counter` value) is reached.
+///
+/// Clients use the [`AlarmClient`] trait to
+/// signal when the counter has reached a pre-specified value set in
 /// [`set_alarm`](#tymethod.set_alarm). Alarms are intended for
 /// low-level time needs that require precision (i.e., firing on a
-/// precise clock tick). Software that needs more functionality
-/// but can tolerate some jitter should use the `Timer` trait
-/// instead.
+/// precise clock tick). Software that needs more functionality but
+/// can tolerate some jitter should use the `Timer` trait instead.
 pub trait Alarm<'a>: Time {
     /// Specify the callback for when the counter reaches the alarm
     /// value. If there was a previously installed callback this call
@@ -312,9 +316,9 @@ pub trait Alarm<'a>: Time {
     /// Disable the alarm and stop it from firing in the future.
     /// Valid `Result<(), ErrorCode>` codes are:
     ///   - `Ok(())` the alarm has been disarmed and will not invoke
-    ///   the callback in the future
+    ///     the callback in the future
     ///   - `Err(ErrorCode::FAIL)` the alarm could not be disarmed and will invoke
-    ///   the callback in the future
+    ///     the callback in the future
     fn disarm(&self) -> Result<(), ErrorCode>;
 
     /// Returns whether the alarm is currently armed. Note that this
@@ -336,6 +340,7 @@ pub trait TimerClient {
 }
 
 /// Interface for controlling callbacks when an interval has passed.
+///
 /// This interface is intended for software that requires repeated
 /// and/or one-shot timers and is willing to experience some jitter or
 /// imprecision in return for a simpler API that doesn't require
@@ -389,13 +394,22 @@ pub trait Timer<'a>: Time {
     /// Cancel the current timer, if any. Value `Result<(), ErrorCode>` values are:
     ///  - `Ok(())`: no callback will be invoked in the future.
     ///  - `Err(ErrorCode::FAIL)`: the timer could not be cancelled and a callback
-    ///  will be invoked in the future.
+    ///    will be invoked in the future.
     fn cancel(&self) -> Result<(), ErrorCode>;
 }
 
 // The following "frequencies" are represented as variant-less enums. Because
 // they can never be constructed, it forces them to be used purely as
 // type-markers which are guaranteed to be elided at runtime.
+
+/// 600MHz `Frequency`
+#[derive(Debug)]
+pub enum Freq600MHz {}
+impl Frequency for Freq600MHz {
+    fn frequency() -> u32 {
+        600_000_000
+    }
+}
 
 /// 100MHz `Frequency`
 #[derive(Debug)]

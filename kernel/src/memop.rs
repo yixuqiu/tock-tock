@@ -4,9 +4,10 @@
 
 //! Implementation of the MEMOP family of syscalls.
 
+use crate::ErrorCode;
 use crate::process::Process;
 use crate::syscall::SyscallReturn;
-use crate::ErrorCode;
+use crate::utilities::capability_ptr::{CapabilityPtr, CapabilityPtrPermissions};
 
 /// Handle the `memop` syscall.
 ///
@@ -46,41 +47,124 @@ pub(crate) fn memop(process: &dyn Process, op_type: usize, r1: usize) -> Syscall
         // Op Type 0: BRK
         0 => process
             .brk(r1 as *const u8)
-            .map(|_| SyscallReturn::Success)
-            .unwrap_or(SyscallReturn::Failure(ErrorCode::NOMEM)),
+            .map_or(SyscallReturn::Failure(ErrorCode::NOMEM), |_| {
+                SyscallReturn::Success
+            }),
 
         // Op Type 1: SBRK
-        1 => process
-            .sbrk(r1 as isize)
-            .map(|addr| SyscallReturn::SuccessU32(addr as u32))
-            .unwrap_or(SyscallReturn::Failure(ErrorCode::NOMEM)),
+        1 => process.sbrk(r1 as isize).map_or(
+            SyscallReturn::Failure(ErrorCode::NOMEM),
+            SyscallReturn::SuccessPtr,
+        ),
 
         // Op Type 2: Process memory start
-        2 => SyscallReturn::SuccessU32(process.get_addresses().sram_start as u32),
+        2 => {
+            let addresses = process.get_addresses();
+
+            // SAFETY: The process must be permitted to access the memory in the
+            // bounded range. We query the process's memory addresses and then
+            // restrict the authority of this pointer to only the process's RAM
+            // region the process is allowed to read and write (from the start
+            // until the process's brk).
+            let cap_ptr = unsafe {
+                CapabilityPtr::new_with_authority(
+                    addresses.sram_start as *const _,
+                    addresses.sram_start,
+                    addresses.sram_app_brk - addresses.sram_start,
+                    CapabilityPtrPermissions::ReadWrite,
+                )
+            };
+            SyscallReturn::SuccessPtr(cap_ptr)
+        }
 
         // Op Type 3: Process memory end
-        3 => SyscallReturn::SuccessU32(process.get_addresses().sram_end as u32),
+        3 => {
+            let addresses = process.get_addresses();
+
+            // SAFETY: The process must be permitted to access the memory in the
+            // bounded range. We query the process's memory addresses and then
+            // restrict the authority of this pointer to only the process's RAM
+            // region the process is allowed to read and write (from the start
+            // until the process's brk).
+            let cap_ptr = unsafe {
+                CapabilityPtr::new_with_authority(
+                    addresses.sram_end as *const _,
+                    addresses.sram_start,
+                    addresses.sram_app_brk - addresses.sram_start,
+                    CapabilityPtrPermissions::ReadWrite,
+                )
+            };
+            SyscallReturn::SuccessPtr(cap_ptr)
+        }
 
         // Op Type 4: Process flash start
-        4 => SyscallReturn::SuccessU32(process.get_addresses().flash_start as u32),
+        4 => {
+            let addresses = process.get_addresses();
+
+            // SAFETY: The process must be permitted to execute from the address
+            // space in the bounded range. We query the process's memory
+            // addresses and then restrict the authority of this pointer to the
+            // entire flash range for the process as it is allowed to execute
+            // from its entire flash region.
+            let cap_ptr = unsafe {
+                CapabilityPtr::new_with_authority(
+                    addresses.flash_start as *const _,
+                    addresses.flash_start,
+                    addresses.flash_end - addresses.flash_start,
+                    CapabilityPtrPermissions::Execute,
+                )
+            };
+
+            SyscallReturn::SuccessPtr(cap_ptr)
+        }
 
         // Op Type 5: Process flash end
-        5 => SyscallReturn::SuccessU32(process.get_addresses().flash_end as u32),
+        5 => {
+            let addresses = process.get_addresses();
+
+            // SAFETY: The process must be permitted to execute from the address
+            // space in the bounded range. We query the process's memory
+            // addresses and then restrict the authority of this pointer to the
+            // entire flash range for the process as it is allowed to execute
+            // from its entire flash region.
+            let cap_ptr = unsafe {
+                CapabilityPtr::new_with_authority(
+                    addresses.flash_end as *const _,
+                    addresses.flash_start,
+                    addresses.flash_end - addresses.flash_start,
+                    CapabilityPtrPermissions::Execute,
+                )
+            };
+            SyscallReturn::SuccessPtr(cap_ptr)
+        }
 
         // Op Type 6: Grant region begin
-        6 => SyscallReturn::SuccessU32(process.get_addresses().sram_grant_start as u32),
+        6 => SyscallReturn::SuccessAddr(process.get_addresses().sram_grant_start),
 
         // Op Type 7: Number of defined writeable regions in the TBF header.
         7 => SyscallReturn::SuccessU32(process.number_writeable_flash_regions() as u32),
 
         // Op Type 8: The start address of the writeable region indexed by r1.
         8 => {
-            let flash_start = process.get_addresses().flash_start as u32;
+            let flash_start = process.get_addresses().flash_start;
             let (offset, size) = process.get_writeable_flash_region(r1);
             if size == 0 {
                 SyscallReturn::Failure(ErrorCode::FAIL)
             } else {
-                SyscallReturn::SuccessU32(flash_start + offset)
+                // SAFETY: The process must be permitted to read and write within
+                // the specified authority range. Writeable flash regions, as the
+                // name implies, are designed for exactly this, and we use the
+                // bounds of the writeable flash region as the authority range for
+                // this pointer.
+                let cap_ptr = unsafe {
+                    CapabilityPtr::new_with_authority(
+                        (flash_start + offset) as *const _,
+                        flash_start + offset,
+                        size,
+                        CapabilityPtrPermissions::ReadWrite,
+                    )
+                };
+                SyscallReturn::SuccessPtr(cap_ptr)
             }
         }
 
@@ -88,12 +172,25 @@ pub(crate) fn memop(process: &dyn Process, op_type: usize, r1: usize) -> Syscall
         // Returns (void*) -1 on failure, meaning the selected writeable region
         // does not exist.
         9 => {
-            let flash_start = process.get_addresses().flash_start as u32;
+            let flash_start = process.get_addresses().flash_start;
             let (offset, size) = process.get_writeable_flash_region(r1);
             if size == 0 {
                 SyscallReturn::Failure(ErrorCode::FAIL)
             } else {
-                SyscallReturn::SuccessU32(flash_start + offset + size)
+                // SAFETY: The process must be permitted to read and write within
+                // the specified authority range. Writeable flash regions, as the
+                // name implies, are designed for exactly this, and we use the
+                // bounds of the writeable flash region as the authority range for
+                // this pointer.
+                let cap_ptr = unsafe {
+                    CapabilityPtr::new_with_authority(
+                        (flash_start + offset + size) as *const _,
+                        flash_start + offset,
+                        size,
+                        CapabilityPtrPermissions::ReadWrite,
+                    )
+                };
+                SyscallReturn::SuccessPtr(cap_ptr)
             }
         }
 

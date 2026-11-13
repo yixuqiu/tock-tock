@@ -25,7 +25,7 @@ pub struct TestRandomAlarm<'a, A: Alarm<'a>> {
 impl<'a, A: Alarm<'a>> TestRandomAlarm<'a, A> {
     pub fn new(alarm: &'a A, value: usize, ch: char, print_output: bool) -> TestRandomAlarm<'a, A> {
         TestRandomAlarm {
-            alarm: alarm,
+            alarm,
             counter: Cell::new(value),
             expected: Cell::new(alarm.ticks_from_seconds(0)),
             _id: ch,
@@ -41,7 +41,7 @@ impl<'a, A: Alarm<'a>> TestRandomAlarm<'a, A> {
     fn set_next_alarm(&self) {
         let counter = self.counter.get();
         let mut us: u32 = 3 * ((counter * 668410) % 512507) as u32;
-        if us % 11 == 0 {
+        if us.is_multiple_of(11) {
             // Try delays of zero in 1 of 11 cases
             us = 0;
         }

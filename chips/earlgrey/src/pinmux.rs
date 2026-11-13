@@ -6,17 +6,17 @@
 
 use kernel::hil::gpio;
 use kernel::hil::gpio::{Configuration, Configure, FloatingState};
-use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, FieldValue, LocalRegisterCopy};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::{Readable, Writeable};
+use kernel::utilities::registers::{FieldValue, LocalRegisterCopy, register_bitfields};
 
 use crate::registers::pinmux_regs::{
-    PinmuxRegisters, DIO_PAD_ATTR_REGWEN, MIO_OUTSEL_REGWEN, MIO_PAD_ATTR_REGWEN,
-    MIO_PERIPH_INSEL_REGWEN,
+    DIO_PAD_ATTR_REGWEN, MIO_OUTSEL_REGWEN, MIO_PAD_ATTR_REGWEN, MIO_PERIPH_INSEL_REGWEN,
+    PinmuxRegisters,
 };
 use crate::registers::top_earlgrey::{
-    DirectPads, MuxedPads, PinmuxInsel, PinmuxOutsel, PinmuxPeripheralIn, PINMUX_AON_BASE_ADDR,
-    PINMUX_MIO_PERIPH_INSEL_IDX_OFFSET,
+    DirectPads, MuxedPads, PINMUX_AON_BASE_ADDR, PINMUX_MIO_PERIPH_INSEL_IDX_OFFSET, PinmuxInsel,
+    PinmuxOutsel, PinmuxPeripheralIn,
 };
 
 pub const PINMUX_BASE: StaticRef<PinmuxRegisters> =
@@ -114,7 +114,7 @@ impl Pad {
                 .write(MIO_PAD_ATTR_REGWEN::EN_0::CLEAR),
             Self::Dio(dio) => PINMUX_BASE.dio_pad_attr_regwen[(dio as u32) as usize]
                 .write(DIO_PAD_ATTR_REGWEN::EN_0::CLEAR),
-        };
+        }
     }
 }
 
@@ -285,7 +285,7 @@ impl PadConfig {
             PadConfig::InOut(_pad, peripheral_in, _peripheral_out) => {
                 peripheral_in.connect_low();
             }
-        };
+        }
     }
 
     // Disconnect pad from internal output and connect to Hi-Z
@@ -297,7 +297,7 @@ impl PadConfig {
             PadConfig::InOut(pad, _peripheral_in, _peripheral_out) => {
                 pad.connect_high_z();
             }
-        };
+        }
     }
 
     /// Disconnect input and output from peripheral/pad
@@ -369,10 +369,9 @@ impl Configure for PadConfig {
     }
 
     fn make_output(&self) -> Configuration {
-        match self.configuration() {
-            Configuration::LowPower => self.connect(),
-            _ => {}
-        };
+        if let Configuration::LowPower = self.configuration() {
+            self.connect()
+        }
         self.configuration()
     }
 
@@ -382,10 +381,9 @@ impl Configure for PadConfig {
     }
 
     fn make_input(&self) -> Configuration {
-        match self.configuration() {
-            Configuration::LowPower => self.connect(),
-            _ => {}
-        };
+        if let Configuration::LowPower = self.configuration() {
+            self.connect()
+        }
         self.configuration()
     }
 

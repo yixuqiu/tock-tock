@@ -5,18 +5,21 @@
 //! Tock Register interface for using CSR registers.
 
 use riscv_csr::csr::{
-    ReadWriteRiscvCsr, MCAUSE, MCYCLE, MCYCLEH, MEPC, MIE, MINSTRET, MINSTRETH, MIP, MSCRATCH,
-    MSECCFG, MSECCFGH, MSTATUS, MTVAL, MTVEC, PMPADDR0, PMPADDR1, PMPADDR10, PMPADDR11, PMPADDR12,
-    PMPADDR13, PMPADDR14, PMPADDR15, PMPADDR16, PMPADDR17, PMPADDR18, PMPADDR19, PMPADDR2,
-    PMPADDR20, PMPADDR21, PMPADDR22, PMPADDR23, PMPADDR24, PMPADDR25, PMPADDR26, PMPADDR27,
-    PMPADDR28, PMPADDR29, PMPADDR3, PMPADDR30, PMPADDR31, PMPADDR32, PMPADDR33, PMPADDR34,
-    PMPADDR35, PMPADDR36, PMPADDR37, PMPADDR38, PMPADDR39, PMPADDR4, PMPADDR40, PMPADDR41,
+    MCAUSE, MCYCLE, MEPC, MIE, MINSTRET, MIP, MSCRATCH, MSECCFG, MSTATUS, MTVAL, MTVEC, PMPADDR0,
+    PMPADDR1, PMPADDR2, PMPADDR3, PMPADDR4, PMPADDR5, PMPADDR6, PMPADDR7, PMPADDR8, PMPADDR9,
+    PMPADDR10, PMPADDR11, PMPADDR12, PMPADDR13, PMPADDR14, PMPADDR15, PMPADDR16, PMPADDR17,
+    PMPADDR18, PMPADDR19, PMPADDR20, PMPADDR21, PMPADDR22, PMPADDR23, PMPADDR24, PMPADDR25,
+    PMPADDR26, PMPADDR27, PMPADDR28, PMPADDR29, PMPADDR30, PMPADDR31, PMPADDR32, PMPADDR33,
+    PMPADDR34, PMPADDR35, PMPADDR36, PMPADDR37, PMPADDR38, PMPADDR39, PMPADDR40, PMPADDR41,
     PMPADDR42, PMPADDR43, PMPADDR44, PMPADDR45, PMPADDR46, PMPADDR47, PMPADDR48, PMPADDR49,
-    PMPADDR5, PMPADDR50, PMPADDR51, PMPADDR52, PMPADDR53, PMPADDR54, PMPADDR55, PMPADDR56,
-    PMPADDR57, PMPADDR58, PMPADDR59, PMPADDR6, PMPADDR60, PMPADDR61, PMPADDR62, PMPADDR63,
-    PMPADDR7, PMPADDR8, PMPADDR9, PMPCFG0, PMPCFG1, PMPCFG10, PMPCFG11, PMPCFG12, PMPCFG13,
-    PMPCFG14, PMPCFG15, PMPCFG2, PMPCFG3, PMPCFG4, PMPCFG5, PMPCFG6, PMPCFG7, PMPCFG8, PMPCFG9,
-    STVEC, UTVEC,
+    PMPADDR50, PMPADDR51, PMPADDR52, PMPADDR53, PMPADDR54, PMPADDR55, PMPADDR56, PMPADDR57,
+    PMPADDR58, PMPADDR59, PMPADDR60, PMPADDR61, PMPADDR62, PMPADDR63, PMPCFG0, PMPCFG2, PMPCFG4,
+    PMPCFG6, PMPCFG8, PMPCFG10, PMPCFG12, PMPCFG14, ReadWriteRiscvCsr, STVEC, UTVEC,
+};
+#[cfg(not(target_arch = "riscv64"))]
+use riscv_csr::csr::{
+    MCYCLEH, MINSTRETH, MSECCFGH, PMPCFG1, PMPCFG3, PMPCFG5, PMPCFG7, PMPCFG9, PMPCFG11, PMPCFG13,
+    PMPCFG15,
 };
 use tock_registers::fields::FieldValue;
 use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
@@ -51,7 +54,10 @@ pub struct CSR {
     pub mcycleh: ReadWriteRiscvCsr<usize, mcycle::mcycleh::Register, MCYCLEH>,
     pub mcycle: ReadWriteRiscvCsr<usize, mcycle::mcycle::Register, MCYCLE>,
 
-    #[cfg(not(target_arch = "riscv64"))]
+    // `pmpcfg0` exists on both RV32 and RV64. On RV64 each `pmpcfgN` is XLEN-wide
+    // and holds 8 entries, so only the even-indexed registers (pmpcfg0, 2, 4, …,
+    // 14) are valid; the odd-indexed ones below are RV32-only. `pmpcfg0` is the
+    // first of those even-indexed registers and must always be present.
     pub pmpcfg0: ReadWriteRiscvCsr<usize, pmpconfig::pmpcfg::Register, PMPCFG0>,
     #[cfg(not(target_arch = "riscv64"))]
     pub pmpcfg1: ReadWriteRiscvCsr<usize, pmpconfig::pmpcfg::Register, PMPCFG1>,
@@ -277,7 +283,11 @@ pub const CSR: &CSR = &CSR {
 };
 
 impl CSR {
-    // resets the cycle counter to 0
+    /// Resets the cycle counter (`mcycle`, and `mcycleh` on RISCV-32) to 0.
+    ///
+    /// On RISCV-32 the 64-bit cycle count is split across two 32-bit CSRs,
+    /// `mcycle` (low) and `mcycleh` (high); both are reset here. On
+    /// RISCV-64, `mcycle` alone holds the full 64-bit count.
     #[cfg(not(target_arch = "riscv64"))]
     pub fn reset_cycle_counter(&self) {
         // Write lower first so that we don't overflow before writing the upper
@@ -285,13 +295,22 @@ impl CSR {
         CSR.mcycleh.write(mcycle::mcycleh::mcycleh.val(0));
     }
 
-    // resets the cycle counter to 0
+    /// Resets the cycle counter (`mcycle`, and `mcycleh` on RISCV-32) to 0.
+    ///
+    /// On RISCV-32 the 64-bit cycle count is split across two 32-bit CSRs,
+    /// `mcycle` (low) and `mcycleh` (high); both are reset here. On
+    /// RISCV-64, `mcycle` alone holds the full 64-bit count.
     #[cfg(target_arch = "riscv64")]
     pub fn reset_cycle_counter(&self) {
         CSR.mcycle.write(mcycle::mcycle::mcycle.val(0));
     }
 
-    // reads the cycle counter
+    /// Reads the 64-bit cycle counter.
+    ///
+    /// On RISCV-32 the count is split across two 32-bit CSRs, `mcycle` (low)
+    /// and `mcycleh` (high); this reads both, retrying if a rollover is
+    /// detected between the two reads. On RISCV-64, `mcycle` alone holds the
+    /// full 64-bit count and is read directly.
     #[cfg(not(target_arch = "riscv64"))]
     pub fn read_cycle_counter(&self) -> u64 {
         let (mut top, mut bot): (usize, usize);
@@ -310,10 +329,17 @@ impl CSR {
         (top as u64).checked_shl(32).unwrap() + bot as u64
     }
 
-    // reads the cycle counter
+    /// Reads the 64-bit cycle counter.
+    ///
+    /// On RISCV-32 the count is split across two 32-bit CSRs, `mcycle` (low)
+    /// and `mcycleh` (high); this reads both, retrying if a rollover is
+    /// detected between the two reads. On RISCV-64, `mcycle` alone holds the
+    /// full 64-bit count and is read directly.
     #[cfg(target_arch = "riscv64")]
     pub fn read_cycle_counter(&self) -> u64 {
-        CSR.mcycle.read(mcycle::mcycle::mcycle)
+        // On RV64 `mcycle` is a single 64-bit CSR; `read` returns `usize`, which
+        // is `u64` here but still needs an explicit cast to the return type.
+        CSR.mcycle.read(mcycle::mcycle::mcycle) as u64
     }
 
     pub fn pmpconfig_get(&self, index: usize) -> usize {

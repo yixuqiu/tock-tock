@@ -5,5 +5,8 @@
 [package]
 name = "tock-tbf"
 version = "0.1.0"
-authors = ["Tock Project Developers <tock-dev@googlegroups.com>"]
-edition = "2021"
+authors = ["Tock Project Developers <devel@lists.tockos.org>"]
+edition = "2024"
+
+[lints]
+workspace = true

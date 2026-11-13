@@ -3,35 +3,38 @@
 // Copyright Tock Contributors 2022.
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::platform::chip::ClockInterface;
-use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite};
 use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::cells::{OptionalCell, TakeCell};
+use kernel::utilities::leasable_buffer::SubSliceMut;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
+use crate::clocks::{Stm32f4Clocks, phclk};
 use crate::dma;
-use crate::rcc;
 
-/// Universal synchronous asynchronous receiver transmitter
-#[repr(C)]
-pub struct UsartRegisters {
-    /// Status register
-    sr: ReadWrite<u32, SR::Register>,
-    /// Data register
-    dr: ReadWrite<u32>,
-    /// Baud rate register
-    brr: ReadWrite<u32, BRR::Register>,
-    /// Control register 1
-    cr1: ReadWrite<u32, CR1::Register>,
-    /// Control register 2
-    cr2: ReadWrite<u32, CR2::Register>,
-    /// Control register 3
-    cr3: ReadWrite<u32, CR3::Register>,
-    /// Guard time and prescaler register
-    gtpr: ReadWrite<u32, GTPR::Register>,
+register_structs! {
+    /// Universal synchronous asynchronous receiver transmitter
+    pub UsartRegisters {
+        /// Status register
+        (0x000 => sr: ReadWrite<u32, SR::Register>),
+        /// Data register
+        (0x004 => dr: ReadWrite<u32>),
+        /// Baud rate register
+        (0x008 => brr: ReadWrite<u32, BRR::Register>),
+        /// Control register 1
+        (0x00C => cr1: ReadWrite<u32, CR1::Register>),
+        /// Control register 2
+        (0x010 => cr2: ReadWrite<u32, CR2::Register>),
+        /// Control register 3
+        (0x014 => cr3: ReadWrite<u32, CR3::Register>),
+        /// Guard time and prescaler register
+        (0x018 => gtpr: ReadWrite<u32, GTPR::Register>),
+        (0x01C => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -212,24 +215,24 @@ pub struct TxDMA<'a, DMA: dma::StreamServer<'a>>(pub &'a dma::Stream<'a, DMA>);
 pub struct RxDMA<'a, DMA: dma::StreamServer<'a>>(pub &'a dma::Stream<'a, DMA>);
 
 impl<'a> Usart<'a, dma::Dma1<'a>> {
-    pub fn new_usart2(rcc: &'a rcc::Rcc) -> Self {
+    pub fn new_usart2(clocks: &'a dyn Stm32f4Clocks) -> Self {
         Self::new(
             USART2_BASE,
-            UsartClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::APB1(rcc::PCLK1::USART2),
-                rcc,
+            UsartClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::APB1(phclk::PCLK1::USART2),
+                clocks,
             )),
             dma::Dma1Peripheral::USART2_TX,
             dma::Dma1Peripheral::USART2_RX,
         )
     }
 
-    pub fn new_usart3(rcc: &'a rcc::Rcc) -> Self {
+    pub fn new_usart3(clocks: &'a dyn Stm32f4Clocks) -> Self {
         Self::new(
             USART3_BASE,
-            UsartClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::APB1(rcc::PCLK1::USART3),
-                rcc,
+            UsartClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::APB1(phclk::PCLK1::USART3),
+                clocks,
             )),
             dma::Dma1Peripheral::USART3_TX,
             dma::Dma1Peripheral::USART3_RX,
@@ -238,12 +241,12 @@ impl<'a> Usart<'a, dma::Dma1<'a>> {
 }
 
 impl<'a> Usart<'a, dma::Dma2<'a>> {
-    pub fn new_usart1(rcc: &'a rcc::Rcc) -> Self {
+    pub fn new_usart1(clocks: &'a dyn Stm32f4Clocks) -> Self {
         Self::new(
             USART1_BASE,
-            UsartClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::APB2(rcc::PCLK2::USART1),
-                rcc,
+            UsartClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::APB2(phclk::PCLK2::USART1),
+                clocks,
             )),
             dma::Dma2Peripheral::USART1_TX,
             dma::Dma2Peripheral::USART1_RX,
@@ -260,15 +263,15 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
     ) -> Usart<'a, DMA> {
         Usart {
             registers: base_addr,
-            clock: clock,
+            clock,
 
             tx_client: OptionalCell::empty(),
             rx_client: OptionalCell::empty(),
 
             tx_dma: OptionalCell::empty(),
-            tx_dma_pid: tx_dma_pid,
+            tx_dma_pid,
             rx_dma: OptionalCell::empty(),
-            rx_dma_pid: rx_dma_pid,
+            rx_dma_pid,
 
             tx_len: Cell::new(0),
             rx_len: Cell::new(0),
@@ -324,6 +327,7 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
                 // alert client
                 self.tx_client.map(|client| {
                     buffer.map(|buf| {
+                        let buf = buf.take();
                         client.transmitted_buffer(buf, len, Ok(()));
                     });
                 });
@@ -352,6 +356,7 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
                 // alert client
                 self.rx_client.map(|client| {
                     buffer.map(|buf| {
+                        let buf = buf.take();
                         client.received_buffer(
                             buf,
                             count,
@@ -408,6 +413,10 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
     }
 
     fn abort_tx(&self, rcode: Result<(), ErrorCode>) {
+        if matches!(self.usart_tx_state.get(), USARTStateTX::Aborted(_)) {
+            return;
+        }
+
         self.disable_tx();
 
         // get buffer
@@ -422,6 +431,7 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
         self.tx_len.set(0);
 
         if let Some(buf) = buffer.take() {
+            let buf = buf.take();
             self.partial_tx_buffer.replace(buf);
             self.partial_tx_len.set(count);
 
@@ -434,6 +444,10 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
     }
 
     fn abort_rx(&self, rcode: Result<(), ErrorCode>, error: hil::uart::Error) {
+        if matches!(self.usart_rx_state.get(), USARTStateRX::Aborted(_, _)) {
+            return;
+        }
+
         self.disable_rx();
         self.disable_error_interrupt();
 
@@ -449,6 +463,7 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
         self.rx_len.set(0);
 
         if let Some(buf) = buffer.take() {
+            let buf = buf.take();
             self.partial_rx_buffer.replace(buf);
             self.partial_rx_len.set(count);
 
@@ -493,6 +508,7 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
                 // alert client
                 self.rx_client.map(|client| {
                     buffer.map(|buf| {
+                        let buf = buf.take();
                         client.received_buffer(buf, length, Ok(()), hil::uart::Error::None);
                     });
                 });
@@ -556,6 +572,19 @@ impl<'a, DMA: dma::StreamServer<'a>> Usart<'a, DMA> {
         self.registers.brr.modify(BRR::DIV_Fraction.val(fraction));
         Ok(())
     }
+
+    // try to disable the USART and return BUSY if a transfer is taking place
+    pub fn disable(&self) -> Result<(), ErrorCode> {
+        if self.usart_tx_state.get() == USARTStateTX::DMA_Transmitting
+            || self.usart_tx_state.get() == USARTStateTX::Transfer_Completing
+            || self.usart_rx_state.get() == USARTStateRX::DMA_Receiving
+        {
+            Err(ErrorCode::BUSY)
+        } else {
+            self.registers.cr1.modify(CR1::UE::CLEAR);
+            Ok(())
+        }
+    }
 }
 
 impl<'a, DMA: dma::StreamServer<'a>> DeferredCallClient for Usart<'a, DMA> {
@@ -608,7 +637,9 @@ impl<'a, DMA: dma::StreamServer<'a>> hil::uart::Transmit<'a> for Usart<'a, DMA> 
         // setup and enable dma stream
         self.tx_dma.map(move |dma| {
             self.tx_len.set(tx_len);
-            dma.do_transfer(tx_data, tx_len);
+            let mut tx_data: SubSliceMut<u8> = tx_data.into();
+            tx_data.slice(..tx_len);
+            dma.do_transfer(tx_data);
         });
 
         self.usart_tx_state.set(USARTStateTX::DMA_Transmitting);
@@ -687,7 +718,9 @@ impl<'a, DMA: dma::StreamServer<'a>> hil::uart::Receive<'a> for Usart<'a, DMA> {
         // setup and enable dma stream
         self.rx_dma.map(move |dma| {
             self.rx_len.set(rx_len);
-            dma.do_transfer(rx_buffer, rx_len);
+            let mut rx_buffer: SubSliceMut<u8> = rx_buffer.into();
+            rx_buffer.slice(..rx_len);
+            dma.do_transfer(rx_buffer);
         });
 
         self.usart_rx_state.set(USARTStateRX::DMA_Receiving);
@@ -704,8 +737,12 @@ impl<'a, DMA: dma::StreamServer<'a>> hil::uart::Receive<'a> for Usart<'a, DMA> {
     }
 
     fn receive_abort(&self) -> Result<(), ErrorCode> {
-        self.abort_rx(Err(ErrorCode::CANCEL), hil::uart::Error::Aborted);
-        Err(ErrorCode::BUSY)
+        if self.usart_rx_state.get() != USARTStateRX::Idle {
+            self.abort_rx(Err(ErrorCode::CANCEL), hil::uart::Error::Aborted);
+            Err(ErrorCode::BUSY)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -721,7 +758,7 @@ impl<'a> dma::StreamClient<'a, dma::Dma2<'a>> for Usart<'a, dma::Dma2<'a>> {
     }
 }
 
-struct UsartClock<'a>(rcc::PeripheralClock<'a>);
+struct UsartClock<'a>(phclk::PeripheralClock<'a>);
 
 impl ClockInterface for UsartClock<'_> {
     fn is_enabled(&self) -> bool {

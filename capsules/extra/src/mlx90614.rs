@@ -9,7 +9,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! let mux_i2c = components::i2c::I2CMuxComponent::new(&earlgrey::i2c::I2C)
 //!     .finalize(components::i2c_mux_component_helper!());
 //!
@@ -68,7 +68,7 @@ enum_from_primitive! {
 #[derive(Default)]
 pub struct App {}
 
-pub struct Mlx90614SMBus<'a, S: i2c::SMBusDevice> {
+pub struct Mlx90614SMBus<'a, S: i2c::SMBusDevice<'a>> {
     smbus_temp: &'a S,
     temperature_client: OptionalCell<&'a dyn sensors::TemperatureClient>,
     buffer: TakeCell<'static, [u8]>,
@@ -77,7 +77,7 @@ pub struct Mlx90614SMBus<'a, S: i2c::SMBusDevice> {
     owning_process: OptionalCell<ProcessId>,
 }
 
-impl<'a, S: i2c::SMBusDevice> Mlx90614SMBus<'a, S> {
+impl<'a, S: i2c::SMBusDevice<'a>> Mlx90614SMBus<'a, S> {
     pub fn new(
         smbus_temp: &'a S,
         buffer: &'static mut [u8],
@@ -119,7 +119,7 @@ impl<'a, S: i2c::SMBusDevice> Mlx90614SMBus<'a, S> {
     }
 }
 
-impl<'a, S: i2c::SMBusDevice> i2c::I2CClient for Mlx90614SMBus<'a, S> {
+impl<'a, S: i2c::SMBusDevice<'a>> i2c::I2CClient for Mlx90614SMBus<'a, S> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         match self.state.get() {
             State::Idle => {
@@ -130,9 +130,7 @@ impl<'a, S: i2c::SMBusDevice> i2c::I2CClient for Mlx90614SMBus<'a, S> {
 
                 self.owning_process.map(|pid| {
                     let _ = self.apps.enter(pid, |_app, upcalls| {
-                        upcalls
-                            .schedule_upcall(0, (usize::from(present), 0, 0))
-                            .ok();
+                        let _ = upcalls.schedule_upcall(0, (usize::from(present), 0, 0));
                     });
                 });
                 self.buffer.replace(buffer);
@@ -153,13 +151,13 @@ impl<'a, S: i2c::SMBusDevice> i2c::I2CClient for Mlx90614SMBus<'a, S> {
                 if let Ok(temp) = values {
                     self.owning_process.map(|pid| {
                         let _ = self.apps.enter(pid, |_app, upcalls| {
-                            upcalls.schedule_upcall(0, (temp as usize, 0, 0)).ok();
+                            let _ = upcalls.schedule_upcall(0, (temp as usize, 0, 0));
                         });
                     });
                 } else {
                     self.owning_process.map(|pid| {
                         let _ = self.apps.enter(pid, |_app, upcalls| {
-                            upcalls.schedule_upcall(0, (0, 0, 0)).ok();
+                            let _ = upcalls.schedule_upcall(0, (0, 0, 0));
                         });
                     });
                 }
@@ -170,7 +168,7 @@ impl<'a, S: i2c::SMBusDevice> i2c::I2CClient for Mlx90614SMBus<'a, S> {
     }
 }
 
-impl<'a, S: i2c::SMBusDevice> SyscallDriver for Mlx90614SMBus<'a, S> {
+impl<'a, S: i2c::SMBusDevice<'a>> SyscallDriver for Mlx90614SMBus<'a, S> {
     fn command(
         &self,
         command_num: usize,
@@ -235,7 +233,7 @@ impl<'a, S: i2c::SMBusDevice> SyscallDriver for Mlx90614SMBus<'a, S> {
     }
 }
 
-impl<'a, S: i2c::SMBusDevice> sensors::TemperatureDriver<'a> for Mlx90614SMBus<'a, S> {
+impl<'a, S: i2c::SMBusDevice<'a>> sensors::TemperatureDriver<'a> for Mlx90614SMBus<'a, S> {
     fn set_client(&self, temperature_client: &'a dyn sensors::TemperatureClient) {
         self.temperature_client.replace(temperature_client);
     }

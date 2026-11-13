@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-#![crate_name = "msp432"]
-#![crate_type = "rlib"]
 #![no_std]
 
-use cortexm4::{initialize_ram_jump_to_main, unhandled_interrupt, CortexM4, CortexMVariant};
+use cortexm4::{CortexM4, CortexMVariant, initialize_ram_jump_to_main, unhandled_interrupt};
 
 pub mod adc;
 pub mod chip;
@@ -124,9 +122,3 @@ pub static IRQS: [unsafe extern "C" fn(); 64] = [
     unhandled_interrupt,   // Reserved (62)
     unhandled_interrupt,   // Reserved (63)
 ];
-
-pub unsafe fn init() {
-    cortexm4::nvic::disable_all();
-    cortexm4::nvic::clear_all_pending();
-    cortexm4::nvic::enable_all();
-}

@@ -11,7 +11,7 @@
 //! client of the hardware implementation. For example, using the SAM4L's `CrcU`
 //! driver:
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let crc_buffer = static_init!([u8; 64], [0; 64]);
@@ -131,7 +131,7 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
     ///
     /// ## Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// capsules::crc::Crc::new(&sam4l::crccu::CrcCU, board_kernel.create_grant(&grant_cap));
     /// ```
     ///
@@ -150,7 +150,7 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
     }
 
     fn do_next_input(&self, data: &ReadableProcessSlice, len: usize) -> usize {
-        let count = self.crc_buffer.take().map_or(0, |kbuffer| {
+        self.crc_buffer.take().map_or(0, |kbuffer| {
             let copy_len = cmp::min(len, kbuffer.len());
             for i in 0..copy_len {
                 kbuffer[i] = data[i].get();
@@ -169,8 +169,7 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
             } else {
                 0
             }
-        });
-        count
+        })
     }
 
     // Start a new request. Return Ok(()) if one started, Err(FAIL) if not.
@@ -223,12 +222,10 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
                     Ok(()) => Ok(()),
                     Err(e) => {
                         if grant.request.is_some() {
-                            kernel_data
-                                .schedule_upcall(
-                                    0,
-                                    (kernel::errorcode::into_statuscode(Err(e)), 0, 0),
-                                )
-                                .ok();
+                            let _ = kernel_data.schedule_upcall(
+                                0,
+                                (kernel::errorcode::into_statuscode(Err(e)), 0, 0),
+                            );
                             grant.request = None;
                         }
                         Err(e)
@@ -251,9 +248,9 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
 /// Then, it initiates a Crc computation using the `command` system call. See function-specific
 /// comments for details.
 impl<'a, C: Crc<'a>> SyscallDriver for CrcDriver<'a, C> {
-    /// The `allow` syscall for this driver supports the single
-    /// `allow_num` zero, which is used to provide a buffer over which
-    /// to compute a Crc computation.
+    // The `allow` syscall for this driver supports the single
+    // `allow_num` zero, which is used to provide a buffer over which
+    // to compute a Crc computation.
 
     // The `subscribe` syscall supports the single `subscribe_number`
     // zero, which is used to provide a callback that will receive the
@@ -266,12 +263,11 @@ impl<'a, C: Crc<'a>> SyscallDriver for CrcDriver<'a, C> {
     //
     // where
     //
-    //   * `status` is indicates whether the computation
-    //     succeeded. The status `BUSY` indicates the unit is already
-    //     busy. The status `SIZE` indicates the provided buffer is
-    //     too large for the unit to handle.
+    // * `status` is indicates whether the computation succeeded. The status
+    //   `BUSY` indicates the unit is already busy. The status `SIZE` indicates
+    //   the provided buffer is too large for the unit to handle.
     //
-    //   * `result` is the result of the Crc computation when `status == BUSY`.
+    // * `result` is the result of the Crc computation when `status == BUSY`.
     //
 
     /// The command system call for this driver return meta-data about the driver and kicks off
@@ -279,27 +275,25 @@ impl<'a, C: Crc<'a>> SyscallDriver for CrcDriver<'a, C> {
     ///
     /// ### Command Numbers
     ///
-    ///   *   `0`: Returns non-zero to indicate the driver is present.
+    /// * `0`: Returns non-zero to indicate the driver is present.
     ///
-    ///   *   `1`: Requests that a Crc be computed over the buffer
-    ///       previously provided by `allow`.  If none was provided,
-    ///       this command will return `INVAL`.
+    /// * `1`: Requests that a Crc be computed over the buffer previously
+    ///   provided by `allow`.  If none was provided, this command will return
+    ///   `INVAL`.
     ///
-    ///       This command's driver-specific argument indicates what Crc
-    ///       algorithm to perform, as listed below.  If an invalid
-    ///       algorithm specifier is provided, this command will return
-    ///       `INVAL`.
+    ///   This command's driver-specific argument indicates what Crc algorithm
+    ///   to perform, as listed below.  If an invalid algorithm specifier is
+    ///   provided, this command will return `INVAL`.
     ///
-    ///       If a callback was not previously registered with
-    ///       `subscribe`, this command will return `INVAL`.
+    ///   If a callback was not previously registered with `subscribe`, this
+    ///   command will return `INVAL`.
     ///
-    ///       If a computation has already been requested by this
-    ///       application but the callback has not yet been invoked to
-    ///       receive the result, this command will return `BUSY`.
+    ///   If a computation has already been requested by this application but
+    ///   the callback has not yet been invoked to receive the result, this
+    ///   command will return `BUSY`.
     ///
-    ///       When `Ok(())` is returned, this means the request has been
-    ///       queued and the callback will be invoked when the Crc
-    ///       computation is complete.
+    ///   When `Ok(())` is returned, this means the request has been queued and
+    ///   the callback will be invoked when the Crc computation is complete.
     ///
     /// ### Algorithm
     ///
@@ -310,16 +304,16 @@ impl<'a, C: Crc<'a>> SyscallDriver for CrcDriver<'a, C> {
     /// consume each input byte from most-significant bit to
     /// least-significant.
     ///
-    ///   * `0: Crc-32`  This algorithm is used in Ethernet and many other
+    /// * `0: Crc-32`  This algorithm is used in Ethernet and many other
     ///   applications.  It uses polynomial 0x04C11DB7 and it bit-reverses
     ///   and then bit-inverts the output.
     ///
-    ///   * `1: Crc-32C`  This algorithm uses polynomial 0x1EDC6F41 (due
+    /// * `1: Crc-32C`  This algorithm uses polynomial 0x1EDC6F41 (due
     ///   to Castagnoli) and it bit-reverses and then bit-inverts the
     ///   output.  It *may* be equivalent to various Crc functions using
     ///   the same name.
     ///
-    ///   * `2: Crc-16CCITT`  This algorithm uses polynomial 0x1021 and does
+    /// * `2: Crc-16CCITT`  This algorithm uses polynomial 0x1021 and does
     ///   no post-processing on the output value. The sixteen-bit Crc
     ///   result is placed in the low-order bits of the returned result
     ///   value. That is, result values will always be of the form `0x0000xxxx`
@@ -396,9 +390,9 @@ impl<'a, C: Crc<'a>> Client for CrcDriver<'a, C> {
         // SubSliceMut window and pass it in again.
         let mut computing = false;
         // There are three outcomes to this match:
-        //   - crc_buffer is not put back: input is ongoing
-        //   - crc_buffer is put back and computing is true: compute is ongoing
-        //   - crc_buffer is put back and computing is false: something failed, start a new request
+        // - crc_buffer is not put back: input is ongoing
+        // - crc_buffer is put back and computing is true: compute is ongoing
+        // - crc_buffer is put back and computing is false: something failed, start a new request
         match result {
             Ok(()) => {
                 // Completed leasable buffer, either refill it or compute
@@ -411,18 +405,14 @@ impl<'a, C: Crc<'a>> Client for CrcDriver<'a, C> {
                             // through a system call: regardless, the request is gone, so cancel
                             // the CRC.
                             if grant.request.is_none() {
-                                kernel_data
-                                    .schedule_upcall(
+                                let _ = kernel_data.schedule_upcall(
+                                    0,
+                                    (
+                                        kernel::errorcode::into_statuscode(Err(ErrorCode::FAIL)),
                                         0,
-                                        (
-                                            kernel::errorcode::into_statuscode(Err(
-                                                ErrorCode::FAIL,
-                                            )),
-                                            0,
-                                            0,
-                                        ),
-                                    )
-                                    .ok();
+                                        0,
+                                    ),
+                                );
                                 return;
                             }
 
@@ -446,18 +436,16 @@ impl<'a, C: Crc<'a>> Client for CrcDriver<'a, C> {
                                     }
                                     Err(_) => {
                                         grant.request = None;
-                                        kernel_data
-                                            .schedule_upcall(
+                                        let _ = kernel_data.schedule_upcall(
+                                            0,
+                                            (
+                                                kernel::errorcode::into_statuscode(Err(
+                                                    ErrorCode::FAIL,
+                                                )),
                                                 0,
-                                                (
-                                                    kernel::errorcode::into_statuscode(Err(
-                                                        ErrorCode::FAIL,
-                                                    )),
-                                                    0,
-                                                    0,
-                                                ),
-                                            )
-                                            .ok();
+                                                0,
+                                            ),
+                                        );
                                     }
                                 }
                             } else {
@@ -475,18 +463,16 @@ impl<'a, C: Crc<'a>> Client for CrcDriver<'a, C> {
                                     .unwrap_or(0);
                                 if amount == 0 {
                                     grant.request = None;
-                                    kernel_data
-                                        .schedule_upcall(
+                                    let _ = kernel_data.schedule_upcall(
+                                        0,
+                                        (
+                                            kernel::errorcode::into_statuscode(Err(
+                                                ErrorCode::NOMEM,
+                                            )),
                                             0,
-                                            (
-                                                kernel::errorcode::into_statuscode(Err(
-                                                    ErrorCode::NOMEM,
-                                                )),
-                                                0,
-                                                0,
-                                            ),
-                                        )
-                                        .ok();
+                                            0,
+                                        ),
+                                    );
                                 } else {
                                     self.app_buffer_written.add(amount);
                                 }
@@ -503,12 +489,10 @@ impl<'a, C: Crc<'a>> Client for CrcDriver<'a, C> {
                             self.current_process.map(|pid| {
                                 let _res = self.grant.enter(pid, |grant, kernel_data| {
                                     grant.request = None;
-                                    kernel_data
-                                        .schedule_upcall(
-                                            0,
-                                            (kernel::errorcode::into_statuscode(Err(e)), 0, 0),
-                                        )
-                                        .ok();
+                                    let _ = kernel_data.schedule_upcall(
+                                        0,
+                                        (kernel::errorcode::into_statuscode(Err(e)), 0, 0),
+                                    );
                                 });
                             });
                         }
@@ -521,9 +505,8 @@ impl<'a, C: Crc<'a>> Client for CrcDriver<'a, C> {
                 self.current_process.map(|pid| {
                     let _res = self.grant.enter(pid, |grant, kernel_data| {
                         grant.request = None;
-                        kernel_data
-                            .schedule_upcall(0, (kernel::errorcode::into_statuscode(Err(e)), 0, 0))
-                            .ok();
+                        let _ = kernel_data
+                            .schedule_upcall(0, (kernel::errorcode::into_statuscode(Err(e)), 0, 0));
                     });
                 });
             }
@@ -544,21 +527,18 @@ impl<'a, C: Crc<'a>> Client for CrcDriver<'a, C> {
                 match result {
                     Ok(output) => {
                         let (val, user_int) = encode_upcall_crc_output(output);
-                        kernel_data
-                            .schedule_upcall(
-                                0,
-                                (
-                                    kernel::errorcode::into_statuscode(Ok(())),
-                                    val as usize,
-                                    user_int as usize,
-                                ),
-                            )
-                            .ok();
+                        let _ = kernel_data.schedule_upcall(
+                            0,
+                            (
+                                kernel::errorcode::into_statuscode(Ok(())),
+                                val as usize,
+                                user_int as usize,
+                            ),
+                        );
                     }
                     Err(e) => {
-                        kernel_data
-                            .schedule_upcall(0, (kernel::errorcode::into_statuscode(Err(e)), 0, 0))
-                            .ok();
+                        let _ = kernel_data
+                            .schedule_upcall(0, (kernel::errorcode::into_statuscode(Err(e)), 0, 0));
                     }
                 }
             });

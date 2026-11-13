@@ -7,7 +7,7 @@
 //! This capsule provides a higher level Key-Value store interface based on an
 //! underlying `tickv::kv_system` storage layer.
 //!
-//! ```
+//! ```text
 //! +-----------------------+
 //! |  Capsule using K-V    |
 //! +-----------------------+
@@ -28,10 +28,10 @@
 //! ```
 
 use crate::tickv::{KVSystem, KVSystemClient, KeyType};
+use kernel::ErrorCode;
 use kernel::hil::kv;
 use kernel::utilities::cells::{MapCell, OptionalCell, TakeCell};
 use kernel::utilities::leasable_buffer::SubSliceMut;
-use kernel::ErrorCode;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Operation {
@@ -40,6 +40,7 @@ enum Operation {
     Add,
     Update,
     Delete,
+    GarbageCollect,
 }
 
 /// `TicKVKVStore` implements the KV interface using the TicKV KVSystem
@@ -209,6 +210,21 @@ impl<'a, K: KVSystem<'a, K = T>, T: KeyType> kv::KV<'a> for TicKVKVStore<'a, K, 
             None => Err((key, ErrorCode::FAIL)),
         }
     }
+
+    fn garbage_collect(&self) -> Result<(), ErrorCode> {
+        if self.operation.is_some() {
+            return Err(ErrorCode::BUSY);
+        }
+
+        self.operation.set(Operation::GarbageCollect);
+
+        if let Err(e) = self.kv.garbage_collect() {
+            self.operation.clear();
+            Err(e)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl<'a, K: KVSystem<'a, K = T>, T: KeyType> KVSystemClient<T> for TicKVKVStore<'a, K, T> {
@@ -260,6 +276,7 @@ impl<'a, K: KVSystem<'a, K = T>, T: KeyType> KVSystemClient<T> for TicKVKVStore<
                             cb.delete_complete(Err(ErrorCode::FAIL), unhashed_key);
                         });
                     }
+                    Operation::GarbageCollect => {}
                 }
             } else {
                 match op {
@@ -336,20 +353,19 @@ impl<'a, K: KVSystem<'a, K = T>, T: KeyType> KVSystemClient<T> for TicKVKVStore<
                             }
                         }
                     }
-                    Operation::Delete => {
-                        match self.kv.invalidate_key(hashed_key) {
-                            Ok(()) => {
-                                self.unhashed_key.replace(unhashed_key);
-                            }
-                            Err((key, _e)) => {
-                                self.hashed_key.replace(key);
-                                self.operation.clear();
-                                self.client.map(move |cb| {
-                                    cb.delete_complete(Err(ErrorCode::FAIL), unhashed_key);
-                                });
-                            }
-                        };
-                    }
+                    Operation::Delete => match self.kv.invalidate_key(hashed_key) {
+                        Ok(()) => {
+                            self.unhashed_key.replace(unhashed_key);
+                        }
+                        Err((key, _e)) => {
+                            self.hashed_key.replace(key);
+                            self.operation.clear();
+                            self.client.map(move |cb| {
+                                cb.delete_complete(Err(ErrorCode::FAIL), unhashed_key);
+                            });
+                        }
+                    },
+                    Operation::GarbageCollect => {}
                 }
             }
         });
@@ -441,6 +457,7 @@ impl<'a, K: KVSystem<'a, K = T>, T: KeyType> KVSystemClient<T> for TicKVKVStore<
                     });
                 });
             }
+            Operation::GarbageCollect => {}
         });
     }
 
@@ -450,8 +467,8 @@ impl<'a, K: KVSystem<'a, K = T>, T: KeyType> KVSystemClient<T> for TicKVKVStore<
         key: &'static mut T,
         ret_buf: SubSliceMut<'static, u8>,
     ) {
-        self.operation.map(|op| match op {
-            Operation::Get => {
+        self.operation.map(|op| {
+            if op == Operation::Get {
                 self.hashed_key.replace(key);
                 self.operation.clear();
 
@@ -469,7 +486,6 @@ impl<'a, K: KVSystem<'a, K = T>, T: KeyType> KVSystemClient<T> for TicKVKVStore<
                     });
                 });
             }
-            _ => {}
         });
     }
 
@@ -564,8 +580,14 @@ impl<'a, K: KVSystem<'a, K = T>, T: KeyType> KVSystemClient<T> for TicKVKVStore<
                     });
                 });
             }
+            Operation::GarbageCollect => {}
         });
     }
 
-    fn garbage_collect_complete(&self, _result: Result<(), ErrorCode>) {}
+    fn garbage_collect_complete(&self, result: Result<(), ErrorCode>) {
+        self.operation.clear();
+        self.client.map(move |cb| {
+            cb.garbage_collection_complete(result);
+        });
+    }
 }

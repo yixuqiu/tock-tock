@@ -10,9 +10,11 @@ use kernel::platform::chip::InterruptService;
 
 use crate::adc;
 use crate::clocks::Clocks;
+use crate::dma;
 use crate::gpio::{RPGpio, RPPins, SIO};
 use crate::i2c;
 use crate::interrupts;
+use crate::pio::Pio;
 use crate::pwm;
 use crate::resets::Resets;
 use crate::rtc;
@@ -23,7 +25,7 @@ use crate::uart::Uart;
 use crate::usb;
 use crate::watchdog::Watchdog;
 use crate::xosc::Xosc;
-use cortexm0p::{interrupt_mask, CortexM0P, CortexMVariant};
+use cortexm0p::{CortexM0P, CortexMVariant, interrupt_mask};
 
 #[repr(u8)]
 pub enum Processor {
@@ -41,43 +43,56 @@ pub struct Rp2040<'a, I: InterruptService + 'a> {
 }
 
 impl<'a, I: InterruptService> Rp2040<'a, I> {
-    pub unsafe fn new(interrupt_service: &'a I, sio: &'a SIO) -> Self {
+    pub fn new(interrupt_service: &'a I, sio: &'a SIO) -> Self {
+        // SAFETY: All RP2040 chips are Cortex-M0+ cores with valid MPU hardware.
+        let mpu = unsafe { cortexm0p::mpu::new() };
+
         Self {
-            mpu: cortexm0p::mpu::MPU::new(),
+            mpu,
             userspace_kernel_boundary: cortexm0p::syscall::SysCall::new(),
             interrupt_service,
-            sio: sio,
+            sio,
             processor0_interrupt_mask: interrupt_mask!(interrupts::SIO_IRQ_PROC1),
             processor1_interrupt_mask: interrupt_mask!(interrupts::SIO_IRQ_PROC0),
         }
     }
 }
 
-impl<'a, I: InterruptService> Chip for Rp2040<'a, I> {
+impl<I: InterruptService> Chip for Rp2040<'_, I> {
     type MPU = cortexm0p::mpu::MPU;
     type UserspaceKernelBoundary = cortexm0p::syscall::SysCall;
+    type ThreadIdProvider = cortexm0p::thread_id::CortexMThreadIdProvider;
+
+    fn init() {
+        cortexm0p::nvic::disable_all();
+        cortexm0p::nvic::clear_all_pending();
+
+        let sio = crate::gpio::SIO::new();
+        let processor = sio.get_processor();
+        match processor {
+            crate::chip::Processor::Processor0 => {}
+            _ => panic!(
+                "Kernel should run only using processor 0 (now processor {})",
+                processor as u8
+            ),
+        }
+    }
 
     fn service_pending_interrupts(&self) {
-        unsafe {
-            let mask = match self.sio.get_processor() {
-                Processor::Processor0 => self.processor0_interrupt_mask,
-                Processor::Processor1 => self.processor1_interrupt_mask,
-            };
-            loop {
-                if let Some(interrupt) = cortexm0p::nvic::next_pending_with_mask(mask) {
-                    // ignore SIO_IRQ_PROC1 as it is intended for processor 1
-                    // not able to unset its pending status
-                    // probably only processor 1 can unset the pending by reading the fifo
-                    if !self.interrupt_service.service_interrupt(interrupt) {
-                        panic!("unhandled interrupt {}", interrupt);
-                    }
-                    let n = cortexm0p::nvic::Nvic::new(interrupt);
-                    n.clear_pending();
-                    n.enable();
-                } else {
-                    break;
-                }
+        let mask = match self.sio.get_processor() {
+            Processor::Processor0 => self.processor0_interrupt_mask,
+            Processor::Processor1 => self.processor1_interrupt_mask,
+        };
+        while let Some(interrupt) = cortexm0p::nvic::next_pending_with_mask(mask) {
+            // ignore SIO_IRQ_PROC1 as it is intended for processor 1
+            // not able to unset its pending status
+            // probably only processor 1 can unset the pending by reading the fifo
+            if !self.interrupt_service.service_interrupt(interrupt) {
+                panic!("unhandled interrupt {}", interrupt);
             }
+            let n = cortexm0p::nvic::Nvic::new(interrupt);
+            n.clear_pending();
+            n.enable();
         }
     }
 
@@ -89,7 +104,7 @@ impl<'a, I: InterruptService> Chip for Rp2040<'a, I> {
             Processor::Processor0 => self.processor0_interrupt_mask,
             Processor::Processor1 => self.processor1_interrupt_mask,
         };
-        unsafe { cortexm0p::nvic::has_pending_with_mask(mask) }
+        cortexm0p::nvic::has_pending_with_mask(mask)
     }
 
     fn mpu(&self) -> &Self::MPU {
@@ -101,30 +116,30 @@ impl<'a, I: InterruptService> Chip for Rp2040<'a, I> {
     }
 
     fn sleep(&self) {
-        unsafe {
-            cortexm0p::support::wfi();
-        }
+        let cap = kernel::create_capability!(kernel::capabilities::CpuStateControlCapability);
+        cortexm0p::support::wfi(&cap);
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        cortexm0p::support::atomic(f)
+        cortexm0p::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, writer: &mut dyn Write) {
+    unsafe fn print_state(_this: Option<&Self>, writer: &mut dyn Write) {
         CortexM0P::print_cortexm_state(writer);
     }
 }
 
 pub struct Rp2040DefaultPeripherals<'a> {
     pub adc: adc::Adc<'a>,
-    pub clocks: Clocks,
+    pub dma: dma::Dma<'a>,
     pub i2c0: i2c::I2c<'a, 'a>,
     pub pins: RPPins<'a>,
+    pub pio0: Pio,
+    pub pio1: Pio,
     pub pwm: pwm::Pwm<'a>,
-    pub resets: Resets,
     pub sio: SIO,
     pub spi0: spi::Spi<'a>,
     pub sysinfo: sysinfo::SysInfo,
@@ -137,44 +152,44 @@ pub struct Rp2040DefaultPeripherals<'a> {
     pub rtc: rtc::Rtc<'a>,
 }
 
-impl<'a> Rp2040DefaultPeripherals<'a> {
-    pub fn new() -> Self {
+impl Rp2040DefaultPeripherals<'_> {
+    pub fn new(clocks: &'static Clocks, resets: &'static Resets) -> Self {
         Self {
             adc: adc::Adc::new(),
-            clocks: Clocks::new(),
-            i2c0: i2c::I2c::new_i2c0(),
+            dma: dma::Dma::new(),
+            i2c0: i2c::I2c::new_i2c0(clocks, resets),
             pins: RPPins::new(),
-            pwm: pwm::Pwm::new(),
-            resets: Resets::new(),
+            pio0: Pio::new_pio0(),
+            pio1: Pio::new_pio1(),
+            pwm: pwm::Pwm::new(clocks),
             sio: SIO::new(),
-            spi0: spi::Spi::new_spi0(),
+            spi0: spi::new_spi0(clocks),
             sysinfo: sysinfo::SysInfo::new(),
             timer: RPTimer::new(),
-            uart0: Uart::new_uart0(),
-            uart1: Uart::new_uart1(),
+            uart0: Uart::new_uart0(clocks),
+            uart1: Uart::new_uart1(clocks),
             usb: usb::UsbCtrl::new(),
-            watchdog: Watchdog::new(),
+            watchdog: Watchdog::new(resets),
             xosc: Xosc::new(),
-            rtc: rtc::Rtc::new(),
+            rtc: rtc::Rtc::new(clocks),
         }
     }
 
-    pub fn resolve_dependencies(&'static self) {
-        self.pwm.set_clocks(&self.clocks);
-        self.watchdog.resolve_dependencies(&self.resets);
-        self.spi0.set_clocks(&self.clocks);
-        self.uart0.set_clocks(&self.clocks);
+    pub fn init(&'static self) {
         kernel::deferred_call::DeferredCallClient::register(&self.uart0);
         kernel::deferred_call::DeferredCallClient::register(&self.uart1);
-        self.i2c0.resolve_dependencies(&self.clocks, &self.resets);
+        kernel::deferred_call::DeferredCallClient::register(&self.rtc);
         self.usb.set_gpio(self.pins.get_pin(RPGpio::GPIO15));
-        self.rtc.set_clocks(&self.clocks);
     }
 }
 
 impl InterruptService for Rp2040DefaultPeripherals<'_> {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
+            interrupts::PIO0_IRQ_0 => {
+                self.pio0.handle_interrupt();
+                true
+            }
             interrupts::TIMER_IRQ_0 => {
                 self.timer.handle_interrupt();
                 true
@@ -217,6 +232,14 @@ impl InterruptService for Rp2040DefaultPeripherals<'_> {
                 // simply ignored.
                 //
                 // Note that PWM interrupts are raised only during unit tests.
+                true
+            }
+            interrupts::DMA_IRQ_0 => {
+                self.dma.handle_interrupt0();
+                true
+            }
+            interrupts::DMA_IRQ_1 => {
+                self.dma.handle_interrupt1();
                 true
             }
             _ => false,

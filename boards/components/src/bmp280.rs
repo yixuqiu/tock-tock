@@ -33,6 +33,7 @@ use capsules_extra::bmp280::Bmp280;
 use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::i2c;
+use kernel::hil::i2c::I2CDevice as _;
 use kernel::hil::time::Alarm;
 
 #[macro_export]
@@ -53,7 +54,7 @@ macro_rules! bmp280_component_static {
         );
 
         (i2c_device, alarm, buffer, bmp280)
-    };};
+    }};
 }
 
 pub type Bmp280ComponentType<A, I> = capsules_extra::bmp280::Bmp280<'static, A, I>;

@@ -6,9 +6,11 @@
 name = "capsules-core"
 version.workspace = true
 authors.workspace = true
-edition.workspace = true
+edition = "2024"
 
 [dependencies]
 kernel = { path = "../../kernel" }
 enum_primitive = { path = "../../libraries/enum_primitive" }
-tickv = { path = "../../libraries/tickv" }
+
+[lints]
+workspace = true

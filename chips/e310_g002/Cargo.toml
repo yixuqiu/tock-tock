@@ -6,10 +6,11 @@
 name = "e310_g002"
 version.workspace = true
 authors.workspace = true
-edition.workspace = true
+edition = "2024"
 
 [dependencies]
-sifive = { path = "../sifive" }
-rv32i = { path = "../../arch/rv32i" }
 kernel = { path = "../../kernel" }
 e310x = { path = "../e310x" }
+
+[lints]
+workspace = true

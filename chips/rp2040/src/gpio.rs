@@ -10,10 +10,11 @@
 use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
 use kernel::hil;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
+pub use rp2xxx::pads::{DriveStrength, SlewRate};
 
 use crate::chip::Processor;
 #[repr(C)]
@@ -218,7 +219,12 @@ register_bitfields![u32,
     GPIO_PAD [
         OD OFFSET(7) NUMBITS(1) [],
         IE OFFSET(6) NUMBITS(1) [],
-        DRIVE OFFSET(4) NUMBITS(2) [],
+        DRIVE OFFSET(4) NUMBITS(2) [
+            Drive2mA = 0,
+            Drive4mA = 1,
+            Drive8mA = 2,
+            Drive12mA = 3,
+        ],
         PUE OFFSET(3) NUMBITS(1) [],
         PDE OFFSET(2) NUMBITS(1) [],
         SCHMITT OFFSET(1) NUMBITS(1) [],
@@ -335,7 +341,7 @@ impl<'a> RPPins<'a> {
         }
     }
 
-    pub fn get_pin(&self, pin: RPGpio) -> &'a RPGpioPin {
+    pub fn get_pin(&self, pin: RPGpio) -> &'a RPGpioPin<'_> {
         &self.pins[pin as usize]
     }
 
@@ -408,6 +414,10 @@ impl<'a> RPGpioPin<'a> {
             gpio_pad_registers: GPIO_PAD_BASE,
             sio_registers: SIO_BASE,
         }
+    }
+
+    pub(crate) fn pin(&self) -> usize {
+        self.pin
     }
 
     fn get_mode(&self) -> hil::gpio::Configuration {
@@ -484,6 +494,19 @@ impl<'a> RPGpioPin<'a> {
     pub fn finish_usb_errata(&self, prev_ctrl: u32, prev_pad: u32) {
         self.gpio_registers.pin[self.pin].ctrl.set(prev_ctrl);
         self.gpio_pad_registers.gpio_pad[self.pin].set(prev_pad);
+    }
+
+    pub fn set_schmitt(&self, enable: bool) {
+        self.gpio_pad_registers.gpio_pad[self.pin].modify(GPIO_PAD::SCHMITT.val(enable as u32));
+    }
+
+    pub fn set_slew_rate(&self, slew_rate: SlewRate) {
+        self.gpio_pad_registers.gpio_pad[self.pin].modify(GPIO_PAD::SLEWFAST.val(slew_rate as u32));
+    }
+
+    pub fn set_drive_strength(&self, drive_strength: DriveStrength) {
+        self.gpio_pad_registers.gpio_pad[self.pin]
+            .modify(GPIO_PAD::DRIVE.val(drive_strength as u32));
     }
 }
 

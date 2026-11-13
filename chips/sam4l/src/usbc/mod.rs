@@ -9,21 +9,20 @@ pub mod debug;
 #[allow(unused_imports)]
 use self::debug::{HexBuf, UdintFlags, UeconFlags, UestaFlags};
 use crate::pm;
-use crate::pm::{disable_clock, enable_clock, Clock, HSBClock, PBBClock};
+use crate::pm::{Clock, HSBClock, PBBClock, disable_clock, enable_clock};
 use crate::scif;
 use core::cell::Cell;
-use core::ptr;
 use core::slice;
 use kernel::debug as debugln;
 use kernel::hil;
 use kernel::hil::usb::TransferType;
-use kernel::utilities::cells::{OptionalCell, VolatileCell};
+use kernel::utilities::StaticRef;
+use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, FieldValue, InMemoryRegister, LocalRegisterCopy, ReadOnly, ReadWrite,
-    WriteOnly,
+    FieldValue, InMemoryRegister, LocalRegisterCopy, ReadOnly, ReadWrite, WriteOnly,
+    register_bitfields, register_structs,
 };
-use kernel::utilities::StaticRef;
 
 // The following macros provide some diagnostics and panics(!)
 // while this module is experimental and should eventually be removed or
@@ -53,65 +52,60 @@ macro_rules! internal_err {
     };
 }
 
-#[repr(C)]
-struct UsbcRegisters {
-    udcon: ReadWrite<u32, DeviceControl::Register>,
-    udint: ReadOnly<u32, DeviceInterrupt::Register>,
-    udintclr: WriteOnly<u32, DeviceInterrupt::Register>,
-    udintset: WriteOnly<u32, DeviceInterrupt::Register>,
-    udinte: ReadOnly<u32, DeviceInterrupt::Register>,
-    udinteclr: WriteOnly<u32, DeviceInterrupt::Register>,
-    udinteset: WriteOnly<u32, DeviceInterrupt::Register>,
-    uerst: ReadWrite<u32>,
-    udfnum: ReadOnly<u32>,
-    _reserved0: [u8; 0xdc], // 220 bytes
-    // Note that the SAM4L supports only 8 endpoints, but the registers
-    // are laid out such that there is room for 12.
-    // 0x100
-    uecfg: [ReadWrite<u32, EndpointConfig::Register>; 12],
-    uesta: [ReadOnly<u32, EndpointStatus::Register>; 12],
-    uestaclr: [WriteOnly<u32, EndpointStatus::Register>; 12],
-    uestaset: [WriteOnly<u32, EndpointStatus::Register>; 12],
-    uecon: [ReadOnly<u32, EndpointControl::Register>; 12],
-    ueconset: [WriteOnly<u32, EndpointControl::Register>; 12],
-    ueconclr: [WriteOnly<u32, EndpointControl::Register>; 12],
-    _reserved1: [u8; 0x1b0], // 432 bytes
-    // 0x400 = 1024
-    uhcon: ReadWrite<u32>,
-    uhint: ReadOnly<u32>,
-    uhintclr: WriteOnly<u32>,
-    uhintset: WriteOnly<u32>,
-    uhinte: ReadOnly<u32>,
-    uhinteclr: WriteOnly<u32>,
-    uhinteset: WriteOnly<u32>,
-    uprst: ReadWrite<u32>,
-    uhfnum: ReadWrite<u32>,
-    uhsofc: ReadWrite<u32>,
-    _reserved2: [u8; 0xd8], // 216 bytes
-    // 0x500 = 1280
-    upcfg: [ReadWrite<u32>; 12],
-    upsta: [ReadOnly<u32>; 12],
-    upstaclr: [WriteOnly<u32>; 12],
-    upstaset: [WriteOnly<u32>; 12],
-    upcon: [ReadOnly<u32>; 12],
-    upconset: [WriteOnly<u32>; 12],
-    upconclr: [WriteOnly<u32>; 12],
-    upinrq: [ReadWrite<u32>; 12],
-    _reserved3: [u8; 0x180], // 384 bytes
-    // 0x800 = 2048
-    usbcon: ReadWrite<u32, Control::Register>,
-    usbsta: ReadOnly<u32, Status::Register>,
-    usbstaclr: WriteOnly<u32>,
-    usbstaset: WriteOnly<u32>,
-    _reserved4: [u8; 8],
-    // 0x818
-    uvers: ReadOnly<u32>,
-    ufeatures: ReadOnly<u32>,
-    uaddrsize: ReadOnly<u32>,
-    uname1: ReadOnly<u32>,
-    uname2: ReadOnly<u32>,
-    usbfsm: ReadOnly<u32>,
-    udesc: ReadWrite<u32>,
+register_structs! {
+    UsbcRegisters {
+        (0x000 => udcon: ReadWrite<u32, DeviceControl::Register>),
+        (0x004 => udint: ReadOnly<u32, DeviceInterrupt::Register>),
+        (0x008 => udintclr: WriteOnly<u32, DeviceInterrupt::Register>),
+        (0x00C => udintset: WriteOnly<u32, DeviceInterrupt::Register>),
+        (0x010 => udinte: ReadOnly<u32, DeviceInterrupt::Register>),
+        (0x014 => udinteclr: WriteOnly<u32, DeviceInterrupt::Register>),
+        (0x018 => udinteset: WriteOnly<u32, DeviceInterrupt::Register>),
+        (0x01C => uerst: ReadWrite<u32>),
+        (0x020 => udfnum: ReadOnly<u32>),
+        (0x024 => _reserved0: [u8; 0xdc]),
+        (0x100 => uecfg: [ReadWrite<u32, EndpointConfig::Register>; 12]),
+        (0x130 => uesta: [ReadOnly<u32, EndpointStatus::Register>; 12]),
+        (0x160 => uestaclr: [WriteOnly<u32, EndpointStatus::Register>; 12]),
+        (0x190 => uestaset: [WriteOnly<u32, EndpointStatus::Register>; 12]),
+        (0x1C0 => uecon: [ReadOnly<u32, EndpointControl::Register>; 12]),
+        (0x1F0 => ueconset: [WriteOnly<u32, EndpointControl::Register>; 12]),
+        (0x220 => ueconclr: [WriteOnly<u32, EndpointControl::Register>; 12]),
+        (0x250 => _reserved1: [u8; 0x1b0]),
+        (0x400 => uhcon: ReadWrite<u32>),
+        (0x404 => uhint: ReadOnly<u32>),
+        (0x408 => uhintclr: WriteOnly<u32>),
+        (0x40C => uhintset: WriteOnly<u32>),
+        (0x410 => uhinte: ReadOnly<u32>),
+        (0x414 => uhinteclr: WriteOnly<u32>),
+        (0x418 => uhinteset: WriteOnly<u32>),
+        (0x41C => uprst: ReadWrite<u32>),
+        (0x420 => uhfnum: ReadWrite<u32>),
+        (0x424 => uhsofc: ReadWrite<u32>),
+        (0x428 => _reserved2: [u8; 0xd8]),
+        (0x500 => upcfg: [ReadWrite<u32>; 12]),
+        (0x530 => upsta: [ReadOnly<u32>; 12]),
+        (0x560 => upstaclr: [WriteOnly<u32>; 12]),
+        (0x590 => upstaset: [WriteOnly<u32>; 12]),
+        (0x5C0 => upcon: [ReadOnly<u32>; 12]),
+        (0x5F0 => upconset: [WriteOnly<u32>; 12]),
+        (0x620 => upconclr: [WriteOnly<u32>; 12]),
+        (0x650 => upinrq: [ReadWrite<u32>; 12]),
+        (0x680 => _reserved3: [u8; 0x180]),
+        (0x800 => usbcon: ReadWrite<u32, Control::Register>),
+        (0x804 => usbsta: ReadOnly<u32, Status::Register>),
+        (0x808 => usbstaclr: WriteOnly<u32>),
+        (0x80C => usbstaset: WriteOnly<u32>),
+        (0x810 => _reserved4: [u8; 8]),
+        (0x818 => uvers: ReadOnly<u32>),
+        (0x81C => ufeatures: ReadOnly<u32>),
+        (0x820 => uaddrsize: ReadOnly<u32>),
+        (0x824 => uname1: ReadOnly<u32>),
+        (0x828 => uname2: ReadOnly<u32>),
+        (0x82C => usbfsm: ReadOnly<u32>),
+        (0x830 => udesc: ReadWrite<u32>),
+        (0x834 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -231,7 +225,7 @@ const USBC_BASE: StaticRef<UsbcRegisters> =
 
 #[inline]
 fn usbc_regs() -> &'static UsbcRegisters {
-    &*USBC_BASE
+    &USBC_BASE
 }
 
 // Datastructures for tracking USB controller state
@@ -380,7 +374,7 @@ pub const fn new_endpoint() -> Endpoint {
 
 #[repr(C)]
 pub struct Bank {
-    addr: VolatileCell<*mut u8>,
+    addr: InMemoryRegister<u32>,
 
     // The following fields are not actually registers
     // (they may be placed anywhere in memory),
@@ -395,7 +389,7 @@ pub struct Bank {
 impl Bank {
     pub const fn new() -> Bank {
         Bank {
-            addr: VolatileCell::new(ptr::null_mut()),
+            addr: InMemoryRegister::new(0),
             packet_size: InMemoryRegister::new(0),
             control_status: InMemoryRegister::new(0),
             _reserved: 0,
@@ -403,7 +397,7 @@ impl Bank {
     }
 
     pub fn set_addr(&self, addr: *mut u8) {
-        self.addr.set(addr);
+        self.addr.set(addr as u32);
     }
 }
 
@@ -473,15 +467,16 @@ impl<'a> Usbc<'a> {
 
     /// Provide a buffer for transfers in and out of the given endpoint
     /// (The controller need not be enabled before calling this method.)
-    fn _endpoint_bank_set_buffer(
+    fn endpoint_bank_set_buffer(
         &self,
         endpoint: EndpointIndex,
         bank: BankIndex,
-        buf: &[VolatileCell<u8>],
+        buf: &[InMemoryRegister<u8>],
     ) {
         let e: usize = From::from(endpoint);
         let b: usize = From::from(bank);
-        let p = buf.as_ptr() as *mut u8;
+        let p: *const InMemoryRegister<u8> = buf.as_ptr();
+        let p: *mut u8 = p.cast_mut().cast();
 
         debug1!("Set Endpoint{}/Bank{} addr={:8?}", e, b, p);
         self.descriptors[e][b].set_addr(p);
@@ -493,7 +488,7 @@ impl<'a> Usbc<'a> {
     }
 
     /// Enable the controller's clocks and interrupt and transition to Idle state
-    fn _enable(&self, mode: Mode) {
+    fn enable(&self, mode: Mode) {
         match self.get_state() {
             State::Reset => {
                 // Are the USBC clocks enabled at reset?
@@ -557,7 +552,7 @@ impl<'a> Usbc<'a> {
     fn _disable(&self) {
         // Detach if necessary
         if let State::Active(_) = self.get_state() {
-            self._detach();
+            self.detach();
         }
 
         // Disable USBC and its clocks
@@ -575,7 +570,7 @@ impl<'a> Usbc<'a> {
     }
 
     /// Attach to the USB bus after enabling USB bus clock
-    fn _attach(&self) {
+    fn attach(&self) {
         match self.get_state() {
             State::Idle(mode) => {
                 if self.pm.get_system_frequency() != 48000000 {
@@ -598,23 +593,20 @@ impl<'a> Usbc<'a> {
     }
 
     /// Detach from the USB bus.  Also disable USB bus clock to save energy.
-    fn _detach(&self) {
-        match self.get_state() {
-            State::Active(mode) => {
-                usbc_regs().udcon.modify(DeviceControl::DETACH::SET);
+    fn detach(&self) {
+        if let State::Active(mode) = self.get_state() {
+            usbc_regs().udcon.modify(DeviceControl::DETACH::SET);
 
-                scif::generic_clock_disable(scif::GenericClock::GCLK7);
+            scif::generic_clock_disable(scif::GenericClock::GCLK7);
 
-                self.set_state(State::Idle(mode));
-            }
-            _ => debug1!("Already detached"),
+            self.set_state(State::Idle(mode));
         }
     }
 
     /// Configure and enable an endpoint
-    fn _endpoint_enable(&self, endpoint: usize, endpoint_config: EndpointConfigValue) {
-        self._endpoint_record_config(endpoint, endpoint_config);
-        self._endpoint_write_config(endpoint, endpoint_config);
+    fn endpoint_enable(&self, endpoint: usize, endpoint_config: EndpointConfigValue) {
+        self.endpoint_record_config(endpoint, endpoint_config);
+        self.endpoint_write_config(endpoint, endpoint_config);
 
         // Enable the endpoint (meaning the controller will respond to requests
         // to this endpoint)
@@ -622,7 +614,7 @@ impl<'a> Usbc<'a> {
             .uerst
             .set(usbc_regs().uerst.get() | (1 << endpoint));
 
-        self._endpoint_init(endpoint, endpoint_config);
+        self.endpoint_init(endpoint, endpoint_config);
 
         // Set EPnINTE, enabling interrupts for this endpoint
         usbc_regs().udinteset.set(1 << (12 + endpoint));
@@ -630,7 +622,7 @@ impl<'a> Usbc<'a> {
         debug1!("Enabled endpoint {}", endpoint);
     }
 
-    fn _endpoint_record_config(&self, endpoint: usize, endpoint_config: EndpointConfigValue) {
+    fn endpoint_record_config(&self, endpoint: usize, endpoint_config: EndpointConfigValue) {
         // Record config in case of later bus reset
         self.map_state(|state| match *state {
             State::Reset => {
@@ -648,7 +640,7 @@ impl<'a> Usbc<'a> {
         });
     }
 
-    fn _endpoint_write_config(&self, endpoint: usize, config: EndpointConfigValue) {
+    fn endpoint_write_config(&self, endpoint: usize, config: EndpointConfigValue) {
         // This must be performed after each bus reset
 
         // Configure the endpoint
@@ -657,19 +649,19 @@ impl<'a> Usbc<'a> {
         debug1!("Configured endpoint {}", endpoint);
     }
 
-    fn _endpoint_init(&self, endpoint: usize, config: EndpointConfigValue) {
+    fn endpoint_init(&self, endpoint: usize, config: EndpointConfigValue) {
         self.map_state(|state| match *state {
             State::Idle(Mode::Device { ref mut state, .. }) => {
-                self._endpoint_init_with_device_state(state, endpoint, config);
+                self.endpoint_init_with_device_state(state, endpoint, config);
             }
             State::Active(Mode::Device { ref mut state, .. }) => {
-                self._endpoint_init_with_device_state(state, endpoint, config);
+                self.endpoint_init_with_device_state(state, endpoint, config);
             }
             _ => internal_err!("Not reached"),
         });
     }
 
-    fn _endpoint_init_with_device_state(
+    fn endpoint_init_with_device_state(
         &self,
         state: &mut DeviceState,
         endpoint: usize,
@@ -698,7 +690,7 @@ impl<'a> Usbc<'a> {
         debug1!("Initialized endpoint {}", endpoint);
     }
 
-    fn _endpoint_resume_in(&self, endpoint: usize) {
+    fn endpoint_resume_in(&self, endpoint: usize) {
         self.map_state(|state| match *state {
             State::Active(Mode::Device { ref mut state, .. }) => {
                 let endpoint_state = &mut state.endpoint_states[endpoint];
@@ -716,7 +708,7 @@ impl<'a> Usbc<'a> {
         });
     }
 
-    fn _endpoint_resume_out(&self, endpoint: usize) {
+    fn endpoint_resume_out(&self, endpoint: usize) {
         self.map_state(|state| match *state {
             State::Active(Mode::Device { ref mut state, .. }) => {
                 let endpoint_state = &mut state.endpoint_states[endpoint];
@@ -739,11 +731,11 @@ impl<'a> Usbc<'a> {
             let mut requests = self.requests[endpoint].get();
 
             if requests.resume_in {
-                self._endpoint_resume_in(endpoint);
+                self.endpoint_resume_in(endpoint);
                 requests.resume_in = false;
             }
             if requests.resume_out {
-                self._endpoint_resume_out(endpoint);
+                self.endpoint_resume_out(endpoint);
                 requests.resume_out = false;
             }
 
@@ -800,8 +792,8 @@ impl<'a> Usbc<'a> {
             // Reconfigure and initialize endpoints
             for i in 0..N_ENDPOINTS {
                 if let Some(endpoint_config) = device_config.endpoint_configs[i] {
-                    self._endpoint_write_config(i, endpoint_config);
-                    self._endpoint_init_with_device_state(device_state, i, endpoint_config);
+                    self.endpoint_write_config(i, endpoint_config);
+                    self.endpoint_init_with_device_state(device_state, i, endpoint_config);
                 }
             }
 
@@ -1381,7 +1373,7 @@ impl<'a> Usbc<'a> {
     fn debug_show_d0(&self) {
         for bi in 0..1 {
             let b = &self.descriptors[0][bi];
-            let addr = b.addr.get();
+            let addr = b.addr.get() as *const u8;
             let _buf = if addr.is_null() {
                 None
             } else {
@@ -1446,29 +1438,29 @@ impl<'a> hil::usb::UsbController<'a> for Usbc<'a> {
         self.client.set(client);
     }
 
-    fn endpoint_set_ctrl_buffer(&self, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_ctrl_buffer(&self, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             client_err!("Bad endpoint buffer size");
         }
 
-        self._endpoint_bank_set_buffer(EndpointIndex::new(0), BankIndex::Bank0, buf);
+        self.endpoint_bank_set_buffer(EndpointIndex::new(0), BankIndex::Bank0, buf);
     }
 
-    fn endpoint_set_in_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_in_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             client_err!("Bad endpoint buffer size");
         }
 
-        self._endpoint_bank_set_buffer(EndpointIndex::new(endpoint), BankIndex::Bank0, buf);
+        self.endpoint_bank_set_buffer(EndpointIndex::new(endpoint), BankIndex::Bank0, buf);
     }
 
-    fn endpoint_set_out_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_out_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             client_err!("Bad endpoint buffer size");
         }
 
         // XXX: when implementing in_out endpoints, this should probably set a different slice than endpoint_set_in_buffer.
-        self._endpoint_bank_set_buffer(EndpointIndex::new(endpoint), BankIndex::Bank0, buf);
+        self.endpoint_bank_set_buffer(EndpointIndex::new(endpoint), BankIndex::Bank0, buf);
     }
 
     fn enable_as_device(&self, speed: hil::usb::DeviceSpeed) {
@@ -1478,8 +1470,8 @@ impl<'a> hil::usb::UsbController<'a> for Usbc<'a> {
         };
 
         match self.get_state() {
-            State::Reset => self._enable(Mode::Device {
-                speed: speed,
+            State::Reset => self.enable(Mode::Device {
+                speed,
                 config: DeviceConfig::default(),
                 state: DeviceState::default(),
             }),
@@ -1491,7 +1483,7 @@ impl<'a> hil::usb::UsbController<'a> for Usbc<'a> {
         match self.get_state() {
             State::Reset => client_warn!("Not enabled"),
             State::Active(_) => client_warn!("Already attached"),
-            State::Idle(_) => self._attach(),
+            State::Idle(_) => self.attach(),
         }
     }
 
@@ -1499,7 +1491,7 @@ impl<'a> hil::usb::UsbController<'a> for Usbc<'a> {
         match self.get_state() {
             State::Reset => client_warn!("Not enabled"),
             State::Idle(_) => client_warn!("Not attached"),
-            State::Active(_) => self._detach(),
+            State::Active(_) => self.detach(),
         }
     }
 
@@ -1534,7 +1526,7 @@ impl<'a> hil::usb::UsbController<'a> for Usbc<'a> {
             TransferType::Interrupt | TransferType::Isochronous => unimplemented!(),
         };
 
-        self._endpoint_enable(endpoint, endpoint_cfg)
+        self.endpoint_enable(endpoint, endpoint_cfg)
     }
 
     fn endpoint_out_enable(&self, transfer_type: TransferType, endpoint: usize) {
@@ -1554,7 +1546,7 @@ impl<'a> hil::usb::UsbController<'a> for Usbc<'a> {
             TransferType::Interrupt | TransferType::Isochronous => unimplemented!(),
         };
 
-        self._endpoint_enable(endpoint, endpoint_cfg)
+        self.endpoint_enable(endpoint, endpoint_cfg)
     }
 
     fn endpoint_in_out_enable(&self, _transfer_type: TransferType, _endpoint: usize) {

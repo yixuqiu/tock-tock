@@ -2,32 +2,78 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
+use kernel::hil::time::Alarm;
+use kernel::utilities::StaticRef;
 use nrf52::chip::Nrf52DefaultPeripherals;
 
+const RADIO_BASE: StaticRef<crate::ieee802154_radio::RadioRegisters> =
+    unsafe { StaticRef::new(0x40001000 as *const crate::ieee802154_radio::RadioRegisters) };
+
 /// This struct, when initialized, instantiates all peripheral drivers for the nrf52840.
+///
 /// If a board wishes to use only a subset of these peripherals, this
 /// should not be used or imported, and a modified version should be
 /// constructed manually in main.rs.
 pub struct Nrf52833DefaultPeripherals<'a> {
     pub nrf52: Nrf52DefaultPeripherals<'a>,
+    pub ieee802154_radio: crate::ieee802154_radio::Radio<'a>,
     pub gpio_port: crate::gpio::Port<'a, { crate::gpio::NUM_PINS }>,
 }
 impl<'a> Nrf52833DefaultPeripherals<'a> {
-    pub unsafe fn new() -> Self {
+    /// Create default peripherals for an nRF52833 microcontroller.
+    ///
+    /// # Safety
+    ///
+    /// Some of these peripherals use DMA. As such, the default peripherals must
+    /// be unique. This requires:
+    ///
+    /// - This constructor must be called at most once.
+    /// - There must not be additional instances of the DMA-enabled peripheral
+    ///   drivers.
+    /// - There must not be any other code that accesses the DMA buffer and
+    ///   length registers of the DMA-enabled peripherals.
+    pub unsafe fn new(
+        ficr: &'a nrf52::ficr::Ficr,
+        ieee802154_radio_ack_buf: &'static mut [u8; crate::ieee802154_radio::ACK_BUF_SIZE],
+        aes_ecb_buf: &'static mut [u8; 48],
+    ) -> Self {
+        // SAFETY: Satisfied by function-level safety requirements.
+        let nrf52_peripherals = unsafe { Nrf52DefaultPeripherals::new(ficr, aes_ecb_buf) };
         Self {
-            nrf52: Nrf52DefaultPeripherals::new(),
+            nrf52: nrf52_peripherals,
+            ieee802154_radio: crate::ieee802154_radio::Radio::new(
+                RADIO_BASE,
+                ieee802154_radio_ack_buf,
+            ),
             gpio_port: crate::gpio::nrf52833_gpio_create(),
         }
     }
+
     // Necessary for setting up circular dependencies
     pub fn init(&'static self) {
+        self.ieee802154_radio.set_timer_ref(&self.nrf52.timer0);
+        self.nrf52.timer0.set_alarm_client(&self.ieee802154_radio);
+        kernel::deferred_call::DeferredCallClient::register(&self.ieee802154_radio);
         self.nrf52.init();
     }
 }
-impl<'a> kernel::platform::chip::InterruptService for Nrf52833DefaultPeripherals<'a> {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+impl kernel::platform::chip::InterruptService for Nrf52833DefaultPeripherals<'_> {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
             nrf52::peripheral_interrupts::GPIOTE => self.gpio_port.handle_interrupt(),
+            nrf52::peripheral_interrupts::RADIO => {
+                match (
+                    self.ieee802154_radio.is_enabled(),
+                    self.nrf52.ble_radio.is_enabled(),
+                ) {
+                    (false, false) => (),
+                    (true, false) => self.ieee802154_radio.handle_interrupt(),
+                    (false, true) => self.nrf52.ble_radio.handle_interrupt(),
+                    (true, true) => kernel::debug!(
+                        "nRF 802.15.4 and BLE radios cannot be simultaneously enabled!"
+                    ),
+                }
+            }
             _ => return self.nrf52.service_interrupt(interrupt),
         }
         true

@@ -29,7 +29,7 @@
 //!
 //! Example usage:
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! // Configure the MCP230xx. Device address 0x20.
@@ -70,11 +70,11 @@
 //! `mcp230xx` object is created.
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::hil::gpio;
 use kernel::hil::gpio_async;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 // Buffer to use for I2C messages
 pub const BUFFER_LENGTH: usize = 7;
@@ -133,7 +133,7 @@ enum PinState {
     Low = 0x00,
 }
 
-pub struct MCP230xx<'a, I: hil::i2c::I2CDevice> {
+pub struct MCP230xx<'a, I: hil::i2c::I2CDevice<'a>> {
     i2c: &'a I,
     state: Cell<State>,
     bank_size: u8,       // How many GPIO pins per bank (likely 8)
@@ -146,7 +146,7 @@ pub struct MCP230xx<'a, I: hil::i2c::I2CDevice> {
     client: OptionalCell<&'static dyn gpio_async::Client>,
 }
 
-impl<'a, I: hil::i2c::I2CDevice> MCP230xx<'a, I> {
+impl<'a, I: hil::i2c::I2CDevice<'a>> MCP230xx<'a, I> {
     pub fn new(
         i2c: &'a I,
         interrupt_pin_a: Option<&'a dyn gpio::InterruptValuePin<'a>>,
@@ -156,13 +156,13 @@ impl<'a, I: hil::i2c::I2CDevice> MCP230xx<'a, I> {
         number_of_banks: u8,
     ) -> MCP230xx<'a, I> {
         MCP230xx {
-            i2c: i2c,
+            i2c,
             state: Cell::new(State::Idle),
-            bank_size: bank_size,
-            number_of_banks: number_of_banks,
+            bank_size,
+            number_of_banks,
             buffer: TakeCell::new(buffer),
-            interrupt_pin_a: interrupt_pin_a,
-            interrupt_pin_b: interrupt_pin_b,
+            interrupt_pin_a,
+            interrupt_pin_b,
             interrupts_enabled: Cell::new(0),
             interrupts_mode: Cell::new(0),
             client: OptionalCell::empty(),
@@ -313,7 +313,7 @@ impl<'a, I: hil::i2c::I2CDevice> MCP230xx<'a, I> {
             // The next register is the IoCon (configuration) register, which
             // we also want to set.
             buffer[i] = 0b00000010; // Make MCP230xx interrupt pin active high.
-                                    // TODO verify errors
+            // TODO verify errors
             let _ = self.i2c.write(buffer, i + 1);
             self.state.set(State::EnableInterruptSettings(pin_number));
 
@@ -394,7 +394,7 @@ impl<'a, I: hil::i2c::I2CDevice> MCP230xx<'a, I> {
     }
 }
 
-impl<I: hil::i2c::I2CDevice> hil::i2c::I2CClient for MCP230xx<'_, I> {
+impl<'a, I: hil::i2c::I2CDevice<'a>> hil::i2c::I2CClient for MCP230xx<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], _status: Result<(), hil::i2c::Error>) {
         match self.state.get() {
             State::SelectIoDir(pin_number, direction) => {
@@ -556,7 +556,7 @@ impl<I: hil::i2c::I2CDevice> hil::i2c::I2CClient for MCP230xx<'_, I> {
     }
 }
 
-impl<I: hil::i2c::I2CDevice> gpio::ClientWithValue for MCP230xx<'_, I> {
+impl<'a, I: hil::i2c::I2CDevice<'a>> gpio::ClientWithValue for MCP230xx<'a, I> {
     fn fired(&self, value: u32) {
         if value < 2 {
             return; // Error, value specifies which pin A=0, B=1
@@ -576,7 +576,7 @@ impl<I: hil::i2c::I2CDevice> gpio::ClientWithValue for MCP230xx<'_, I> {
     }
 }
 
-impl<I: hil::i2c::I2CDevice> gpio_async::Port for MCP230xx<'_, I> {
+impl<'a, I: hil::i2c::I2CDevice<'a>> gpio_async::Port for MCP230xx<'a, I> {
     fn disable(&self, pin: usize) -> Result<(), ErrorCode> {
         // Best we can do is make this an input.
         self.set_direction(pin as u8, Direction::Input)

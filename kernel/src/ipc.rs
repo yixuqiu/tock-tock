@@ -7,6 +7,7 @@
 //! This is a special syscall driver that allows userspace applications to
 //! share memory.
 
+use crate::ErrorCode;
 use crate::capabilities::MemoryAllocationCapability;
 use crate::grant::{AllowRoCount, AllowRwCount, Grant, UpcallCount};
 use crate::kernel::Kernel;
@@ -14,7 +15,6 @@ use crate::process;
 use crate::process::ProcessId;
 use crate::processbuffer::ReadableProcessBuffer;
 use crate::syscall_driver::{CommandReturn, SyscallDriver};
-use crate::ErrorCode;
 
 /// Syscall number
 pub const DRIVER_NUM: usize = 0x10000;
@@ -65,6 +65,20 @@ impl<const NUM_PROCS: u8> IPC<NUM_PROCS> {
 
     /// Schedule an IPC upcall for a process. This is called by the main
     /// scheduler loop if an IPC task was queued for the process.
+    ///
+    /// # Safety
+    ///
+    /// Scheduling the upcall is what causes a shared buffer to be shared with
+    /// the target (`schedule_on`) process. This causes an MPU region to be
+    /// created for the target process, giving it access to the shared buffer.
+    ///
+    /// The caller must ensure that source (`called_from`) process is not
+    /// deallocated/reclaimed while the buffer is still shared (i.e., the MPU
+    /// region is mapped). Failing to ensure this could potentially give the
+    /// original target process access to memory allocated for a new process.
+    /// More problematically, that memory could be used for the kernel's grant
+    /// region for a new process, and allowing a process to access that memory
+    /// violates memory safety for the kernel.
     pub(crate) unsafe fn schedule_upcall(
         &self,
         schedule_on: ProcessId,
@@ -73,6 +87,13 @@ impl<const NUM_PROCS: u8> IPC<NUM_PROCS> {
     ) -> Result<(), process::Error> {
         let schedule_on_id = schedule_on.index().ok_or(process::Error::NoSuchApp)?;
         let called_from_id = called_from.index().ok_or(process::Error::NoSuchApp)?;
+
+        // Verify that IPC is not trying to share with the same app. If so, this
+        // will cause a double grant enter if we don't return now.
+        if schedule_on_id == called_from_id {
+            return Err(process::Error::AlreadyInUse);
+        }
+
         self.data.enter(schedule_on, |_, schedule_on_data| {
             self.data.enter(called_from, |_, called_from_data| {
                 // If the other app shared a buffer with us, make
@@ -110,20 +131,22 @@ impl<const NUM_PROCS: u8> SyscallDriver for IPC<NUM_PROCS> {
     /// upcall or as returned by allow.
     ///
     /// Returns INVAL if the other process doesn't exist.
-
+    ///
     /// Initiates a service discovery or notifies a client or service.
     ///
     /// ### `command_num`
     ///
     /// - `0`: Driver existence check, always returns Ok(())
-    /// - `1`: Perform discovery on the package name passed to `allow_readonly`. Returns the
-    ///        service descriptor if the service is found, otherwise returns an error.
-    /// - `2`: Notify a service previously discovered to have the service descriptor in
-    ///        `target_id`. Returns an error if `target_id` refers to an invalid service or the
-    ///        notify fails to enqueue.
-    /// - `3`: Notify a client with descriptor `target_id`, typically in response to a previous
-    ///        notify from the client. Returns an error if `target_id` refers to an invalid client
-    ///        or the notify fails to enqueue.
+    /// - `1`: Perform discovery on the package name passed to `allow_readonly`.
+    ///   Returns the service descriptor if the service is found, otherwise
+    ///   returns an error.
+    /// - `2`: Notify a service previously discovered to have the service
+    ///   descriptor in `target_id`. Returns an error if `target_id` refers to
+    ///   an invalid service or the notify fails to enqueue.
+    /// - `3`: Notify a client with descriptor `target_id`, typically in
+    ///   response to a previous notify from the client. Returns an error if
+    ///   `target_id` refers to an invalid client or the notify fails to
+    ///   enqueue.
     fn command(
         &self,
         command_number: usize,

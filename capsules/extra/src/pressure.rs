@@ -42,7 +42,7 @@
 //!
 //! You need a device that provides the `hil::sensors::PressureDriver` trait.
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let pressure = static_init!(
@@ -81,8 +81,8 @@ impl<'a, T: hil::sensors::PressureDriver<'a>> PressureSensor<'a, T> {
         apps: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<0>>,
     ) -> PressureSensor<'a, T> {
         PressureSensor {
-            driver: driver,
-            apps: apps,
+            driver,
+            apps,
             busy: Cell::new(false),
         }
     }
@@ -124,7 +124,7 @@ impl<'a, T: hil::sensors::PressureDriver<'a>> hil::sensors::PressureClient
                         ),
                         Err(err) => (kernel::errorcode::into_statuscode(Err(err)), 0, 0),
                     };
-                    upcalls.schedule_upcall(0, result).ok();
+                    let _ = upcalls.schedule_upcall(0, result);
                 }
             })
         }

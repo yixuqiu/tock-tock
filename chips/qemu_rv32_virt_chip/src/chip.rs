@@ -13,7 +13,7 @@ use kernel::platform::chip::{Chip, InterruptService};
 
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
 
-use rv32i::csr::{mcause, mie::mie, mip::mip, CSR};
+use rv32i::csr::{CSR, mcause, mie::mie, mip::mip};
 
 use crate::plic::PLIC;
 use sifive::plic::Plic;
@@ -38,14 +38,15 @@ pub struct QemuRv32VirtChip<'a, I: InterruptService + 'a> {
 }
 
 pub struct QemuRv32VirtDefaultPeripherals<'a> {
-    pub uart0: crate::uart::Uart16550<'a>,
+    pub uart0: qemu_virt_chip::uart::Uart16550<'a>,
     pub virtio_mmio: [VirtIOMMIODevice; 8],
+    pub pflash: crate::pflash::Pflash0<'a>,
 }
 
-impl<'a> QemuRv32VirtDefaultPeripherals<'a> {
+impl QemuRv32VirtDefaultPeripherals<'_> {
     pub fn new() -> Self {
         Self {
-            uart0: crate::uart::Uart16550::new(crate::uart::UART0_BASE),
+            uart0: qemu_virt_chip::uart::Uart16550::new(crate::uart::UART0_BASE),
             virtio_mmio: [
                 VirtIOMMIODevice::new(crate::virtio_mmio::VIRTIO_MMIO_0_BASE),
                 VirtIOMMIODevice::new(crate::virtio_mmio::VIRTIO_MMIO_1_BASE),
@@ -56,12 +57,17 @@ impl<'a> QemuRv32VirtDefaultPeripherals<'a> {
                 VirtIOMMIODevice::new(crate::virtio_mmio::VIRTIO_MMIO_6_BASE),
                 VirtIOMMIODevice::new(crate::virtio_mmio::VIRTIO_MMIO_7_BASE),
             ],
+            pflash: crate::pflash::Pflash0::new(crate::pflash::PFLASH0_BASE),
         }
+    }
+
+    pub fn init(&'static self) {
+        kernel::deferred_call::DeferredCallClient::register(&self.pflash);
     }
 }
 
-impl<'a> InterruptService for QemuRv32VirtDefaultPeripherals<'a> {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+impl InterruptService for QemuRv32VirtDefaultPeripherals<'_> {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
             interrupts::UART0 => self.uart0.handle_interrupt(),
             interrupts::VIRTIO_MMIO_0 => self.virtio_mmio[0].handle_interrupt(),
@@ -104,7 +110,7 @@ impl<'a, I: InterruptService + 'a> QemuRv32VirtChip<'a, I> {
             if !self.plic_interrupt_service.service_interrupt(interrupt) {
                 debug!("Pidx {}", interrupt);
             }
-            self.atomic(|| {
+            self.with_interrupts_disabled(|| {
                 self.plic.complete(interrupt);
             });
         }
@@ -114,6 +120,9 @@ impl<'a, I: InterruptService + 'a> QemuRv32VirtChip<'a, I> {
 impl<'a, I: InterruptService + 'a> Chip for QemuRv32VirtChip<'a, I> {
     type MPU = QemuRv32VirtPMP;
     type UserspaceKernelBoundary = rv32i::syscall::SysCall;
+    type ThreadIdProvider = rv32i::thread_id::RiscvThreadIdProvider;
+
+    fn init() {}
 
     fn mpu(&self) -> &Self::MPU {
         &self.pmp
@@ -166,16 +175,18 @@ impl<'a, I: InterruptService + 'a> Chip for QemuRv32VirtChip<'a, I> {
         }
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        rv32i::support::atomic(f)
+        rv32i::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, writer: &mut dyn Write) {
+    unsafe fn print_state(this: Option<&Self>, writer: &mut dyn Write) {
         rv32i::print_riscv_state(writer);
-        let _ = writer.write_fmt(format_args!("{}", self.pmp.pmp));
+        if let Some(t) = this {
+            let _ = writer.write_fmt(format_args!("{}", t.pmp.pmp));
+        }
     }
 }
 
@@ -228,12 +239,12 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             // Once claimed this interrupt won't fire until it's completed
             // NOTE: The interrupt is no longer pending in the PLIC
             loop {
-                let interrupt = PLIC.next_pending();
+                let interrupt = (*addr_of!(PLIC)).next_pending();
 
                 match interrupt {
                     Some(irq) => {
                         // Safe as interrupts are disabled
-                        PLIC.save_interrupt(irq);
+                        (*addr_of!(PLIC)).save_interrupt(irq);
                     }
                     None => {
                         // Enable generic interrupts
@@ -245,7 +256,7 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
             }
         }
 
-        mcause::Interrupt::Unknown => {
+        mcause::Interrupt::Unknown(_) => {
             panic!("interrupt of unknown cause");
         }
     }
@@ -255,7 +266,7 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
 ///
 /// For the qemu-system-riscv32 virt machine this gets called when an
 /// interrupt occurs while the chip is in kernel mode.
-#[export_name = "_start_trap_rust_from_kernel"]
+#[export_name = "start_trap_rust_from_kernel"]
 pub unsafe extern "C" fn start_trap_rust() {
     match mcause::Trap::from(CSR.mcause.extract()) {
         mcause::Trap::Interrupt(interrupt) => {
@@ -268,6 +279,7 @@ pub unsafe extern "C" fn start_trap_rust() {
 }
 
 /// Function that gets called if an interrupt occurs while an app was running.
+///
 /// mcause is passed in, and this function should correctly handle disabling the
 /// interrupt that fired so that it does not trigger again.
 #[export_name = "_disable_interrupt_trap_rust_from_app"]
@@ -281,3 +293,16 @@ pub unsafe extern "C" fn disable_interrupt_trap_handler(mcause_val: u32) {
         }
     }
 }
+
+/// Array used to track the "trap handler active" state per hart.
+///
+/// The `riscv` crate requires chip crates to allocate an array to
+/// track whether any given hart is currently in a trap handler. The
+/// array must be zero-initialized.
+///
+/// While the QEMU rv32 virt target supports multiple harts, Tock
+/// currently always runs on the first hart, with ID zero. Hence, we
+/// allocate an array of `usizes` with length one for this purpose,
+/// intialized to zero:
+#[export_name = "_trap_handler_active"]
+static mut TRAP_HANDLER_ACTIVE: [usize; 1] = [0; 1];

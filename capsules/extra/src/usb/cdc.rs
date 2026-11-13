@@ -18,6 +18,7 @@ use super::descriptors::InterfaceDescriptor;
 use super::descriptors::TransferDirection;
 use super::usbc_client_ctrl::ClientCtrl;
 
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
 use kernel::hil::time::{Alarm, AlarmClient, ConvertTicks};
@@ -25,8 +26,8 @@ use kernel::hil::uart;
 use kernel::hil::usb::TransferType;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
-use kernel::utilities::cells::VolatileCell;
-use kernel::ErrorCode;
+use kernel::utilities::registers::InMemoryRegister;
+use kernel::utilities::registers::interfaces::{Readable, Writeable};
 
 /// Identifying number for the endpoint when transferring data from us to the
 /// host.
@@ -45,6 +46,7 @@ pub const MAX_CTRL_PACKET_SIZE_NRF52840: u8 = 64;
 /// Platform-specific packet length for the `earlgrey` USB hardware.
 pub const MAX_CTRL_PACKET_SIZE_EARLGREY: u8 = 64;
 /// Number of ms to buffer uart transmissions before beginning to drop them.
+///
 /// This is useful in that it allows users time to connect over CDC without losing message,
 /// while still guaranteeing that blocking uart transmissions eventually get a callback even
 /// if a debug output is not connected.
@@ -262,8 +264,8 @@ impl<'a, U: hil::usb::UsbController<'a>, A: 'a + Alarm<'a>> CdcAcm<'a, U, A> {
         let (device_descriptor_buffer, other_descriptor_buffer) =
             descriptors::create_descriptor_buffers(
                 descriptors::DeviceDescriptor {
-                    vendor_id: vendor_id,
-                    product_id: product_id,
+                    vendor_id,
+                    product_id,
                     manufacturer_string: 1,
                     product_string: 2,
                     serial_number_string: 3,
@@ -271,9 +273,7 @@ impl<'a, U: hil::usb::UsbController<'a>, A: 'a + Alarm<'a>> CdcAcm<'a, U, A> {
                     max_packet_size_ep0: max_ctrl_packet_size,
                     ..descriptors::DeviceDescriptor::default()
                 },
-                descriptors::ConfigurationDescriptor {
-                    ..descriptors::ConfigurationDescriptor::default()
-                },
+                descriptors::ConfigurationDescriptor::default(),
                 interfaces,
                 endpoints,
                 None, // No HID descriptor
@@ -320,7 +320,7 @@ impl<'a, U: hil::usb::UsbController<'a>, A: 'a + Alarm<'a>> CdcAcm<'a, U, A> {
     }
 
     #[inline]
-    fn buffer(&'a self, i: usize) -> &'a [VolatileCell<u8>; 64] {
+    fn buffer(&'a self, i: usize) -> &'a [InMemoryRegister<u8>; 64] {
         &self.buffers[i - 1].buf
     }
 
@@ -348,8 +348,8 @@ impl<'a, U: hil::usb::UsbController<'a>, A: 'a + Alarm<'a>> CdcAcm<'a, U, A> {
         match self.state.get() {
             State::Enumerated => {
                 self.state.set(State::Connecting {
-                    line_coding: line_coding,
-                    line_state: line_state,
+                    line_coding,
+                    line_state,
                 });
             }
             State::Connecting {
@@ -450,30 +450,27 @@ impl<'a, U: hil::usb::UsbController<'a>, A: 'a + Alarm<'a>> hil::usb::Client<'a>
     /// Handle a Control Out transaction
     fn ctrl_out(&'a self, endpoint: usize, packet_bytes: u32) -> hil::usb::CtrlOutResult {
         // Check what state our Ctrl endpoint is in.
-        match self.ctrl_state.get() {
-            CtrlState::SetLineCoding => {
-                // We got a Ctrl SET_LINE_CODING setup, now we are getting the data.
-                // We can parse the data we got.
-                descriptors::CdcAcmSetLineCodingData::get(&self.client_ctrl.ctrl_buffer.buf).map(
-                    |line_coding| {
-                        // If the device is configuring the baud rate to what we
-                        // expect, we continue with the connecting process.
-                        if line_coding.baud_rate == 115200 {
-                            self.set_connecting_state(true, false);
-                        }
+        if self.ctrl_state.get() == CtrlState::SetLineCoding {
+            // We got a Ctrl SET_LINE_CODING setup, now we are getting the data.
+            // We can parse the data we got.
+            descriptors::CdcAcmSetLineCodingData::get(&self.client_ctrl.ctrl_buffer.buf).map(
+                |line_coding| {
+                    // If the device is configuring the baud rate to what we
+                    // expect, we continue with the connecting process.
+                    if line_coding.baud_rate == 115200 {
+                        self.set_connecting_state(true, false);
+                    }
 
-                        // Check if the baud rate we got matches the special flag
-                        // value (1200 baud). If so, we run an optional function
-                        // provided when the CDC stack was configured.
-                        if line_coding.baud_rate == 1200 {
-                            self.host_initiated_function.map(|f| {
-                                f();
-                            });
-                        }
-                    },
-                );
-            }
-            _ => {}
+                    // Check if the baud rate we got matches the special flag
+                    // value (1200 baud). If so, we run an optional function
+                    // provided when the CDC stack was configured.
+                    if line_coding.baud_rate == 1200 {
+                        self.host_initiated_function.map(|f| {
+                            f();
+                        });
+                    }
+                },
+            );
         }
 
         self.client_ctrl.ctrl_out(endpoint, packet_bytes)
@@ -489,22 +486,20 @@ impl<'a, U: hil::usb::UsbController<'a>, A: 'a + Alarm<'a>> hil::usb::Client<'a>
 
         // Here we check to see if we just got connected to a CDC client. If so,
         // we do a delay before transmitting if needed.
-        match self.state.get() {
-            State::Connecting {
-                line_coding,
-                line_state,
-            } => {
-                if line_coding && line_state {
-                    self.state.set(State::ConnectingDelay);
+        if let State::Connecting {
+            line_coding,
+            line_state,
+        } = self.state.get()
+        {
+            if line_coding && line_state {
+                self.state.set(State::ConnectingDelay);
 
-                    // Wait a 100 ms before sending data.
-                    self.timeout_alarm.set_alarm(
-                        self.timeout_alarm.now(),
-                        self.timeout_alarm.ticks_from_ms(100),
-                    );
-                }
+                // Wait a 100 ms before sending data.
+                self.timeout_alarm.set_alarm(
+                    self.timeout_alarm.now(),
+                    self.timeout_alarm.ticks_from_ms(100),
+                );
             }
-            _ => {}
         }
 
         self.client_ctrl.ctrl_status_complete(endpoint)

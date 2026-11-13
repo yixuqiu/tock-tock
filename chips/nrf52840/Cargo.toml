@@ -9,6 +9,8 @@ authors.workspace = true
 edition.workspace = true
 
 [dependencies]
-cortexm4 = { path = "../../arch/cortex-m4" }
 kernel = { path = "../../kernel" }
 nrf52 = { path = "../nrf52" }
+
+[lints]
+workspace = true

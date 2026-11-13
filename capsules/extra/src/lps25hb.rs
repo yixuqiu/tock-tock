@@ -9,7 +9,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! let buffer = static_init!([u8; capsules::lps25hb::BUF_LEN], [0; capsules::lps25hb::BUF_LEN]);
 //! let lps25hb_i2c = static_init!(I2CDevice, I2CDevice::new(i2c_bus, 0x5C));
 //! let lps25hb = static_init!(
@@ -103,7 +103,7 @@ enum State {
 #[derive(Default)]
 pub struct App {}
 
-pub struct LPS25HB<'a, I: i2c::I2CDevice> {
+pub struct LPS25HB<'a, I: i2c::I2CDevice<'a>> {
     i2c: &'a I,
     interrupt_pin: &'a dyn gpio::InterruptPin<'a>,
     state: Cell<State>,
@@ -112,7 +112,7 @@ pub struct LPS25HB<'a, I: i2c::I2CDevice> {
     owning_process: OptionalCell<ProcessId>,
 }
 
-impl<'a, I: i2c::I2CDevice> LPS25HB<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> LPS25HB<'a, I> {
     pub fn new(
         i2c: &'a I,
         interrupt_pin: &'a dyn gpio::InterruptPin<'a>,
@@ -121,8 +121,8 @@ impl<'a, I: i2c::I2CDevice> LPS25HB<'a, I> {
     ) -> Self {
         // setup and return struct
         Self {
-            i2c: i2c,
-            interrupt_pin: interrupt_pin,
+            i2c,
+            interrupt_pin,
             state: Cell::new(State::Idle),
             buffer: TakeCell::new(buffer),
             apps,
@@ -175,14 +175,14 @@ impl<'a, I: i2c::I2CDevice> LPS25HB<'a, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> i2c::I2CClient for LPS25HB<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> i2c::I2CClient for LPS25HB<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         if status != Ok(()) {
             self.state.set(State::Idle);
             self.buffer.replace(buffer);
             self.owning_process.map(|pid| {
                 let _ = self.apps.enter(pid, |_app, upcalls| {
-                    upcalls.schedule_upcall(0, (0, 0, 0)).ok();
+                    let _ = upcalls.schedule_upcall(0, (0, 0, 0));
                 });
             });
             return;
@@ -208,9 +208,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for LPS25HB<'_, I> {
                     self.buffer.replace(buffer);
                     self.owning_process.map(|pid| {
                         let _ = self.apps.enter(pid, |_app, upcalls| {
-                            upcalls
-                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0))
-                                .ok();
+                            let _ = upcalls
+                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0));
                         });
                     });
                 } else {
@@ -223,9 +222,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for LPS25HB<'_, I> {
                     self.buffer.replace(buffer);
                     self.owning_process.map(|pid| {
                         let _ = self.apps.enter(pid, |_app, upcalls| {
-                            upcalls
-                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0))
-                                .ok();
+                            let _ = upcalls
+                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0));
                         });
                     });
                 } else {
@@ -242,9 +240,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for LPS25HB<'_, I> {
                     self.buffer.replace(buffer);
                     self.owning_process.map(|pid| {
                         let _ = self.apps.enter(pid, |_app, upcalls| {
-                            upcalls
-                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0))
-                                .ok();
+                            let _ = upcalls
+                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0));
                         });
                     });
                 } else {
@@ -257,9 +254,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for LPS25HB<'_, I> {
                     self.buffer.replace(buffer);
                     self.owning_process.map(|pid| {
                         let _ = self.apps.enter(pid, |_app, upcalls| {
-                            upcalls
-                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0))
-                                .ok();
+                            let _ = upcalls
+                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0));
                         });
                     });
                 } else {
@@ -275,9 +271,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for LPS25HB<'_, I> {
 
                 self.owning_process.map(|pid| {
                     let _ = self.apps.enter(pid, |_app, upcalls| {
-                        upcalls
-                            .schedule_upcall(0, (pressure_ubar as usize, 0, 0))
-                            .ok();
+                        let _ = upcalls.schedule_upcall(0, (pressure_ubar as usize, 0, 0));
                     });
                 });
 
@@ -289,9 +283,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for LPS25HB<'_, I> {
                     self.buffer.replace(buffer);
                     self.owning_process.map(|pid| {
                         let _ = self.apps.enter(pid, |_app, upcalls| {
-                            upcalls
-                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0))
-                                .ok();
+                            let _ = upcalls
+                                .schedule_upcall(0, (into_statuscode(Err(error.into())), 0, 0));
                         });
                     });
                 } else {
@@ -309,7 +302,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for LPS25HB<'_, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> gpio::Client for LPS25HB<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> gpio::Client for LPS25HB<'a, I> {
     fn fired(&self) {
         self.buffer.take().map(|buf| {
             // turn on i2c to send commands
@@ -328,7 +321,7 @@ impl<I: i2c::I2CDevice> gpio::Client for LPS25HB<'_, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> SyscallDriver for LPS25HB<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> SyscallDriver for LPS25HB<'a, I> {
     fn command(
         &self,
         command_num: usize,

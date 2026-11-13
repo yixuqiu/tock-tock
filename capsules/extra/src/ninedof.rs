@@ -9,7 +9,7 @@
 //!
 //! You need a device that provides the `hil::sensors::NineDof` trait.
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::{hil, static_init};
 //!
 //! let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
@@ -68,7 +68,7 @@ impl<'a> NineDof<'a> {
         grant: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<0>>,
     ) -> NineDof<'a> {
         NineDof {
-            drivers: drivers,
+            drivers,
             apps: grant,
             current_app: OptionalCell::empty(),
         }
@@ -87,6 +87,8 @@ impl<'a> NineDof<'a> {
             .enter(processid, |app, _| {
                 if self.current_app.is_none() {
                     self.current_app.set(processid);
+                    app.command = command;
+                    app.arg1 = arg1;
                     let value = self.call_driver(command, arg1);
                     if value != Ok(()) {
                         self.current_app.clear();
@@ -158,7 +160,7 @@ impl hil::sensors::NineDofClient for NineDof<'_> {
                 app.pending_command = false;
                 finished_command = app.command;
                 finished_command_arg = app.arg1;
-                upcalls.schedule_upcall(0, (arg1, arg2, arg3)).ok();
+                let _ = upcalls.schedule_upcall(0, (arg1, arg2, arg3));
             });
         });
 
@@ -173,12 +175,17 @@ impl hil::sensors::NineDofClient for NineDof<'_> {
                     // Don't bother re-issuing this command, just use
                     // the existing result.
                     app.pending_command = false;
-                    upcalls.schedule_upcall(0, (arg1, arg2, arg3)).ok();
+                    let _ = upcalls.schedule_upcall(0, (arg1, arg2, arg3));
                     false
                 } else if app.pending_command {
                     app.pending_command = false;
-                    self.current_app.set(processid);
-                    self.call_driver(app.command, app.arg1) == Ok(())
+                    let result = self.call_driver(app.command, app.arg1);
+                    if result == Ok(()) {
+                        self.current_app.set(processid);
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }

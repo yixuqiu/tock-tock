@@ -7,11 +7,11 @@ use crate::resets;
 use core::cell::Cell;
 use kernel::debug;
 use kernel::hil;
-use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::LocalRegisterCopy;
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::cells::{OptionalCell, TakeCell};
+use kernel::utilities::registers::LocalRegisterCopy;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
 // NOTE:
 //
@@ -244,8 +244,8 @@ enum State {
 pub struct I2c<'a, 'c> {
     instance_num: u8,
     registers: StaticRef<I2cRegisters>,
-    clocks: OptionalCell<&'a clocks::Clocks>,
-    resets: OptionalCell<&'a resets::Resets>,
+    clocks: &'a clocks::Clocks,
+    resets: &'a resets::Resets,
 
     client: OptionalCell<&'c dyn hil::i2c::I2CHwMasterClient>,
     buf: TakeCell<'static, [u8]>,
@@ -259,13 +259,13 @@ pub struct I2c<'a, 'c> {
     abort_reason: OptionalCell<LocalRegisterCopy<u32, IC_TX_ABRT_SOURCE::Register>>,
 }
 
-impl<'a, 'c> I2c<'a, 'c> {
-    fn new(instance_num: u8) -> Self {
+impl<'a> I2c<'a, '_> {
+    fn new(instance_num: u8, clocks: &'a clocks::Clocks, resets: &'a resets::Resets) -> Self {
         Self {
             instance_num,
             registers: INSTANCES[instance_num as usize],
-            clocks: OptionalCell::empty(),
-            resets: OptionalCell::empty(),
+            clocks,
+            resets,
 
             client: OptionalCell::empty(),
             buf: TakeCell::empty(),
@@ -280,39 +280,28 @@ impl<'a, 'c> I2c<'a, 'c> {
         }
     }
 
-    pub fn new_i2c0() -> Self {
-        I2c::new(0)
+    pub fn new_i2c0(clocks: &'a clocks::Clocks, resets: &'a resets::Resets) -> Self {
+        I2c::new(0, clocks, resets)
     }
 
-    pub fn new_i2c1() -> Self {
-        I2c::new(1)
-    }
-
-    pub fn resolve_dependencies(&self, clocks: &'a clocks::Clocks, resets: &'a resets::Resets) {
-        self.clocks.set(clocks);
-        self.resets.set(resets);
+    pub fn new_i2c1(clocks: &'a clocks::Clocks, resets: &'a resets::Resets) -> Self {
+        I2c::new(1, clocks, resets)
     }
 
     fn reset(&self) {
-        self.resets.map_or_else(
-            || panic!("You should call resolve_dependencies before reset."),
-            |resets| match self.instance_num {
-                0 => resets.reset(&[resets::Peripheral::I2c0]),
-                1 => resets.reset(&[resets::Peripheral::I2c1]),
-                _ => unreachable!(),
-            },
-        );
+        match self.instance_num {
+            0 => self.resets.reset(&[resets::Peripheral::I2c0]),
+            1 => self.resets.reset(&[resets::Peripheral::I2c1]),
+            _ => unreachable!(),
+        }
     }
 
     fn unreset(&self) {
-        self.resets.map_or_else(
-            || panic!("You should call resolve_dependencies before unreset."),
-            |resets| match self.instance_num {
-                0 => resets.unreset(&[resets::Peripheral::I2c0], true),
-                1 => resets.unreset(&[resets::Peripheral::I2c1], true),
-                _ => unreachable!(),
-            },
-        );
+        match self.instance_num {
+            0 => self.resets.unreset(&[resets::Peripheral::I2c0], true),
+            1 => self.resets.unreset(&[resets::Peripheral::I2c1], true),
+            _ => unreachable!(),
+        }
     }
 
     fn disable(&self) {
@@ -327,10 +316,7 @@ impl<'a, 'c> I2c<'a, 'c> {
         assert!(baudrate != 0);
 
         // I2C is synchronous design that runs from clk_sys
-        let freq_in = self
-            .clocks
-            .map(|clocks| clocks.get_frequency(clocks::Clock::System))
-            .unwrap(); // Unwrap fail = You should call resolve_dependencies before set_baudrate.
+        let freq_in = self.clocks.get_frequency(clocks::Clock::System);
 
         // TODO: as per the comments in the pico-sdk, this block is not 100% correct
         let period = (freq_in + baudrate / 2) / baudrate;
@@ -361,13 +347,9 @@ impl<'a, 'c> I2c<'a, 'c> {
         self.registers.ic_con.modify(IC_CON::SPEED::FAST);
         self.registers.ic_fs_scl_hcnt.set(hcnt);
         self.registers.ic_fs_scl_lcnt.set(lcnt);
-        self.registers.ic_fs_spklen.set({
-            if lcnt < 16 {
-                1
-            } else {
-                lcnt / 16
-            }
-        });
+        self.registers
+            .ic_fs_spklen
+            .set(if lcnt < 16 { 1 } else { lcnt / 16 });
         self.registers
             .ic_sda_hold
             .modify(IC_SDA_HOLD::IC_SDA_TX_HOLD.val(sda_tx_hold_count));
@@ -688,7 +670,7 @@ impl<'a, 'c> I2c<'a, 'c> {
     }
 }
 
-impl<'a, 'c> hil::i2c::I2CMaster<'c> for I2c<'a, 'c> {
+impl<'c> hil::i2c::I2CMaster<'c> for I2c<'_, 'c> {
     fn set_master_client(&self, client: &'c dyn hil::i2c::I2CHwMasterClient) {
         self.client.set(client);
     }

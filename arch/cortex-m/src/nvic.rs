@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-//! Cortex-M NVIC
+//! Cortex-M Nested Vectored Interrupt Controller (NVIC)
 //!
 //! Most NVIC configuration is in the NVIC registers:
 //! <https://developer.arm.com/docs/100165/0201/nested-vectored-interrupt-controller/nvic-programmers-model/table-of-nvic-registers>
@@ -14,30 +14,37 @@
 //! without a home, so we include it in the NVIC files as it's conceptually here.
 //! <https://developer.arm.com/docs/ddi0337/latest/nested-vectored-interrupt-controller/nvic-programmers-model/interrupt-controller-type-register-ictr>
 
-use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::{Readable, Writeable};
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
 /// Generates the (u128, u128) tuple used for the NVIC's mask functions
 /// `next_pending_with_mask` and `next_pending_with_mask`.
 ///
+/// ```rust,ignore
 /// if let Some(interrupt) =
 ///     cortexm0p::nvic::next_pending_with_mask(interrupt_mask!(interrupts::SIO_IRQ_PROC1))
 /// {
 ///     // ...
 /// }
+/// ```
 #[macro_export]
 macro_rules! interrupt_mask {
     ($($interrupt: expr),+) => {{
         let mut high_interrupt: u128 = 0;
         let mut low_interrupt: u128 = 0;
         $(
+            // Validate that the interrupt index is within the high and low
+            // interrupt range.
+            const{ assert!($interrupt < 256); }
+            const{ assert!($interrupt >= 0); }
+
             if ($interrupt < 128) {
-                low_interrupt |= (1 << $interrupt) as u128
+                low_interrupt |= (1u128 << $interrupt)
             }
             else
             {
-                high_interrupt |= (1 << ($interrupt-128)) as u128
+                high_interrupt |= (1u128 << ($interrupt-128))
             }
         );+
         (high_interrupt, low_interrupt)
@@ -115,29 +122,31 @@ register_bitfields![u32,
 const NVIC: StaticRef<NvicRegisters> =
     unsafe { StaticRef::new(0xe000e000 as *const NvicRegisters) };
 
-/// Number of valid NVIC_XXXX registers. Note this is a ceiling on the number
-/// of available interrupts (as this is the number of banks of 32), but the
-/// actual number may be less. See NVIC and ICTR documentation for more detail.
+/// Number of valid NVIC_XXXX registers.
+///
+/// Note this is a ceiling on the number of available interrupts (as this is the
+/// number of banks of 32), but the actual number may be less. See NVIC and ICTR
+/// documentation for more detail.
 fn number_of_nvic_registers() -> usize {
     (NVIC.ictr.read(InterruptControllerType::INTLINESNUM) + 1) as usize
 }
 
 /// Clear all pending interrupts
-pub unsafe fn clear_all_pending() {
+pub fn clear_all_pending() {
     for icpr in NVIC.icpr.iter().take(number_of_nvic_registers()) {
         icpr.set(!0)
     }
 }
 
 /// Enable all interrupts
-pub unsafe fn enable_all() {
+pub fn enable_all() {
     for icer in NVIC.iser.iter().take(number_of_nvic_registers()) {
         icer.set(!0)
     }
 }
 
 /// Disable all interrupts
-pub unsafe fn disable_all() {
+pub fn disable_all() {
     for icer in NVIC.icer.iter().take(number_of_nvic_registers()) {
         icer.set(!0)
     }
@@ -145,7 +154,7 @@ pub unsafe fn disable_all() {
 
 /// Get the index (0-240) the lowest number pending interrupt, or `None` if none
 /// are pending.
-pub unsafe fn next_pending() -> Option<u32> {
+pub fn next_pending() -> Option<u32> {
     for (block, ispr) in NVIC
         .ispr
         .iter()
@@ -164,14 +173,14 @@ pub unsafe fn next_pending() -> Option<u32> {
     None
 }
 
-/// Get the index (0-240) the lowest number pending interrupt while ignoring the interrupts
-/// that correspond to the bits set in mask, or `None` if none
-/// are pending.
+/// Get the index (0-240) the lowest number pending interrupt while ignoring the
+/// interrupts that correspond to the bits set in mask, or `None` if none are
+/// pending.
 ///
-/// Mask is defined as two u128 fields,
-///   mask.0 has the bits corresponding to interrupts from 128 to 240
-///   mask.1 has the bits corresponding to interrupts from 0 to 127
-pub unsafe fn next_pending_with_mask(mask: (u128, u128)) -> Option<u32> {
+/// Mask is defined as two `u128` fields,
+///   `mask.0` has the bits corresponding to interrupts from 128 to 240.
+///   `mask.1` has the bits corresponding to interrupts from 0 to 127.
+pub fn next_pending_with_mask(mask: (u128, u128)) -> Option<u32> {
     for (block, ispr) in NVIC
         .ispr
         .iter()
@@ -179,7 +188,7 @@ pub unsafe fn next_pending_with_mask(mask: (u128, u128)) -> Option<u32> {
         .enumerate()
     {
         let interrupt_mask = if block < 4 { mask.1 } else { mask.0 };
-        let ispr_masked = ispr.get() & !((interrupt_mask >> (32 * block % 4)) as u32);
+        let ispr_masked = ispr.get() & !((interrupt_mask >> (32 * (block % 4))) as u32);
 
         // If there are any high bits there is a pending interrupt
         if ispr_masked != 0 {
@@ -191,7 +200,7 @@ pub unsafe fn next_pending_with_mask(mask: (u128, u128)) -> Option<u32> {
     None
 }
 
-pub unsafe fn has_pending() -> bool {
+pub fn has_pending() -> bool {
     NVIC.ispr
         .iter()
         .take(number_of_nvic_registers())
@@ -202,17 +211,17 @@ pub unsafe fn has_pending() -> bool {
 /// Returns whether there are any pending interrupt bits set while ignoring
 /// the indices that correspond to the bits set in mask
 ///
-/// Mask is defined as two u128 fields,
-///   mask.0 has the bits corresponding to interrupts from 128 to 240
-///   mask.1 has the bits corresponding to interrupts from 0 to 127
-pub unsafe fn has_pending_with_mask(mask: (u128, u128)) -> bool {
+/// Mask is defined as two `u128` fields,
+///   `mask.0` has the bits corresponding to interrupts from 128 to 240.
+///   `mask.1` has the bits corresponding to interrupts from 0 to 127.
+pub fn has_pending_with_mask(mask: (u128, u128)) -> bool {
     NVIC.ispr
         .iter()
         .take(number_of_nvic_registers())
         .enumerate()
         .fold(0, |i, (block, ispr)| {
             let interrupt_mask = if block < 4 { mask.1 } else { mask.0 };
-            (ispr.get() & !((interrupt_mask >> (32 * block % 4)) as u32)) | i
+            (ispr.get() & !((interrupt_mask >> (32 * (block % 4))) as u32)) | i
         })
         != 0
 }
@@ -224,11 +233,8 @@ pub unsafe fn has_pending_with_mask(mask: (u128, u128)) -> bool {
 pub struct Nvic(u32);
 
 impl Nvic {
-    /// Creates a new `Nvic`
-    ///
-    /// Marked unsafe because only chip/platform configuration code should be
-    /// able to create these.
-    pub const unsafe fn new(idx: u32) -> Nvic {
+    /// Creates a new `Nvic`.
+    pub const fn new(idx: u32) -> Nvic {
         Nvic(idx)
     }
 

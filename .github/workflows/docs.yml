@@ -1,0 +1,92 @@
+# Licensed under the Apache License, Version 2.0 or the MIT License.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright Tock Contributors 2026.
+
+# Builds the merged rustdoc tree. If the push is to the `master` branch and this
+# build succeeds, publish the site to GitHub pages. Built docs are uploaded as
+# an artifact that can be downloaded and previewed locally.
+
+name: docs-ci
+
+env:
+  TERM: xterm # Makes tput work in actions output
+
+on:
+  push:
+    # Publish to production:
+    branches: [master]
+  # Build only:
+  pull_request:
+  # Build only:
+  merge_group:
+
+permissions:
+  contents: read
+
+# We impose concurrency limits for two reasons:
+#
+# - A newer push to a PR makes the old changes obsolete; we don't want to waste
+#   build minutes on that.
+#
+# - Pushes on master may race each other. We only build one at a time to ensure
+#   we deploy in the order of pushes, don't deploy an older version, and skip
+#   intermediate pushes when a newer version has landed.
+#
+# ┌────────────────┬──────────────────────────────────────────────────┬─────────────────────────────┐
+# │    trigger     │                    github.ref                    │       resulting group       │
+# ├────────────────┼──────────────────────────────────────────────────┼─────────────────────────────┤
+# │ PR (any push)  │ refs/pull/<N>/merge                              │ docs-ci-refs/pull/<N>/merge │
+# ├────────────────┼──────────────────────────────────────────────────┼─────────────────────────────┤
+# │ push to master │ refs/heads/master                                │ docs-ci-refs/heads/master   │
+# ├────────────────┼──────────────────────────────────────────────────┼─────────────────────────────┤
+# │ merge queue    │ refs/heads/gh-readonly-queue/master/pr-<N>-<sha> │ unique per queue entry      │
+# └────────────────┴──────────────────────────────────────────────────┴─────────────────────────────┘
+concurrency:
+  group: docs-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docs-build:
+    permissions:
+      contents: read
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Build the docs and ensure there are no warnings:
+      - name: ci-runner-docs
+        run: make ci-runner-docs
+
+      - name: Upload built docs as GH pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: doc/rustdoc/
+          # Keep artifacts around for three days, which serves as a poor man's
+          # deploy preview (we can later use a serverless function to serve
+          # these artifacts if we're so inclined).
+          retention-days: 3
+
+  docs-deploy:
+    needs: docs-build
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy-page.outputs.page_url }}
+
+    permissions:
+      pages: write
+      id-token: write
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # Pushes to master publish to GH pages:
+      - name: Deploy to GH pages
+        id: deploy-page
+        uses: actions/deploy-pages@v5

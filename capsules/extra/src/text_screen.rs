@@ -10,7 +10,7 @@
 //! You need a screen that provides the `hil::text_screen::TextScreen`
 //! trait.
 //!
-//! ```rust
+//! ```rust,ignore
 //! let text_screen = components::text_screen::TextScreenComponent::new(board_kernel, lcd)
 //!         .finalize(components::screen_buffer_size!(64));
 //! ```
@@ -85,7 +85,7 @@ impl<'a> TextScreen<'a> {
         grant: Grant<App, UpcallCount<1>, AllowRoCount<{ ro_allow::COUNT }>, AllowRwCount<0>>,
     ) -> TextScreen<'a> {
         TextScreen {
-            text_screen: text_screen,
+            text_screen,
             apps: grant,
             current_app: OptionalCell::empty(),
             buffer: TakeCell::new(buffer),
@@ -238,13 +238,13 @@ impl<'a> TextScreen<'a> {
         self.current_app.take().map(|processid| {
             let _ = self.apps.enter(processid, |app, kernel_data| {
                 app.pending_command = false;
-                kernel_data.schedule_upcall(0, (data1, data2, data3)).ok();
+                let _ = kernel_data.schedule_upcall(0, (data1, data2, data3));
             });
         });
     }
 }
 
-impl<'a> SyscallDriver for TextScreen<'a> {
+impl SyscallDriver for TextScreen<'_> {
     fn command(
         &self,
         command_num: usize,
@@ -287,7 +287,7 @@ impl<'a> SyscallDriver for TextScreen<'a> {
     }
 }
 
-impl<'a> hil::text_screen::TextScreenClient for TextScreen<'a> {
+impl hil::text_screen::TextScreenClient for TextScreen<'_> {
     fn command_complete(&self, r: Result<(), ErrorCode>) {
         self.schedule_callback(kernel::errorcode::into_statuscode(r), 0, 0);
         self.run_next_command();

@@ -10,7 +10,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::{capabilities, static_init};
 //!
 //! struct ProcessMgmtCap;
@@ -31,9 +31,9 @@
 //! sam4l::gpio::PA[16].set_client(debug_process_restart);
 //! ```
 
+use kernel::Kernel;
 use kernel::capabilities::ProcessManagementCapability;
 use kernel::hil::gpio;
-use kernel::Kernel;
 
 pub struct DebugProcessRestart<'a, C: ProcessManagementCapability> {
     kernel: &'static Kernel,
@@ -55,7 +55,7 @@ impl<'a, C: ProcessManagementCapability> DebugProcessRestart<'a, C> {
         pin.enable_interrupts(gpio::InterruptEdge::EitherEdge);
 
         DebugProcessRestart {
-            kernel: kernel,
+            kernel,
             capability: cap,
             pin,
             mode,

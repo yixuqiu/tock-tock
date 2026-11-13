@@ -1,0 +1,116 @@
+# Licensed under the Apache License, Version 2.0 or the MIT License.
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# Copyright Tock Contributors 2026.
+
+# This workflow runs the qemu-virt-ci-runner, which builds qemu_rv64_virt and
+# qemu_rv32_virt Tock kernels, installs libtock-c apps via tockloader, runs
+# each board inside qemu-system-riscv{64,32}, and verifies serial output and
+# screen state.
+
+name: qemu-virt-ci
+env:
+  TERM: xterm
+
+on:
+  push:
+    branches-ignore:
+    - "gh-readonly-queue/**"
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  qemu-virt-ci:
+    runs-on: ubuntu-latest
+    container:
+      # Need a version of debian that has (at least) GCC 15 for
+      # RISCV-64 support in libtock-c.
+      image: debian:forky-slim
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            curl \
+            git \
+            make \
+            build-essential \
+            gcc-riscv64-unknown-elf \
+            gcc-arm-none-eabi \
+            qemu-system-riscv \
+            qemu-system-arm \
+            python3-pip \
+            pipx \
+            bash \
+            wget \
+            file \
+            unzip \
+            xvfb \
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Checkout the current repository
+        uses: actions/checkout@v7
+
+      - name: Install elf2tab
+        run: cargo install elf2tab
+
+      - name: Install tockloader
+        shell: bash
+        run: |
+          pipx install tockloader
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Checkout libtock-c
+        uses: actions/checkout@v7
+        with:
+          repository: tock/libtock-c
+          path: libtock-c
+
+      - name: Build the qemu_rv64_virt-test-ci kernel
+        shell: bash
+        run: |
+          pushd boards/configurations/qemu_rv64_virt/qemu_rv64_virt-test-ci
+          make
+          make init
+          make install
+          popd
+
+      - name: Start virtual framebuffer
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Run qemu_rv64_virt-test-ci CI tests
+        shell: bash
+        # libtock-c is checked out inside the tock workspace in CI (GitHub
+        # Actions requires checkouts to be under the workspace root).
+        # ../../../libtock-c is relative to tools/ci/qemu-virt-ci-runner/,
+        # which is the working directory when cargo run executes.
+        run: make ci-job-qemu-virt QEMU_VIRT_ARGS="--board qemu_rv64_virt --libtock-c ../../../libtock-c"
+
+      - name: Run hifive1 QEMU CI tests
+        shell: bash
+        run: make ci-job-qemu-virt QEMU_VIRT_ARGS="--board hifive1 --libtock-c ../../../libtock-c"
+
+      - name: Run qemu-virt CI tests (rv32)
+        shell: bash
+        run: make ci-job-qemu-virt QEMU_VIRT_ARGS="--board qemu_rv32_virt --libtock-c ../../../libtock-c"
+
+      - name: Run an385 QEMU CI tests
+        shell: bash
+        run: make ci-job-qemu-virt QEMU_VIRT_ARGS="--board an385 --libtock-c ../../../libtock-c"
+
+      - name: Run an386 QEMU CI tests
+        shell: bash
+        run: make ci-job-qemu-virt QEMU_VIRT_ARGS="--board an386 --libtock-c ../../../libtock-c"
+
+      - name: Run earlgrey_cw310 QEMU CI tests
+        shell: bash
+        run: make ci-job-qemu-virt QEMU_VIRT_ARGS="--board earlgrey_cw310 --libtock-c ../../../libtock-c"

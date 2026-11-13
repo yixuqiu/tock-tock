@@ -27,34 +27,38 @@
 use crate::pm;
 use core::cell::Cell;
 use core::ops::{Index, IndexMut};
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
+};
 
-/// Struct of the FLASHCALW registers. Section 14.10 of the datasheet.
-#[repr(C)]
-struct FlashcalwRegisters {
-    fcr: ReadWrite<u32, FlashControl::Register>,
-    fcmd: ReadWrite<u32, FlashCommand::Register>,
-    fsr: ReadOnly<u32, FlashStatus::Register>,
-    fpr: ReadOnly<u32, FlashParameter::Register>,
-    fvr: ReadOnly<u32, FlashVersion::Register>,
-    fgpfrhi: ReadOnly<u32, FlashGeneralPurposeFuseHigh::Register>,
-    fgpfrlo: ReadOnly<u32, FlashGeneralPurposeFuseLow::Register>,
-    _reserved1: [u32; 251],
-    ctrl: WriteOnly<u32, PicoCacheControl::Register>,
-    sr: ReadWrite<u32, PicoCacheStatus::Register>,
-    _reserved2: [u32; 4],
-    maint0: WriteOnly<u32, PicoCacheMaintenance0::Register>,
-    maint1: WriteOnly<u32, PicoCacheMaintenance1::Register>,
-    mcfg: ReadWrite<u32, PicoCacheMonitorConfiguration::Register>,
-    men: ReadWrite<u32, PicoCacheMonitorEnable::Register>,
-    mctrl: WriteOnly<u32, PicoCacheMonitorStatus::Register>,
-    msr: ReadOnly<u32, PicoCacheMonitorStatus::Register>,
+register_structs! {
+    /// Struct of the FLASHCALW registers. Section 14.10 of the datasheet.
+    FlashcalwRegisters {
+        (0x000 => fcr: ReadWrite<u32, FlashControl::Register>),
+        (0x004 => fcmd: ReadWrite<u32, FlashCommand::Register>),
+        (0x008 => fsr: ReadOnly<u32, FlashStatus::Register>),
+        (0x00C => fpr: ReadOnly<u32, FlashParameter::Register>),
+        (0x010 => fvr: ReadOnly<u32, FlashVersion::Register>),
+        (0x014 => fgpfrhi: ReadOnly<u32, FlashGeneralPurposeFuseHigh::Register>),
+        (0x018 => fgpfrlo: ReadOnly<u32, FlashGeneralPurposeFuseLow::Register>),
+        (0x01C => _reserved1: [u32; 251]),
+        (0x408 => ctrl: WriteOnly<u32, PicoCacheControl::Register>),
+        (0x40C => sr: ReadWrite<u32, PicoCacheStatus::Register>),
+        (0x410 => _reserved2: [u32; 4]),
+        (0x420 => maint0: WriteOnly<u32, PicoCacheMaintenance0::Register>),
+        (0x424 => maint1: WriteOnly<u32, PicoCacheMaintenance1::Register>),
+        (0x428 => mcfg: ReadWrite<u32, PicoCacheMonitorConfiguration::Register>),
+        (0x42C => men: ReadWrite<u32, PicoCacheMonitorEnable::Register>),
+        (0x430 => mctrl: WriteOnly<u32, PicoCacheMonitorStatus::Register>),
+        (0x434 => msr: ReadOnly<u32, PicoCacheMonitorStatus::Register>),
+        (0x438 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -422,16 +426,6 @@ pub struct FLASHCALW {
 // Few constants relating to module configuration.
 const PAGE_SIZE: u32 = 512;
 
-#[cfg(CONFIG_FLASH_READ_MODE_HIGH_SPEED_DISABLE)]
-const FREQ_PS1_FWS_1_FWU_MAX_FREQ: u32 = 12000000;
-#[cfg(CONFIG_FLASH_READ_MODE_HIGH_SPEED_DISABLE)]
-const FREQ_PS0_FWS_0_MAX_FREQ: u32 = 18000000;
-#[cfg(CONFIG_FLASH_READ_MODE_HIGH_SPEED_DISABLE)]
-const FREQ_PS0_FWS_1_MAX_FREQ: u32 = 36000000;
-#[cfg(CONFIG_FLASH_READ_MODE_HIGH_SPEED_DISABLE)]
-const FREQ_PS1_FWS_0_MAX_FREQ: u32 = 8000000;
-
-#[cfg(not(CONFIG_FLASH_READ_MODE_HIGH_SPEED_DISABLE))]
 const FREQ_PS2_FWS_0_MAX_FREQ: u32 = 24000000;
 
 impl FLASHCALW {
@@ -449,7 +443,6 @@ impl FLASHCALW {
     }
 
     /// Cache controlling functionality.
-
     //  Flush the cache. Should be called after every write!
     fn invalidate_cache(&self) {
         self.registers
@@ -526,8 +519,7 @@ impl FLASHCALW {
                 });
             }
             FlashState::WriteUnlocking { page } => {
-                self.current_state
-                    .set(FlashState::WriteErasing { page: page });
+                self.current_state.set(FlashState::WriteErasing { page });
                 self.flashcalw_erase_page(page);
             }
             FlashState::WriteErasing { page } => {
@@ -597,7 +589,6 @@ impl FLASHCALW {
 
     //  By default, we are going with High Speed Enable (based on our device running
     //  in PS2).
-    #[cfg(not(CONFIG_FLASH_READ_MODE_HIGH_SPEED_DISABLE))]
     fn set_flash_waitstate_and_readmode(&self, cpu_freq: u32, _ps_val: u32, _is_fwu_enabled: bool) {
         // ps_val and is_fwu_enabled not used in this implementation.
         if cpu_freq > FREQ_PS2_FWS_0_MAX_FREQ {
@@ -607,41 +598,6 @@ impl FLASHCALW {
         }
 
         self.issue_command(FlashCMD::HSEN, -1);
-    }
-
-    #[cfg(CONFIG_FLASH_READ_MODE_HIGH_SPEED_DISABLE)]
-    fn set_flash_waitstate_and_readmode(
-        &mut self,
-        cpu_freq: u32,
-        ps_val: u32,
-        is_fwu_enabled: bool,
-    ) {
-        if ps_val == 0 {
-            if cpu_freq > FREQ_PS0_FWS_0_MAX_FREQ {
-                self.set_wait_state(1);
-                if cpu_freq <= FREQ_PS0_FWS_1_MAX_FREQ {
-                    self.issue_command(FlashCMD::HSDIS, -1);
-                } else {
-                    self.issue_command(FlashCMD::HSEN, -1);
-                }
-            } else {
-                if is_fwu_enabled && cpu_freq <= FREQ_PS1_FWS_1_FWU_MAX_FREQ {
-                    self.set_wait_state(1);
-                    self.issue_command(FlashCMD::HSDIS, -1);
-                } else {
-                    self.set_wait_state(0);
-                    self.issue_command(FlashCMD::HSDIS, -1);
-                }
-            }
-        } else {
-            // ps_val == 1
-            if cpu_freq > FREQ_PS1_FWS_0_MAX_FREQ {
-                self.set_wait_state(1);
-            } else {
-                self.set_wait_state(0);
-            }
-            self.issue_command(FlashCMD::HSDIS, -1);
-        }
     }
 
     /// Configure high-speed flash mode. This is taken from the ASF code
@@ -762,13 +718,13 @@ impl FLASHCALW {
         // Errata 45.1.7 - Need to write a 64-bit all one word for every write
         // to the page buffer.
         let cleared_double_word: [u8; 8] = [255; 8];
-        let clr_ptr: *const u8 = &cleared_double_word[0] as *const u8;
+        let clr_ptr: *const u8 = core::ptr::from_ref::<u8>(&cleared_double_word[0]);
 
         self.buffer.map(|buffer| {
             unsafe {
                 use core::ptr;
 
-                let mut start_buffer: *const u8 = &buffer[0] as *const u8;
+                let mut start_buffer: *const u8 = core::ptr::from_ref::<u8>(&buffer[0]);
                 let mut data_transfered: u32 = 0;
                 while data_transfered < PAGE_SIZE {
                     // errata copy..
@@ -776,8 +732,8 @@ impl FLASHCALW {
 
                     // real copy
                     ptr::copy(start_buffer, page_buffer, 8);
-                    page_buffer = page_buffer.offset(8);
-                    start_buffer = start_buffer.offset(8);
+                    page_buffer = page_buffer.add(8);
+                    start_buffer = start_buffer.add(8);
                     data_transfered += 8;
                 }
             }
@@ -830,12 +786,10 @@ impl FLASHCALW {
         pm::enable_clock(self.ahb_clock);
 
         // Check that address makes sense and buffer has room.
-        if address > (self.get_flash_size() as usize)
-            || address + size > (self.get_flash_size() as usize)
-            || address + size < size
-            || buffer.len() < size
-        {
-            // invalid flash address
+        let Some(end_address) = address.checked_add(size) else {
+            return Err((ErrorCode::INVAL, buffer));
+        };
+        if end_address > (self.get_flash_size() as usize) || buffer.len() < size {
             return Err((ErrorCode::INVAL, buffer));
         }
 
@@ -844,7 +798,7 @@ impl FLASHCALW {
         unsafe {
             for i in 0..size {
                 buffer[i] = *byte;
-                byte = byte.offset(1);
+                byte = byte.add(1);
             }
         }
 

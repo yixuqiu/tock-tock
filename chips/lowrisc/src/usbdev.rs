@@ -10,12 +10,13 @@
 use core::cell::Cell;
 use kernel::hil;
 use kernel::hil::usb::TransferType;
-use kernel::utilities::cells::{OptionalCell, VolatileCell};
+use kernel::utilities::StaticRef;
+use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, register_structs, LocalRegisterCopy, ReadOnly, ReadWrite, WriteOnly,
+    InMemoryRegister, LocalRegisterCopy, ReadOnly, ReadWrite, WriteOnly, register_bitfields,
+    register_structs,
 };
-use kernel::utilities::StaticRef;
 
 pub const N_ENDPOINTS: usize = 12;
 pub const N_BUFFERS: usize = 32;
@@ -208,40 +209,6 @@ register_bitfields![u64,
     ]
 ];
 
-enum SetupRequest {
-    GetStatus = 0,
-    ClearFeature = 1,
-    SetFeature = 3,
-    SetAddress = 5,
-    GetDescriptor = 6,
-    SetDescriptor = 7,
-    GetConfiguration = 8,
-    SetConfiguration = 9,
-    GetInterface = 10,
-    SetInterface = 11,
-    SynchFrame = 12,
-    Unsupported = 100,
-}
-
-impl From<u32> for SetupRequest {
-    fn from(num: u32) -> Self {
-        match num {
-            0 => SetupRequest::GetStatus,
-            1 => SetupRequest::ClearFeature,
-            3 => SetupRequest::SetFeature,
-            5 => SetupRequest::SetAddress,
-            6 => SetupRequest::GetDescriptor,
-            7 => SetupRequest::SetDescriptor,
-            8 => SetupRequest::GetConfiguration,
-            9 => SetupRequest::SetConfiguration,
-            10 => SetupRequest::GetInterface,
-            11 => SetupRequest::SetInterface,
-            12 => SetupRequest::SynchFrame,
-            _ => SetupRequest::Unsupported,
-        }
-    }
-}
-
 /// State of the control endpoint (endpoint 0).
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum CtrlState {
@@ -339,8 +306,8 @@ impl From<BankIndex> for usize {
 
 #[repr(C)]
 pub struct Endpoint<'a> {
-    slice_in: OptionalCell<&'a [VolatileCell<u8>]>,
-    slice_out: OptionalCell<&'a [VolatileCell<u8>]>,
+    slice_in: OptionalCell<&'a [InMemoryRegister<u8>]>,
+    slice_out: OptionalCell<&'a [InMemoryRegister<u8>]>,
     state: Cell<EndpointState>,
 
     _reserved: u32,
@@ -677,7 +644,7 @@ impl<'a> Usb<'a> {
                                             .state
                                             .set(EndpointState::Ctrl(CtrlState::Init));
                                     }
-                                };
+                                }
                             });
                         }
                     }
@@ -735,7 +702,7 @@ impl<'a> Usb<'a> {
                         }
 
                         hil::usb::OutResult::Error => unreachable!(),
-                    };
+                    }
                 }
             }
         });
@@ -806,7 +773,7 @@ impl<'a> Usb<'a> {
                                     }
                                     hil::usb::InResult::Delay => unimplemented!(),
                                     hil::usb::InResult::Error => unreachable!(),
-                                };
+                                }
                             });
                         }
                     },
@@ -843,28 +810,26 @@ impl<'a> Usb<'a> {
                             self.complete_ctrl_status();
                         }
                         CtrlState::WriteOut => {
-                            self.client.map(|client| {
-                                match client.ctrl_in(ep as usize) {
-                                    hil::usb::CtrlInResult::Packet(size, last) => {
-                                        if size == 0 {
-                                            panic!("Empty ctrl packet?");
-                                        }
-
-                                        self.copy_slice_out_to_hw(ep as usize, buf as usize, size);
-
-                                        if last {
-                                            self.descriptors[ep as usize]
-                                                .state
-                                                .set(EndpointState::Ctrl(CtrlState::ReadStatus));
-                                        } else {
-                                            self.descriptors[ep as usize]
-                                                .state
-                                                .set(EndpointState::Ctrl(CtrlState::WriteOut));
-                                        }
+                            self.client.map(|client| match client.ctrl_in(ep as usize) {
+                                hil::usb::CtrlInResult::Packet(size, last) => {
+                                    if size == 0 {
+                                        panic!("Empty ctrl packet?");
                                     }
-                                    hil::usb::CtrlInResult::Delay => unimplemented!(),
-                                    hil::usb::CtrlInResult::Error => unreachable!(),
-                                };
+
+                                    self.copy_slice_out_to_hw(ep as usize, buf as usize, size);
+
+                                    if last {
+                                        self.descriptors[ep as usize]
+                                            .state
+                                            .set(EndpointState::Ctrl(CtrlState::ReadStatus));
+                                    } else {
+                                        self.descriptors[ep as usize]
+                                            .state
+                                            .set(EndpointState::Ctrl(CtrlState::WriteOut));
+                                    }
+                                }
+                                hil::usb::CtrlInResult::Delay => unimplemented!(),
+                                hil::usb::CtrlInResult::Error => unreachable!(),
                             });
                         }
                         CtrlState::SetAddress => {
@@ -950,11 +915,11 @@ impl<'a> Usb<'a> {
                         EndpointState::Disabled => unreachable!(),
                         EndpointState::Ctrl(_state) => unreachable!(),
                         EndpointState::Bulk(_in_state, _out_state) => {
-                            if buf_id.is_some() {
-                                self.copy_slice_out_to_hw(ep, buf_id.unwrap(), size)
+                            if let Some(buf) = buf_id {
+                                self.copy_slice_out_to_hw(ep, buf, size)
                             } else {
                                 panic!("No free bufs");
-                            };
+                            }
                             EndpointState::Bulk(Some(BulkInState::In(size)), None)
                         }
                         EndpointState::Iso => unreachable!(),
@@ -1001,7 +966,7 @@ impl<'a> Usb<'a> {
 
     /// Provide a buffer for transfers in and out of the given endpoint
     /// (The controller need not be enabled before calling this method.)
-    fn endpoint_bank_set_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_bank_set_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         self.descriptors[endpoint].slice_in.set(buf);
         self.descriptors[endpoint].slice_out.set(buf);
     }
@@ -1012,15 +977,15 @@ impl<'a> hil::usb::UsbController<'a> for Usb<'a> {
         self.client.set(client);
     }
 
-    fn endpoint_set_ctrl_buffer(&self, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_ctrl_buffer(&self, buf: &'a [InMemoryRegister<u8>]) {
         self.endpoint_bank_set_buffer(0, buf);
     }
 
-    fn endpoint_set_in_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_in_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         self.endpoint_bank_set_buffer(endpoint, buf);
     }
 
-    fn endpoint_set_out_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_out_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         self.endpoint_bank_set_buffer(endpoint, buf);
     }
 
@@ -1035,7 +1000,7 @@ impl<'a> hil::usb::UsbController<'a> for Usb<'a> {
                 );
 
                 self.set_state(State::Idle(Mode::Device {
-                    speed: speed,
+                    speed,
                     config: DeviceConfig::default(),
                 }))
             }
@@ -1104,7 +1069,7 @@ impl<'a> hil::usb::UsbController<'a> for Usb<'a> {
                 self.registers.in_iso.set(1 << endpoint);
                 self.descriptors[endpoint].state.set(EndpointState::Iso);
             }
-        };
+        }
     }
 
     fn endpoint_out_enable(&self, transfer_type: TransferType, endpoint: usize) {
@@ -1149,15 +1114,12 @@ impl<'a> hil::usb::UsbController<'a> for Usb<'a> {
                 self.registers.out_iso.set(1 << endpoint);
                 self.descriptors[endpoint].state.set(EndpointState::Iso);
             }
-        };
+        }
     }
 
     fn endpoint_in_out_enable(&self, transfer_type: TransferType, endpoint: usize) {
-        match transfer_type {
-            TransferType::Bulk => {
-                panic!("IN/OUT Bulk transfer is unsupported ");
-            }
-            _ => {}
+        if let TransferType::Bulk = transfer_type {
+            panic!("IN/OUT Bulk transfer is unsupported ");
         }
         self.endpoint_out_enable(transfer_type, endpoint)
     }

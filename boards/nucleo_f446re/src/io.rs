@@ -4,19 +4,16 @@
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::addr_of_mut;
 
 use kernel::debug;
-use kernel::debug::IoWrite;
 use kernel::hil::led;
 use kernel::hil::uart;
 use kernel::hil::uart::Configure;
+use kernel::utilities::io_write::IoWrite;
 
+use stm32f446re::chip_specs::Stm32f446Specs;
 use stm32f446re::gpio::PinId;
-
-use crate::CHIP;
-use crate::PROCESSES;
-use crate::PROCESS_PRINTER;
 
 /// Writer is used by kernel::debug to panic message to the serial port.
 pub struct Writer {
@@ -44,7 +41,9 @@ impl Write for Writer {
 impl IoWrite for Writer {
     fn write(&mut self, buf: &[u8]) -> usize {
         let rcc = stm32f446re::rcc::Rcc::new();
-        let uart = stm32f446re::usart::Usart::new_usart2(&rcc);
+        let clocks: stm32f446re::clocks::Clocks<Stm32f446Specs> =
+            stm32f446re::clocks::Clocks::new(&rcc);
+        let uart = stm32f446re::usart::Usart::new_usart2(&clocks);
 
         if !self.initialized {
             self.initialized = true;
@@ -66,28 +65,29 @@ impl IoWrite for Writer {
 }
 
 /// Panic handler.
-#[no_mangle]
 #[panic_handler]
-pub unsafe fn panic_fmt(info: &PanicInfo) -> ! {
+pub fn panic_fmt(info: &PanicInfo) -> ! {
     // User LD2 is connected to PA05
     // Have to reinitialize several peripherals because otherwise can't access them here.
     let rcc = stm32f446re::rcc::Rcc::new();
-    let syscfg = stm32f446re::syscfg::Syscfg::new(&rcc);
+    let clocks: stm32f446re::clocks::Clocks<Stm32f446Specs> =
+        stm32f446re::clocks::Clocks::new(&rcc);
+    let syscfg = stm32f446re::syscfg::Syscfg::new(&clocks);
     let exti = stm32f446re::exti::Exti::new(&syscfg);
     let pin = stm32f446re::gpio::Pin::new(PinId::PA05, &exti);
-    let gpio_ports = stm32f446re::gpio::GpioPorts::new(&rcc, &exti);
+    let gpio_ports = stm32f446re::gpio::GpioPorts::new(&clocks, &exti);
     pin.set_ports_ref(&gpio_ports);
     let led = &mut led::LedHigh::new(&pin);
 
-    let writer = &mut *addr_of_mut!(WRITER);
+    let writer = unsafe { &mut *addr_of_mut!(WRITER) };
 
-    debug::panic(
-        &mut [led],
-        writer,
-        info,
-        &cortexm4::support::nop,
-        &*addr_of!(PROCESSES),
-        &*addr_of!(CHIP),
-        &*addr_of!(PROCESS_PRINTER),
-    )
+    unsafe {
+        debug::panic_old(
+            &mut [led],
+            writer,
+            info,
+            &cortexm4::support::nop,
+            crate::PANIC_RESOURCES.get(),
+        )
+    }
 }

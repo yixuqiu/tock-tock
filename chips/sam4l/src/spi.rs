@@ -16,37 +16,42 @@ use crate::dma::DMAPeripheral;
 use crate::pm;
 use core::cell::Cell;
 use core::cmp;
+use kernel::ErrorCode;
 use kernel::hil::spi;
 use kernel::hil::spi::ClockPhase;
 use kernel::hil::spi::ClockPolarity;
 use kernel::hil::spi::SpiMasterClient;
 use kernel::hil::spi::SpiSlaveClient;
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
+use kernel::utilities::leasable_buffer::SubSliceMut;
 use kernel::utilities::peripheral_management::{PeripheralManagement, PeripheralManager};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{self, register_bitfields, ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{
+    self, ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
+};
 
-#[repr(C)]
-pub struct SpiRegisters {
-    cr: WriteOnly<u32, Control::Register>,
-    mr: ReadWrite<u32, Mode::Register>,
-    rdr: ReadOnly<u32>,
-    tdr: WriteOnly<u32, TransmitData::Register>,
-    sr: ReadOnly<u32, Status::Register>,
-    ier: WriteOnly<u32, InterruptFlags::Register>,
-    idr: WriteOnly<u32, InterruptFlags::Register>,
-    imr: ReadOnly<u32, InterruptFlags::Register>,
-    _reserved0: [ReadOnly<u32>; 4],
-    csr: [ReadWrite<u32, ChipSelectParams::Register>; 4],
-    _reserved1: [ReadOnly<u32>; 41],
-    wpcr: ReadWrite<u32, WriteProtectionControl::Register>,
-    wpsr: ReadOnly<u32>,
-    _reserved2: [ReadOnly<u32>; 3],
-    features: ReadOnly<u32>,
-    version: ReadOnly<u32>,
+register_structs! {
+    pub SpiRegisters {
+        (0x000 => cr: WriteOnly<u32, Control::Register>),
+        (0x004 => mr: ReadWrite<u32, Mode::Register>),
+        (0x008 => rdr: ReadOnly<u32>),
+        (0x00C => tdr: WriteOnly<u32, TransmitData::Register>),
+        (0x010 => sr: ReadOnly<u32, Status::Register>),
+        (0x014 => ier: WriteOnly<u32, InterruptFlags::Register>),
+        (0x018 => idr: WriteOnly<u32, InterruptFlags::Register>),
+        (0x01C => imr: ReadOnly<u32, InterruptFlags::Register>),
+        (0x020 => _reserved0: [ReadOnly<u32>; 4]),
+        (0x030 => csr: [ReadWrite<u32, ChipSelectParams::Register>; 4]),
+        (0x040 => _reserved1: [ReadOnly<u32>; 41]),
+        (0x0E4 => wpcr: ReadWrite<u32, WriteProtectionControl::Register>),
+        (0x0E8 => wpsr: ReadOnly<u32>),
+        (0x0EC => _reserved2: [ReadOnly<u32>; 3]),
+        (0x0F8 => features: ReadOnly<u32>),
+        (0x0FC => version: ReadOnly<u32>),
+        (0x100 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -179,6 +184,12 @@ pub enum Peripheral {
     Peripheral3,
 }
 
+impl spi::cs::IntoChipSelect<Peripheral, spi::cs::ActiveLow> for Peripheral {
+    fn into_cs(self) -> Peripheral {
+        self
+    }
+}
+
 #[derive(Copy, Clone, PartialEq)]
 pub enum SpiRole {
     SpiMaster,
@@ -208,7 +219,7 @@ impl PeripheralManagement<pm::Clock> for SpiHw<'_> {
     type RegisterType = SpiRegisters;
 
     fn get_registers(&self) -> &SpiRegisters {
-        &*SPI_BASE
+        &SPI_BASE
     }
 
     fn get_clock(&self) -> &pm::Clock {
@@ -321,7 +332,7 @@ impl<'a> SpiHw<'a> {
         // rate, but only if we are not at the slowest rate. Since scbr is the
         // clock rate divisor, the highest divisor 0xFF corresponds to the
         // lowest rate.
-        if clock % real_rate != 0 && scbr != 0xFF {
+        if !clock.is_multiple_of(real_rate) && scbr != 0xFF {
             scbr += 1;
         }
         let spi = &SpiRegisterManager::new(self);
@@ -343,7 +354,7 @@ impl<'a> SpiHw<'a> {
         match polarity {
             ClockPolarity::IdleHigh => csr.modify(ChipSelectParams::CPOL::InactiveHigh),
             ClockPolarity::IdleLow => csr.modify(ChipSelectParams::CPOL::InactiveLow),
-        };
+        }
     }
 
     fn get_polarity(&self) -> ClockPolarity {
@@ -362,7 +373,7 @@ impl<'a> SpiHw<'a> {
         match phase {
             ClockPhase::SampleLeading => csr.modify(ChipSelectParams::NCPHA::CaptureLeading),
             ClockPhase::SampleTrailing => csr.modify(ChipSelectParams::NCPHA::CaptureTrailing),
-        };
+        }
     }
 
     fn get_phase(&self) -> ClockPhase {
@@ -372,20 +383,6 @@ impl<'a> SpiHw<'a> {
             ClockPhase::SampleTrailing
         } else {
             ClockPhase::SampleLeading
-        }
-    }
-
-    pub fn set_active_peripheral(&self, peripheral: Peripheral) {
-        // Slave cannot set active peripheral
-        if self.role.get() == SpiRole::SpiMaster {
-            let spi = &SpiRegisterManager::new(self);
-            let mr = match peripheral {
-                Peripheral::Peripheral0 => Mode::PCS::PCS0,
-                Peripheral::Peripheral1 => Mode::PCS::PCS1,
-                Peripheral::Peripheral2 => Mode::PCS::PCS2,
-                Peripheral::Peripheral3 => Mode::PCS::PCS3,
-            };
-            spi.registers.mr.modify(mr);
         }
     }
 
@@ -451,34 +448,25 @@ impl<'a> SpiHw<'a> {
     // the caller, and the caller may want to be able write into it.
     fn read_write_bytes(
         &self,
-        write_buffer: Option<&'static mut [u8]>,
-        read_buffer: Option<&'static mut [u8]>,
-        len: usize,
+        write_buffer: Option<SubSliceMut<'static, u8>>,
+        read_buffer: Option<SubSliceMut<'static, u8>>,
     ) -> Result<
         (),
         (
             ErrorCode,
-            Option<&'static mut [u8]>,
-            Option<&'static mut [u8]>,
+            Option<SubSliceMut<'static, u8>>,
+            Option<SubSliceMut<'static, u8>>,
         ),
     > {
-        if write_buffer.is_none() && read_buffer.is_none() {
-            return Err((ErrorCode::INVAL, write_buffer, read_buffer));
-        }
+        let count = match (&write_buffer, &read_buffer) {
+            (Some(ref wb), Some(ref rb)) => cmp::min(wb.len(), rb.len()),
+            (Some(ref wb), None) => wb.len(),
+            (None, Some(ref rb)) => rb.len(),
+            (None, None) => return Err((ErrorCode::INVAL, write_buffer, read_buffer)),
+        };
 
         // Start by enabling the SPI driver.
         self.enable();
-
-        // Determine how many bytes to move based on the shortest of the
-        // write_buffer length, the read_buffer length, and the user requested
-        // len.
-        let mut count: usize = len;
-        write_buffer
-            .as_ref()
-            .map(|buf| count = cmp::min(count, buf.len()));
-        read_buffer
-            .as_ref()
-            .map(|buf| count = cmp::min(count, buf.len()));
 
         // Configure DMA to transfer that many bytes.
         self.dma_length.set(count);
@@ -499,19 +487,19 @@ impl<'a> SpiHw<'a> {
                 .set(self.transfers_in_progress.get() + 1);
             self.dma_read.map(move |read| {
                 read.enable();
-                read.do_transfer(DMAPeripheral::SPI_RX, rbuf, count);
+                read.do_transfer(DMAPeripheral::SPI_RX, rbuf.take(), count);
             });
         });
 
         // The ordering of these operations matters.
         // For transfers 4 bytes or longer, this will work as expected.
         // For shorter transfers, the first byte will be missing.
-        write_buffer.map(|wbuf| {
+        write_buffer.map(|buf| {
             self.transfers_in_progress
                 .set(self.transfers_in_progress.get() + 1);
             self.dma_write.map(move |write| {
                 write.enable();
-                write.do_transfer(DMAPeripheral::SPI_TX, wbuf, count);
+                write.do_transfer(DMAPeripheral::SPI_TX, buf.take(), count);
             });
         });
 
@@ -520,7 +508,7 @@ impl<'a> SpiHw<'a> {
 }
 
 impl<'a> spi::SpiMaster<'a> for SpiHw<'a> {
-    type ChipSelect = u8;
+    type ChipSelect = Peripheral;
 
     fn set_client(&self, client: &'a dyn SpiMasterClient) {
         self.client.set(client);
@@ -538,35 +526,6 @@ impl<'a> spi::SpiMaster<'a> for SpiHw<'a> {
         self.transfers_in_progress.get() != 0
     }
 
-    /// Write a byte to the SPI and discard the read; if an
-    /// asynchronous operation is outstanding, do nothing.
-    fn write_byte(&self, out_byte: u8) -> Result<(), ErrorCode> {
-        let spi = &SpiRegisterManager::new(self);
-
-        let tdr = (out_byte as u32) & spi_consts::tdr::TD;
-        // Wait for data to leave TDR and enter serializer, so TDR is free
-        // for this next byte
-        while !spi.registers.sr.is_set(Status::TDRE) {}
-        spi.registers.tdr.set(tdr);
-        Ok(())
-    }
-
-    /// Write 0 to the SPI and return the read; if an
-    /// asynchronous operation is outstanding, do nothing.
-    fn read_byte(&self) -> Result<u8, ErrorCode> {
-        self.read_write_byte(0)
-    }
-
-    /// Write a byte to the SPI and return the read; if an
-    /// asynchronous operation is outstanding, do nothing.
-    fn read_write_byte(&self, val: u8) -> Result<u8, ErrorCode> {
-        let spi = &SpiRegisterManager::new(self);
-
-        self.write_byte(val)?;
-        while !spi.registers.sr.is_set(Status::RDRF) {}
-        Ok(spi.registers.rdr.get() as u8)
-    }
-
     /// Asynchronous buffer read/write of SPI. `write_buffer` must be present;
     /// `read_buffer` may be `None`. If read_buffer is present, then the length
     /// of the read/write is the minimum of two buffer lengths.
@@ -579,19 +538,29 @@ impl<'a> spi::SpiMaster<'a> for SpiHw<'a> {
     // the caller, and the caller may want to be able write into it.
     fn read_write_bytes(
         &self,
-        write_buffer: &'static mut [u8],
-        read_buffer: Option<&'static mut [u8]>,
-        len: usize,
-    ) -> Result<(), (ErrorCode, &'static mut [u8], Option<&'static mut [u8]>)> {
+        write_buffer: SubSliceMut<'static, u8>,
+        read_buffer: Option<SubSliceMut<'static, u8>>,
+    ) -> Result<
+        (),
+        (
+            ErrorCode,
+            SubSliceMut<'static, u8>,
+            Option<SubSliceMut<'static, u8>>,
+        ),
+    > {
         // If busy, don't start.
         if self.is_busy() {
             return Err((ErrorCode::BUSY, write_buffer, read_buffer));
         }
 
         if let Err((err, write_buffer, read_buffer)) =
-            self.read_write_bytes(Some(write_buffer), read_buffer, len)
+            self.read_write_bytes(Some(write_buffer), read_buffer)
         {
-            Err((err, write_buffer.unwrap(), read_buffer))
+            Err((
+                err,
+                write_buffer.unwrap_or((&mut [] as &mut [u8]).into()),
+                read_buffer,
+            ))
         } else {
             Ok(())
         }
@@ -636,18 +605,19 @@ impl<'a> spi::SpiMaster<'a> for SpiHw<'a> {
     }
 
     fn specify_chip_select(&self, cs: Self::ChipSelect) -> Result<(), ErrorCode> {
-        match match cs {
-            0 => Some(Peripheral::Peripheral0),
-            1 => Some(Peripheral::Peripheral1),
-            2 => Some(Peripheral::Peripheral2),
-            3 => Some(Peripheral::Peripheral3),
-            _ => None,
-        } {
-            Some(peripheral_number) => {
-                self.set_active_peripheral(peripheral_number);
-                Ok(())
-            }
-            None => Err(ErrorCode::INVAL),
+        // Slave cannot set active peripheral
+        if self.role.get() == SpiRole::SpiMaster {
+            let spi = &SpiRegisterManager::new(self);
+            let mr = match cs {
+                Peripheral::Peripheral0 => Mode::PCS::PCS0,
+                Peripheral::Peripheral1 => Mode::PCS::PCS1,
+                Peripheral::Peripheral2 => Mode::PCS::PCS2,
+                Peripheral::Peripheral3 => Mode::PCS::PCS3,
+            };
+            spi.registers.mr.modify(mr);
+            Ok(())
+        } else {
+            Err(ErrorCode::INVAL)
         }
     }
 }
@@ -693,7 +663,26 @@ impl<'a> spi::SpiSlave<'a> for SpiHw<'a> {
             Option<&'static mut [u8]>,
         ),
     > {
-        self.read_write_bytes(write_buffer, read_buffer, len)
+        let write_buffer = write_buffer.map(|b| {
+            let mut buf: SubSliceMut<u8> = b.into();
+            if buf.len() > len {
+                buf.slice(..len);
+            }
+            buf
+        });
+        let read_buffer = read_buffer.map(|b| {
+            let mut buf: SubSliceMut<u8> = b.into();
+            if buf.len() > len {
+                buf.slice(..len);
+            }
+            buf
+        });
+
+        if let Err((e, mwb, mrb)) = self.read_write_bytes(write_buffer, read_buffer) {
+            Err((e, mwb.map(|b| b.take()), mrb.map(|b| b.take())))
+        } else {
+            Ok(())
+        }
     }
 
     fn set_polarity(&self, polarity: ClockPolarity) -> Result<(), ErrorCode> {
@@ -747,7 +736,7 @@ impl DMAClient for SpiHw<'_> {
                 SpiRole::SpiMaster => {
                     self.client.map(|cb| {
                         txbuf.map(|txbuf| {
-                            cb.read_write_done(txbuf, rxbuf, len, Ok(()));
+                            cb.read_write_done(txbuf.into(), rxbuf.map(|b| b.into()), Ok(len));
                         });
                     });
                 }

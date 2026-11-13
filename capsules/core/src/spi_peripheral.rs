@@ -74,7 +74,7 @@ impl<'a, S: SpiSlaveDevice<'a>> SpiPeripheral<'a, S> {
         >,
     ) -> SpiPeripheral<'a, S> {
         SpiPeripheral {
-            spi_slave: spi_slave,
+            spi_slave,
             busy: Cell::new(false),
             kernel_len: Cell::new(0),
             kernel_read: TakeCell::empty(),
@@ -84,7 +84,7 @@ impl<'a, S: SpiSlaveDevice<'a>> SpiPeripheral<'a, S> {
         }
     }
 
-    pub fn config_buffers(&mut self, read: &'static mut [u8], write: &'static mut [u8]) {
+    pub fn config_buffers(&self, read: &'static mut [u8], write: &'static mut [u8]) {
         let len = cmp::min(read.len(), write.len());
         self.kernel_len.set(len);
         self.kernel_read.replace(read);
@@ -124,13 +124,13 @@ impl<'a, S: SpiSlaveDevice<'a>> SpiPeripheral<'a, S> {
 }
 
 impl<'a, S: SpiSlaveDevice<'a>> SyscallDriver for SpiPeripheral<'a, S> {
-    /// Provide read/write buffers to SpiPeripheral
-    ///
-    /// - allow_num 0: Provides a buffer to receive transfers into.
+    // Provide read/write buffers to SpiPeripheral
+    //
+    // - allow_num 0: Provides a buffer to receive transfers into.
 
-    /// Provide read-only buffers to SpiPeripheral
-    ///
-    /// - allow_num 0: Provides a buffer to transmit
+    // Provide read-only buffers to SpiPeripheral
+    //
+    // - allow_num 0: Provides a buffer to transmit
 
     /// - 0: driver existence check
     /// - 1: read/write buffers
@@ -273,7 +273,7 @@ impl<'a, S: SpiSlaveDevice<'a>> SpiSlaveClient for SpiPeripheral<'a, S> {
     ) {
         self.current_process.map(|process_id| {
             let _ = self.grants.enter(process_id, move |app, kernel_data| {
-                let rbuf = readbuf.map(|src| {
+                let rbuf = readbuf.inspect(|src| {
                     let index = app.index;
                     let _ = kernel_data
                         .get_readwrite_processbuffer(rw_allow::READ)
@@ -303,7 +303,6 @@ impl<'a, S: SpiSlaveDevice<'a>> SpiSlaveClient for SpiPeripheral<'a, S> {
                                 }
                             })
                         });
-                    src
                 });
 
                 self.kernel_read.put(rbuf);
@@ -314,7 +313,7 @@ impl<'a, S: SpiSlaveDevice<'a>> SpiSlaveClient for SpiPeripheral<'a, S> {
                     let len = app.len;
                     app.len = 0;
                     app.index = 0;
-                    kernel_data.schedule_upcall(0, (len, 0, 0)).ok();
+                    let _ = kernel_data.schedule_upcall(0, (len, 0, 0));
                 } else {
                     self.do_next_read_write(app, kernel_data);
                 }
@@ -327,7 +326,7 @@ impl<'a, S: SpiSlaveDevice<'a>> SpiSlaveClient for SpiPeripheral<'a, S> {
         self.current_process.map(|process_id| {
             let _ = self.grants.enter(process_id, move |app, kernel_data| {
                 let len = app.len;
-                kernel_data.schedule_upcall(1, (len, 0, 0)).ok();
+                let _ = kernel_data.schedule_upcall(1, (len, 0, 0));
             });
         });
     }

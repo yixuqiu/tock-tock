@@ -42,7 +42,7 @@
 //! Usage
 //! -----
 //!
-//! ```
+//! ```rust,ignore
 //!     storage_volume!(VOLUME, 2);
 //!     static mut PAGEBUFFER: sam4l::flashcalw::Sam4lPage = sam4l::flashcalw::Sam4lPage::new();
 //!
@@ -66,11 +66,11 @@ use core::cell::Cell;
 use core::mem::size_of;
 use core::unreachable;
 
+use kernel::ErrorCode;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil::flash::{self, Flash};
 use kernel::hil::log::{LogRead, LogReadClient, LogWrite, LogWriteClient};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 /// Globally declare entry ID type.
 type EntryID = usize;
@@ -205,7 +205,7 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
         self.oldest_entry_id.set(PAGE_HEADER_SIZE);
         self.read_entry_id.set(PAGE_HEADER_SIZE);
         self.append_entry_id.set(PAGE_HEADER_SIZE);
-        self.pagebuffer.take().map_or(false, move |pagebuffer| {
+        self.pagebuffer.take().is_some_and(move |pagebuffer| {
             for e in pagebuffer.as_mut().iter_mut() {
                 *e = 0;
             }
@@ -279,7 +279,7 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
                 .take()
                 .map(move |pagebuffer| {
                     // Determine if pagebuffer should be reset or copied from flash.
-                    let mut copy_pagebuffer = last_page_len % self.page_size != 0;
+                    let mut copy_pagebuffer = !last_page_len.is_multiple_of(self.page_size);
                     if !copy_pagebuffer {
                         // Last page full, reset pagebuffer for next page.
                         copy_pagebuffer = !self.reset_pagebuffer(pagebuffer);
@@ -311,7 +311,7 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
                 let mut entry_id = self.read_entry_id.get();
 
                 // Skip page header if at start of page or skip padded bytes if at end of page.
-                if entry_id % self.page_size == 0 {
+                if entry_id.is_multiple_of(self.page_size) {
                     entry_id += PAGE_HEADER_SIZE;
                 } else if self.get_byte(entry_id, pagebuffer) == PAD_BYTE {
                     entry_id += self.page_size - entry_id % self.page_size + PAGE_HEADER_SIZE;
@@ -434,7 +434,7 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
     fn flush_pagebuffer(&self, pagebuffer: &'static mut F::Page) -> Result<(), ErrorCode> {
         // Pad end of page.
         let mut pad_ptr = self.append_entry_id.get();
-        while pad_ptr % self.page_size != 0 {
+        while !pad_ptr.is_multiple_of(self.page_size) {
             pagebuffer.as_mut()[pad_ptr % self.page_size] = PAD_BYTE;
             pad_ptr += 1;
         }
@@ -481,7 +481,7 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
         }
 
         // Increment append entry ID to point at start of next page.
-        if append_entry_id % self.page_size != 0 {
+        if !append_entry_id.is_multiple_of(self.page_size) {
             append_entry_id += self.page_size - append_entry_id % self.page_size;
         }
 
@@ -708,7 +708,7 @@ impl<'a, F: Flash + 'static> LogWrite<'a> for Log<'a, F> {
                 // Check if previous page needs to be flushed and new entry will fit within space
                 // remaining in current page.
                 let append_entry_id = self.append_entry_id.get();
-                let flush_prev_page = append_entry_id % self.page_size == 0;
+                let flush_prev_page = append_entry_id.is_multiple_of(self.page_size);
                 let space_remaining = self.page_size - append_entry_id % self.page_size;
                 if !flush_prev_page && entry_size <= space_remaining {
                     // Entry fits, append it.
@@ -781,7 +781,7 @@ impl<'a, F: Flash + 'static> LogWrite<'a> for Log<'a, F> {
     }
 }
 
-impl<'a, F: Flash + 'static> flash::Client<F> for Log<'a, F> {
+impl<F: Flash + 'static> flash::Client<F> for Log<'_, F> {
     fn read_complete(&self, _read_buffer: &'static mut F::Page, _result: Result<(), flash::Error>) {
         // Reads are made directly from the storage volume, not through the flash interface.
         unreachable!();
@@ -812,7 +812,7 @@ impl<'a, F: Flash + 'static> flash::Client<F> for Log<'a, F> {
                     }
                     State::Sync => {
                         // Reset pagebuffer if synced page was full.
-                        if self.append_entry_id.get() % self.page_size == 0 {
+                        if self.append_entry_id.get().is_multiple_of(self.page_size) {
                             self.reset_pagebuffer(pagebuffer);
                         }
 
@@ -885,7 +885,7 @@ impl<'a, F: Flash + 'static> flash::Client<F> for Log<'a, F> {
     }
 }
 
-impl<'a, F: Flash + 'static> DeferredCallClient for Log<'a, F> {
+impl<F: Flash + 'static> DeferredCallClient for Log<'_, F> {
     fn handle_deferred_call(&self) {
         self.client_callback();
     }

@@ -37,7 +37,7 @@ are:
 
 ## Members
 
-- Hudson Ayers, [hudson-ayers](https://github.com/hudson-ayers), Stanford
+- Hudson Ayers, [hudson-ayers](https://github.com/hudson-ayers), Cruise LLC
 - Brad Campbell, [bradjc](https://github.com/bradjc), UVA
 - Branden Ghena, [brghena](https://github.com/brghena), Northwestern
 - Philip Levis, [phil-levis](https://github.com/phil-levis), Stanford
@@ -45,7 +45,7 @@ are:
 - Pat Pannuto, [ppannuto](https://github.com/ppannuto), UCSD
 - Alexandru Radovici [alexandruradovici](https://github.com/alexandruradovici), Politehnica Bucharest & OxidOS
 - Leon Schuermann, [lschuermann](https://github.com/lschuermann), Princeton University
-- Johnathan Van Why, [jrvanwhy](https://github.com/jrvanwhy), Google
+- Johnathan Van Why, [jrvanwhy](https://github.com/jrvanwhy), Better Bytes
 
 ## Membership
 

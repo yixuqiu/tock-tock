@@ -2,33 +2,35 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-use cortexm4::support::atomic;
+use cortexm4f::support::with_interrupts_disabled;
 use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
 use crate::gpio;
 use crate::syscfg;
 
-/// External interrupt/event controller
-#[repr(C)]
-struct ExtiRegisters {
-    /// Interrupt mask register (EXTI_IMR)
-    imr: ReadWrite<u32, IMR::Register>,
-    /// Event mask register (EXTI_EMR)
-    emr: ReadWrite<u32, EMR::Register>,
-    /// Rising Trigger selection register (EXTI_RTSR)
-    rtsr: ReadWrite<u32, RTSR::Register>,
-    /// Falling Trigger selection register (EXTI_FTSR)
-    ftsr: ReadWrite<u32, FTSR::Register>,
-    /// Software interrupt event register (EXTI_SWIER)
-    swier: ReadWrite<u32, SWIER::Register>,
-    /// Pending register (EXTI_PR)
-    pr: ReadWrite<u32, PR::Register>,
+register_structs! {
+    /// External interrupt/event controller
+    ExtiRegisters {
+        /// Interrupt mask register (EXTI_IMR)
+        (0x000 => imr: ReadWrite<u32, IMR::Register>),
+        /// Event mask register (EXTI_EMR)
+        (0x004 => emr: ReadWrite<u32, EMR::Register>),
+        /// Rising Trigger selection register (EXTI_RTSR)
+        (0x008 => rtsr: ReadWrite<u32, RTSR::Register>),
+        /// Falling Trigger selection register (EXTI_FTSR)
+        (0x00C => ftsr: ReadWrite<u32, FTSR::Register>),
+        /// Software interrupt event register (EXTI_SWIER)
+        (0x010 => swier: ReadWrite<u32, SWIER::Register>),
+        /// Pending register (EXTI_PR)
+        (0x014 => pr: ReadWrite<u32, PR::Register>),
+        (0x018 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -325,44 +327,6 @@ register_bitfields![u32,
 const EXTI_BASE: StaticRef<ExtiRegisters> =
     unsafe { StaticRef::new(0x40013C00 as *const ExtiRegisters) };
 
-/// EXTI block has 23 lines going into NVIC. This arrangement is described here
-/// [^1].
-///
-/// The 23 lines going into NVIC, are mapped to the following NVIC IRQs. Note
-/// there is *no* one-to-one mapping between the 23 lines to NVIC IRQs. The 23
-/// lines going into NVIC translates to 14 IRQs on NVIC.
-///
-///  - `EXTI0` (6)
-///  - `EXTI1` (7)
-///  - `EXTI2` (8)
-///  - `EXTI3` (9)
-///  - `EXTI4` (10)
-///  - `EXTI9_5` (23)
-///  - `EXTI15_10` (40)
-///
-///  - `EXTI16` -> `PVD` (1)
-///  - `EXTI17` -> `RTC_Alarm` (41)
-///  - `EXTI18` -> `OTG_FS_WKUP` (42)
-///  - `EXTI19` -> `<UNKNOWN>`
-///  - `EXTI20` -> `OTG_FS` (67)
-///  - `EXTI21` -> `TAMP_STAMP` (2)
-///  - `EXTI22` -> `RTC_WKUP` (3)
-///
-/// The EXTI_PR (pending) register when set, generates a level-triggered
-/// interrupt on the NVIC. This means, that its the responsibility of the IRQ
-/// handler to clear the interrupt source (pending bit), in order to prevent
-/// multiple interrupts from occurring.
-///
-/// `EXTI_EVENTS` is modeled to capture information from `EXTI_PR` register. In
-/// the top half IRQ handler, prior to clearing the pending bit, we set the
-/// corresponding bit in `EXTI_EVENTS`. Once the bit is set, in `EXTI_EVENTS`,
-/// we clear the pending bit and exit the ISR.
-///
-/// [^1]: Section 10.2.2, EXTI block diagram, page 243 of reference manual.
-#[no_mangle]
-#[used]
-pub static mut EXTI_EVENTS: u32 = 0;
-
 enum_from_primitive! {
     #[repr(u8)]
     #[derive(Copy, Clone)]
@@ -622,16 +586,14 @@ impl<'a> Exti<'a> {
         // changed due to an external interrupt. `EXTI_PR` is a read/clear write
         // 1 register (`rc_w1`). So, we only clear bits whose value has been
         // transferred to `exti_pr`.
-        unsafe {
-            atomic(|| {
-                exti_pr = self.registers.pr.get();
-                self.registers.pr.set(exti_pr);
-            });
-        }
+        with_interrupts_disabled(|| {
+            exti_pr = self.registers.pr.get();
+            self.registers.pr.set(exti_pr);
+        });
 
         // ignore the "reserved" EXTI bits. Use bits [22:0]. See `EXTI_PR` for
         // details.
-        exti_pr |= 0x007fffff;
+        exti_pr &= 0x007fffff;
 
         let mut flagged_bit = 0;
 

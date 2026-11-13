@@ -7,10 +7,10 @@
 use core::cell::Cell;
 use core::marker::PhantomData;
 use kernel::hil::gpio;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
 const GPIO_BASES: [StaticRef<GpioRegisters>; 6] = [
     unsafe { StaticRef::new(0x4000_4C00u32 as *const GpioRegisters) }, // PORT 1&2
@@ -610,7 +610,7 @@ impl<'a> gpio::Interrupt<'a> for IntPin<'a> {
     }
 }
 
-impl<'a> GpioManager<'a> {
+impl GpioManager<'_> {
     pub fn handle_interrupt(&self, port_idx: usize) {
         let regs: StaticRef<GpioRegisters> = GPIO_BASES[port_idx / 2];
         let ifgs: [u8; 2] = [regs.ifg[0].get(), regs.ifg[1].get()];

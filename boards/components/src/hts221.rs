@@ -18,6 +18,7 @@ use capsules_extra::hts221::Hts221;
 use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::i2c;
+use kernel::hil::i2c::I2CDevice as _;
 
 // Setup static space for the objects.
 #[macro_export]
@@ -34,7 +35,7 @@ macro_rules! hts221_component_static {
         );
 
         (i2c_device, buffer, hts221)
-    };};
+    }};
 }
 
 pub type Hts221ComponentType<I> = capsules_extra::hts221::Hts221<'static, I>;
@@ -48,7 +49,7 @@ impl<I: 'static + i2c::I2CMaster<'static>> Hts221Component<I> {
     pub fn new(i2c: &'static MuxI2C<'static, I>, i2c_address: u8) -> Self {
         Hts221Component {
             i2c_mux: i2c,
-            i2c_address: i2c_address,
+            i2c_address,
         }
     }
 }

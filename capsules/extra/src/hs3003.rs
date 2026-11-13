@@ -35,7 +35,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let hs3003_i2c = static_init!(
@@ -49,12 +49,12 @@
 //! ```
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil::i2c::{self, I2CClient, I2CDevice};
 use kernel::hil::sensors::{HumidityClient, HumidityDriver, TemperatureClient, TemperatureDriver};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
-pub struct Hs3003<'a, I: I2CDevice> {
+pub struct Hs3003<'a, I: I2CDevice<'a>> {
     buffer: TakeCell<'static, [u8]>,
     i2c: &'a I,
     temperature_client: OptionalCell<&'a dyn TemperatureClient>,
@@ -64,7 +64,7 @@ pub struct Hs3003<'a, I: I2CDevice> {
     pending_humidity: Cell<bool>,
 }
 
-impl<'a, I: I2CDevice> Hs3003<'a, I> {
+impl<'a, I: I2CDevice<'a>> Hs3003<'a, I> {
     pub fn new(i2c: &'a I, buffer: &'static mut [u8]) -> Self {
         Hs3003 {
             buffer: TakeCell::new(buffer),
@@ -82,23 +82,20 @@ impl<'a, I: I2CDevice> Hs3003<'a, I> {
             .take()
             .map(|buffer| {
                 self.i2c.enable();
-                match self.state.get() {
-                    State::Sleep => {
-                        if let Err((_error, buffer)) = self.i2c.write(buffer, 1) {
-                            self.buffer.replace(buffer);
-                            self.i2c.disable();
-                        } else {
-                            self.state.set(State::InitiateReading);
-                        }
+                if let State::Sleep = self.state.get() {
+                    if let Err((_error, buffer)) = self.i2c.write(buffer, 1) {
+                        self.buffer.replace(buffer);
+                        self.i2c.disable();
+                    } else {
+                        self.state.set(State::InitiateReading);
                     }
-                    _ => {}
                 }
             })
             .ok_or(ErrorCode::BUSY)
     }
 }
 
-impl<'a, I: I2CDevice> TemperatureDriver<'a> for Hs3003<'a, I> {
+impl<'a, I: I2CDevice<'a>> TemperatureDriver<'a> for Hs3003<'a, I> {
     fn set_client(&self, client: &'a dyn TemperatureClient) {
         self.temperature_client.set(client);
     }
@@ -113,7 +110,7 @@ impl<'a, I: I2CDevice> TemperatureDriver<'a> for Hs3003<'a, I> {
     }
 }
 
-impl<'a, I: I2CDevice> HumidityDriver<'a> for Hs3003<'a, I> {
+impl<'a, I: I2CDevice<'a>> HumidityDriver<'a> for Hs3003<'a, I> {
     fn set_client(&self, client: &'a dyn HumidityClient) {
         self.humidity_client.set(client);
     }
@@ -135,7 +132,7 @@ enum State {
     Read,
 }
 
-impl<'a, I: I2CDevice> I2CClient for Hs3003<'a, I> {
+impl<'a, I: I2CDevice<'a>> I2CClient for Hs3003<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         if let Err(i2c_err) = status {
             self.state.set(State::Sleep);

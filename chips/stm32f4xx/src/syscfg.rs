@@ -5,31 +5,33 @@
 use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
 use kernel::platform::chip::ClockInterface;
-use kernel::utilities::registers::interfaces::ReadWriteable;
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::ReadWriteable;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
+use crate::clocks::{Stm32f4Clocks, phclk};
 use crate::gpio;
-use crate::rcc;
 
-/// System configuration controller
-#[repr(C)]
-struct SyscfgRegisters {
-    /// memory remap register
-    memrm: ReadWrite<u32, MEMRM::Register>,
-    /// peripheral mode configuration register
-    pmc: ReadWrite<u32, PMC::Register>,
-    /// external interrupt configuration register 1
-    exticr1: ReadWrite<u32, EXTICR1::Register>,
-    /// external interrupt configuration register 2
-    exticr2: ReadWrite<u32, EXTICR2::Register>,
-    /// external interrupt configuration register 3
-    exticr3: ReadWrite<u32, EXTICR3::Register>,
-    /// external interrupt configuration register 4
-    exticr4: ReadWrite<u32, EXTICR4::Register>,
-    _reserved0: [u8; 8],
-    /// Compensation cell control register
-    cmpcr: ReadOnly<u32, CMPCR::Register>,
+register_structs! {
+    /// System configuration controller
+    SyscfgRegisters {
+        /// memory remap register
+        (0x000 => memrm: ReadWrite<u32, MEMRM::Register>),
+        /// peripheral mode configuration register
+        (0x004 => pmc: ReadWrite<u32, PMC::Register>),
+        /// external interrupt configuration register 1
+        (0x008 => exticr1: ReadWrite<u32, EXTICR1::Register>),
+        /// external interrupt configuration register 2
+        (0x00C => exticr2: ReadWrite<u32, EXTICR2::Register>),
+        /// external interrupt configuration register 3
+        (0x010 => exticr3: ReadWrite<u32, EXTICR3::Register>),
+        /// external interrupt configuration register 4
+        (0x014 => exticr4: ReadWrite<u32, EXTICR4::Register>),
+        (0x018 => _reserved0: [u8; 8]),
+        /// Compensation cell control register
+        (0x020 => cmpcr: ReadOnly<u32, CMPCR::Register>),
+        (0x024 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -125,12 +127,12 @@ pub struct Syscfg<'a> {
 }
 
 impl<'a> Syscfg<'a> {
-    pub const fn new(rcc: &'a rcc::Rcc) -> Self {
+    pub const fn new(clocks: &'a dyn Stm32f4Clocks) -> Self {
         Self {
             registers: SYSCFG_BASE,
-            clock: SyscfgClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::APB2(rcc::PCLK2::SYSCFG),
-                rcc,
+            clock: SyscfgClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::APB2(phclk::PCLK2::SYSCFG),
+                clocks,
             )),
         }
     }
@@ -230,7 +232,7 @@ impl<'a> Syscfg<'a> {
     }
 }
 
-struct SyscfgClock<'a>(rcc::PeripheralClock<'a>);
+struct SyscfgClock<'a>(phclk::PeripheralClock<'a>);
 
 impl ClockInterface for SyscfgClock<'_> {
     fn is_enabled(&self) -> bool {

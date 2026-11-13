@@ -7,9 +7,9 @@ System Calls
 **Status:** Draft <br/>
 **Author:** Hudson Ayers, Guillaume Endignoux, Jon Flatley, Philip Levis, Amit Levy, Pat Pannuto, Leon Schuermann, Johnathan Van Why, dcz <br/>
 **Draft-Created:** August 31, 2020<br/>
-**Draft-Modified:** September 8, 2023<br/>
-**Draft-Version:** 8<br/>
-**Draft-Discuss:** tock-dev@googlegroups.com</br>
+**Draft-Modified:** January 29, 2025<br/>
+**Draft-Version:** 11<br/>
+**Draft-Discuss:** devel@lists.tockos.org</br>
 
 Abstract
 -------------------------------
@@ -42,7 +42,7 @@ in other documents.
 Three design considerations guide the design of Tock's system call API and
 ABI.
 
-  1. Tock is currently supported on the ARM CortexM and RISCV architectures.
+  1. Tock is currently supported on the ARM CortexM and RISC-V architectures.
   It may support others in the future. Its ABI must support both architectures
   and be flexible enough to support future ones.
   2. Tock userspace applications can be written in any language. The system
@@ -133,7 +133,78 @@ to `self` as their first argument. Therefore, `r0` is usually used to dispatch
 onto the correct driver; this argument is consumed by the system call handler
 and replaced with `&self` when the actual system call method is invoked.
 
-3.2 Return Values
+3.2 Syscall Argument Types
+----------------------------------
+
+The use of registers, and the selection of specific registers, imposes physical
+restrictions on the types which can be passed (i.e., this TRD defines the ABI
+for platforms with 32-bit, general purpose registers, which limits any single
+argument to a maximum of 32-bit storage for its type).
+
+Syscalls SHOULD define as specific a type as is semantically meaningful for
+these 32 bits of storage. For example, the `command` syscall uses register 0 as
+a Driver Number and register 1 as a Command Number. These are defined as a
+`u32`, as Tock expects no more than 2^32 drivers, each with no more than 2^32
+commands. A future 64-bit ABI MAY choose to combine these into one syscall
+register. In contrast, other syscall argument slots may have more generic
+purposes, where the type and underlying storage are likely to move in sync on
+future platforms. This document defines the following conceptual types:
+
+<table>
+  <tr>
+    <th>Type</th>
+    <th>C Analog</th>
+    <th>Description</th>
+  </tr>
+  <tr>
+     <td><tt>OPAQUE_NUMERIC</tt></td>
+     <td><tt>(unsigned) int</tt></td>
+     <td>A whole number which is capable of being expressed in a native machine word type.</td>
+  </tr>
+  <tr>
+    <td><tt>SIZE</tt><br/><tt>OPAQUE_SIZE</tt></td>
+    <td><tt>size_t</tt></td>
+    <td>An unsigned, numeric type with a range capable of expressing in bytes the
+   size of any valid <em>contiguous</em> object.</td>
+  </tr>
+  <tr>
+    <td><tt>POINTER_OR_ZERO</tt><br/><tt>OPAQUE_POINTER_OR_ZERO</tt></td>
+    <td><tt>void *</tt></td>
+    <td>A type capable of holding a pointer to a valid memory location OR the
+    value `0`, which is defined as the NULL sentinel.</td>
+  </tr>
+  <tr>
+    <td><tt>C_FUNCTION_POINTER_OR_ZERO</tt></td>
+    <td></td>
+    <td>This describes an argument which holds a pointer to an executable
+    function, where the function adheres to the standard C ABI for the platform
+    (akin to <tt>extern C</tt> in C++ or <tt>extern "C" fn</tt> in Rust) OR the
+    value <tt>0</tt>, which is defined as the NULL sentinel.</td>
+  </tr>
+  <tr>
+    <td><tt>OPAQUE_GENERIC</tt></td>
+    <td></td>
+    <td>This describes an argument with no restrictions on type.</td>
+  </tr>
+</table>
+
+Types prefixed with `OPAQUE` are those where the kernel SHOULD NOT attempt to
+read the value. `OPAQUE` types are generally for pass-through use cases, where
+userspace passes a value back to itself through the kernel.  `OPAQUE` types,
+including `OPAQUE_GENERIC`, MAY have additional metadata associated with them
+(e.g. pointer provenance or tags) which the kernel MUST preserve.
+
+_Note:_ There is no `NUMERIC` type, only `OPAQUE_NUMERIC`, as any use by the
+kernel of machine-width generic number type almost certainly invites the design
+of an ABI which is not portable across architectures.
+
+_Note:_ Historically, Rust conflated some of these concepts with `usize`,
+however, legacy platforms (e.g., those with segmented memory) as well as
+emerging security-oriented platforms (e.g., those with tagged pointers) require
+distinguishing these cases.
+
+
+3.3 Return Values
 ----------------------------------
 
 All system calls have the same return value format. A system call can
@@ -198,7 +269,7 @@ Reserved `r0` values MAY be used by a future TRD and MUST NOT be returned by the
 kernel unless specified in a TRD. Therefore, for future compatibility, userspace
 code MUST handle `r0` values that it does not recognize.
 
-3.3 Error Codes
+3.4 Error Codes
 ---------------------------------
 
 All system call failures return an error code. These error codes are a superset of
@@ -233,6 +304,51 @@ specified in a TRD.
 Values greater than 1023 are reserved for userspace library use. Value 1024
 (BADRVAL) is for when a system call returns a different failure or success
 variant than the userspace library expects.
+
+3.5 Returning To Userspace
+---------------------------------
+
+When the kernel returns to userspace, it only gets to set registers for
+one stack frame. In practice, we have two cases:
+
+### Direct Resume
+
+Userspace resumes execution directly after the `svc` invocation, so the
+assembly that follows the `svc` command can use the values in r0-r3
+as-set by the kernel.
+
+### Pushed Callback
+
+Userspace resumes execution at the start of the callback function.
+
+The values in r0-r3 are consumed by the callback. When the callback
+finishes, it will `pop {lr}` (or similar), where the link register in
+the callback stack frame has been set by the kernel to the instruction
+after the `svc` that relinquished control to the kernel.
+
+The assembly that invoked the syscall now gets to run. At this point
+r0-r3 are unknown as those are caller-save registers (which means the
+Upcall callback can clobber them freely). The assembly that invoked the
+`svc` cannot make any assumptions about the values in r0-r3, nor can the
+kernel use them to pass things "to" the calling assembly. Thus, the
+`PushedCallback` case has to use a pointer-based approach for the kernel
+to communicate with the assembly that invokes the `svc` (e.g.
+`yield-param-A` in `Yield-NoWait`).
+
+3.6 Arguments with non-`u32` values
+------------------------------------
+
+How userspace drivers and capsules exchange values with type other
+than `u32` is left to the contract between the capsule and userspace
+libraries. However, they SHOULD adhere to the following convention:
+When passing values with types whose representation is smaller than 32
+bits (e.g. `u8` or `i16`), they must be explicitly cast to a `u32` (if
+unsigned) or `i32` (if signed). When passing values with types whose
+representation is larger than 32 bits (e.g. a `u64` or `i64`), they
+should be split into their lower and higher 32-bits with each portion
+treated as `u32`s in the lower-numbered and higher numbered registers,
+respectively.
+
 
 4 System Call API
 =================================
@@ -293,71 +409,134 @@ result with an error of `NOSUPPORT`.
 The Yield system call class is how a userspace process handles
 upcalls, relinquishes the processor to other processes, or waits for
 one of its long-running calls to complete.  The Yield system call
-class implements the only blocking system call in Tock that returns,
-`yield-wait`.
+class implements the only blocking system calls in Tock that return:
+`Yield-Wait` and `Yield-WaitFor`.
+The kernel invokes upcalls only in response to Yield
+system calls.
 
-When a process calls a Yield system call, the kernel schedules one
-pending upcall (if any) to execute on the userspace stack.  If there
-are multiple pending upcalls, each one requires a separate Yield
-call to invoke. The kernel invokes upcalls only in response to Yield
-system calls.  This form of very limited preemption allows userspace
-to manage concurrent access to its variables.
-
-There are two Yield system calls:
-  - `yield-wait`
-  - `yield-no-wait`
-
-The first call, `yield-wait`, blocks until an upcall executes. It is
-commonly used to provide a blocking I/O interface to userspace or to
-indicate to the kernel that the process has no work to do so the system
-can be put into a sleep state. A userspace library starts a long-running
-operation that has an upcall, then calls `yield-wait` to wait for an upcall.
-When the `yield-wait` returns, the process checks if the resuming upcall was
-the one it was expecting, and if not calls `yield-wait` again.
-
-The second call, `yield-no-wait`, executes a single upcall if any is pending.
-If no upcalls are pending it returns immediately.
+There are three Yield system call variants:
+  - Yield-Wait
+  - Yield-NoWait
+  - Yield-WaitFor
 
 The register arguments for Yield system calls are as follows. The registers
 r0-r3 correspond to r0-r3 on CortexM and a0-a3 on RISC-V.
 
-| Argument               | Register |
-|------------------------|----------|
-| Yield number           | r0       |
-| No wait field          | r1       |
-| unused                 | r2       |
-| unused                 | r3       |
+| Argument               | Register | Type     |
+|------------------------|----------|----------|
+| Yield number           | r0       | `u32`    |
+| yield-param-A          | r1       | _varies_ |
+| yield-param-B          | r2       | _varies_ |
+| yield-param-C          | r3       | _varies_ |
 
-
-The yield number specifies which call is invoked.
+The Yield number (in r0) specifies which call is invoked:
 
 | System call     | Yield number value |
 |-----------------|--------------------|
 | yield-no-wait   |                  0 |
 | yield-wait      |                  1 |
+| yield-wait-for  |                  2 |
+
+All other yield number values are reserved. If an invalid yield number
+is passed the kernel MUST return immediately and MUST NOT
+use `yield-param-A`, `yield-param-B`, or `yield-param-C`.
+
+The meaning of `yield-param-X` is specific to the yield type.
 
 
-All other yield number values are reserved. If an invalid
-yield number is passed the kernel MUST return immediately.
+### 4.1.1 Yield-NoWait
 
-The no wait field is only used by `yield-no-wait`. It contains the
-memory address of an 8-bit byte that `yield-no-wait` writes to
-indicate whether an upcall was invoked. If invoking `yield-no-wait`
-resulted in an upcall executing, `yield-no-wait` writes 1 to the
-field address. If invoking `yield-no-wait` resulted in no upcall
-executing, `yield-no-wait` writes 0 to the field address. This field
-allows userspace loops that want to flush the upcall queue to
-execute `yield-no-wait` until the queue is empty.
+| Argument               | Register | Type           | Value                                            |
+|------------------------|----------|----------------|--------------------------------------------------|
+| Yield number           | r0       | `u32`          | `0`                                              |
+| yield-param-A          | r1       | `*mut [u8; 1]` | Pointer to one byte of userspace memory or `0x0` |
 
-The Yield system call class has no return value. This is because
+Yield number 0, Yield-NoWait, executes a single upcall if any is
+pending.  If no upcalls are pending it returns immediately.
+There are no return values from Yield-NoWait. This is because if an upcall was
+invoked, the kernel pushes that function call onto the stack, such that the
+return value may be the return value of the upcall.
+
+Yield-NoWait will use
+`yield-param-A` as the memory address of an 8-bit byte to
+write to indicate whether an upcall was invoked. If invoking Yield-NoWait
+resulted in an upcall executing, Yield-NoWait writes 1 to the field address. If
+invoking Yield-NoWait resulted in no upcall executing, Yield-NoWait writes 0 to the
+field address. Userspace SHOULD ensure that `yield-param-A` points to a valid address
+in the current process. If userspace does not wish to receive the Yield-NoWait
+result, it SHOULD set `yield-param-A` to `0x0`. The kernel SHALL write the Yield-NoWait result
+if `yield-param-A` points to any valid process memory and SHALL NOT write the Yield-NoWait
+result if it points to an address not in the memory allocated to the
+calling process.
+
+Yield-NoWait can use the Yield-NoWait result to allow userspace loops that want
+to flush the upcall queue to execute Yield-NoWait until the queue is
+empty.
+
+`yield-param-B` and `yield-param-C` are unused and reserved.
+
+
+### 4.1.2 Yield-Wait
+
+| Argument               | Register | Type           | Value |
+|------------------------|----------|----------------|-------|
+| Yield number           | r0       | `u32`          | `1`   |
+
+Yield number 1, Yield-Wait, blocks until an upcall executes. It is
+commonly used when applications have no other work to do and are waiting
+for an event (upcall) to occur to do more work.
+
+This call will deliver events to the userspace application in the order
+they occurred in time in the kernel. If an application has multiple
+subscriptions, the userspace upcall handler is responsible for in some way
+noting which callback occurred if necessary.
+
+_Note:_ This will _only_ return after an upcall _executes_. If an event
+occurs which would normally generate an upcall, but that upcall is
+currently assigned to the Null Upcall, no upcall executes and thus this
+syscall will not return.
+
+Yield-Wait has no return value. This is because
 invoking an upcall pushes that function call onto the stack, such
 that the return value of a call to yield system call may be the
-return value of the upcall. This is why the no wait field exists,
-so that `yield-no-wait` can return a result to the caller. Allowing
-the kernel to pass a return value in register back to userspace
-would require either re-entering the kernel or expensive
-execution architectures (e.g., additional stacks or additional
-stack frames) for upcalls.
+return value of the upcall.
+
+`yield-param-A`, `yield-param-B`, and `yield-param-C` are unused and reserved.
+
+
+### 4.1.3 Yield-WaitFor
+
+| Argument               | Register | Type  | Value            |
+|------------------------|----------|-------|------------------|
+| Yield number           | r0       | `u32` | `2`              |
+| yield-param-A          | r1       | `u32` | Driver number    |
+| yield-param-B          | r2       | `u32` | Subscribe number |
+
+The third call, Yield-WaitFor, blocks until one
+specific upcall is ready to execute. If
+other events arrive that would invoke an upcall on this process, they
+are queued by the kernel, and will be delivered
+in response to subsequent Yield calls.
+Event order in this queue is maintained.
+
+The specific upcall is identified by a Driver number and a Subscribe number
+(which together form an UpcalId).
+
+- Driver number: `yield-param-A`
+- Subscribe number: `yield-param-B`
+
+This process will resume execution when an event in the kernel generates
+an upcall that matches the specified upcall. No userspace callback
+function will invoked by the kernel. Instead, the contents of r0-r2 will
+be set to the Upcall Arguments provided by the driver when the upcall is
+scheduled.
+
+To avoid a race condition between the event being waited on and the
+Yield-WaitFor call, the kernel will queue upcalls for the process even if
+there is no userspace callback function registered.
+
+`yield-param-C` is unused and reserved.
+
 
 4.2 Subscribe (Class ID: 1)
 --------------------------------
@@ -371,18 +550,21 @@ kernel.
 The register arguments for Subscribe system calls are as follows. The
 registers r0-r3 correspond to r0-r3 on CortexM and a0-a3 on RISC-V.
 
-| Argument            | Register |
-|---------------------|----------|
-| Driver number       | r0       |
-| Subscribe number    | r1       |
-| Upcall pointer      | r2       |
-| Application data    | r3       |
+| Argument            | Register | Type               |
+|---------------------|----------|--------------------|
+| Driver number       | r0       | `u32`              |
+| Subscribe number    | r1       | `u32`              |
+| Upcall pointer      | r2       | C_FUNCTION_POINTER |
+| Application data    | r3       | OPAQUE_GENERIC     |
 
 
 The `upcall pointer` is the address of the first instruction of
 the upcall function. The `application data` argument is a parameter
 that an application passes in and the kernel passes back in upcalls
 unmodified.
+
+The `upcall pointer` SHOULD be a valid upcall, i.e., either a
+`SubscribeUpcall` or the Null Upcall, as defined in the next section.
 
 If the passed upcall is not valid (is outside process executable
 memory and is not the Null Upcall described below), the kernel MUST
@@ -426,12 +608,12 @@ not re-subscribe and instead use some form of userspace dispatch.
 The return variants for Subscribe system calls are `Failure with 2 u32`
 and `Success with 2 u32`. For success, the first `u32` is the upcall
 pointer passed in the previous call to Subscribe (the existing
-upcall) and the second `u32` is the application data pointer passed
+upcall) and the second `u32` is the application data parameter passed
 in the previous call to Subscribe (the existing application data). For
 failure, the first `u32` is the passed upcall pointer and the second
-`u32` is the passed application data pointer. For the first successful
+`u32` is the passed application data parameter. For the first successful
 call to Subscribe for a given upcall, the upcall pointer and
-application data pointer returned MUST be the Null Upcall (described
+application data parameter returned MUST be the Null Upcall (described
 below).
 
 4.2.1 The Null Upcall
@@ -443,7 +625,7 @@ The Null Upcall is used for two reasons. First, a userspace process
 passing the Null Upcall as the upcall pointer for Subscribe
 indicates that there should be no more upcalls. Second, the first
 time a userspace process calls Subscribe for a particular upcall,
-the kernel needs to return upcall and application pointers indicating
+the kernel needs to return an upcall pointer and application data parameter indicating
 the current configuration; in this case, the kernel returns the Null
 Upcall. The Tock kernel MUST NOT invoke the Null Upcall.
 
@@ -476,16 +658,12 @@ platform and what drivers were compiled into the kernel.
 The register arguments for Command system calls are as follows. The registers
 r0-r3 correspond to r0-r3 on CortexM and a0-a3 on RISC-V.
 
-| Argument          | Register |
-|-------------------|----------|
-| Driver number     | r0       |
-| Command number    | r1       |
-| Argument 0        | r2       |
-| Argument 1        | r3       |
-
-Argument 0 and argument 1 are unsigned 32-bit integers. Command calls should
-never pass pointers: those are passed with Allow calls, as they can adjust
-memory protection to allow the kernel to access them.
+| Argument       | Register | Type  |
+|----------------|----------|-------|
+| Driver number  | r0       | `u32` |
+| Command number | r1       | `u32` |
+| Argument 0     | r2       | `u32` |
+| Argument 1     | r3       | `u32` |
 
 The return variants of Command are instance-specific. Each specific
 Command instance (combination of Driver and Command number) specifies
@@ -518,12 +696,12 @@ The register arguments for Read-Write Allow system calls are as
 follows. The registers r0-r3 correspond to r0-r3 on CortexM and a0-a3
 on RISC-V.
 
-| Argument         | Register |
-|------------------|----------|
-| Driver number    | r0       |
-| Allow number     | r1       |
-| Address          | r2       |
-| Size             | r3       |
+| Argument         | Register | Type              | Additional Restrictions                                                                 |
+|------------------|----------|-------------------|-----------------------------------------------------------------------------------------|
+| Driver number    | r0       | `u32`             |                                                                                         |
+| Allow number     | r1       | `u32`             |                                                                                         |
+| Address          | r2       | `POINTER_OR_ZERO` | Pointers must refer to a contiguous array of writable userspace memory of length `{r3}` |
+| Size             | r3       | `SIZE`            |                                                                                         |
 
 The *allow number* argument is an ordinal number (index) of the buffer.
 When Read-Write Allow is called, the provided buffer
@@ -543,11 +721,11 @@ The return variants for Read-Write Allow system calls are `Failure
 with 2 u32` and `Success with 2 u32`.  In both cases, `Argument 0`
 contains an address and `Argument 1` contains a length. When a driver
 implementing the Read-Write Allow system call returns a failure
-result, it MUST return the same address and length as those that were passed 
+result, it MUST return the same address and length as those that were passed
 in the call. When a driver implementing the Read-Write Allow system call
 returns a success result, the returned address and length MUST be those
 that were passed in the previous call, unless this is the first call.
-On the first successful invocation of a particular Read-Write Allow system 
+On the first successful invocation of a particular Read-Write Allow system
 call, an driver implementation MUST return address 0 and size 0.
 
 If the kernel cannot access the grant region for this process, `NOMEM`
@@ -561,7 +739,7 @@ not read or write a buffer that has been allowed: access to the memory
 is intended to be exclusive either to userspace or to the kernel. To
 regain access to a passed buffer B, the process calls the same
 Read-Write Allow system call again. If this call returns a success
-result, the result contains buffer B. The process can call with a zero-length 
+result, the result contains buffer B. The process can call with a zero-length
 buffer if it wishes to pass no memory to the kernel. Once a buffer has been returned to userspace as
 part of a Read-Write Allow system call, it is guaranteed for the
 kernel to no longer have access to the described memory region, unless
@@ -575,7 +753,7 @@ a buffer by calling allow with the same pointer and a longer length
 and such a call is not required to return an error code of `INVALID`.
 Similarly, it is possible for userspace to allow the same buffer
 multiple times to the kernel. This means, in practice, that the kernel
-may have multiple writeable references to the same memory and MUST 
+may have multiple writeable references to the same memory and MUST
 take precautions to ensure this does not violate safety within the
 kernel.
 
@@ -655,6 +833,13 @@ the buffer).
 4.5 Read-Only Allow (Class ID: 4)
 ---------------------------------
 
+| Argument         | Register | Type              | Additional Restrictions                                                                 |
+|------------------|----------|-------------------|-----------------------------------------------------------------------------------------|
+| Driver number    | r0       | `u32`             |                                                                                         |
+| Allow number     | r1       | `u32`             |                                                                                         |
+| Address          | r2       | `POINTER_OR_ZERO` | Pointers must refer to a contiguous array of readable userspace memory of length `{r3}` |
+| Size             | r3       | `SIZE`            |                                                                                         |
+
 The Read-Only Allow class is very similar to the Read-Write Allow
 class. It differs in some ways:
 
@@ -716,12 +901,12 @@ information about its address space.  The register arguments for
 Memop system calls are as follows. The registers r0-r3 correspond
 to r0-r3 on CortexM and a0-a3 on RISC-V.
 
-| Argument               | Register |
-|------------------------|----------|
-| Operation              | r0       |
-| Operation argument     | r1       |
-| unused                 | r2       |
-| unused                 | r3       |
+| Argument               | Register | Type     |
+|------------------------|----------|----------|
+| Operation              | r0       | `u32`    |
+| Operation argument     | r1       | _varies_ |
+| unused                 | r2       |          |
+| unused                 | r3       |          |
 
 The operation argument specifies which memory operation to perform. There
 are 12:
@@ -769,10 +954,10 @@ allocate new ones.
 The register arguments for Exit system calls are as follows. The registers
 r0-r3 correspond to r0-r3 on CortexM and a0-a3 on RISC-V.
 
-| Argument         | Register |
-|------------------|----------|
-| Exit number      | r0       |
-| Completion code  | r1       |
+| Argument         | Register | Type  |
+|------------------|----------|-------|
+| Exit number      | r0       | `u32` |
+| Completion code  | r1       | `u32` |
 
 The exit number specifies which call is invoked.
 
@@ -797,11 +982,12 @@ If an exit syscall is successful, it does not return. Therefore, the return
 value of an exit syscall is always `Failure`. `exit-restart` and
 `exit-terminate` MUST always succeed and so never return.
 
+
 5 libtock-c Userspace Library Methods
 =================================
 
 This section describes the method signatures for system calls and upcalls in C, as an example
-of how they appear to application/userspace code..
+of how they appear to application/userspace code.
 
 Because C allows a single return value but Tock system calls can return multiple values,
 they do not easily map to idiomatic C. These low-level APIs are translated into standard C
@@ -852,7 +1038,7 @@ the value in `error` is undefined.
 5.3 Command
 -----------------------------------
 
-The subscribe system call has this function prototype:
+The command system call has this function prototype:
 
 ```c
 typedef struct {
@@ -970,7 +1156,7 @@ Pat Pannuto <ppannuto@ucsd.edu>
 
 Leon Schuermann <leon@is.currently.online>
 
-Johnathan Van Why <jrvanwhy@google.com>
+Johnathan Van Why <tock@jrvanwhy.net>
 ```
 
 7 References and Additional Information

@@ -11,12 +11,12 @@
 //! Not implemented: pressure
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::debug;
 use kernel::hil;
 use kernel::hil::i2c;
 use kernel::hil::time::{Alarm, ConvertTicks};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 pub static BASE_ADDR: u8 = 0x76;
 
@@ -33,24 +33,24 @@ enum Register {
     DIG_T3 = 0x8c,
     ID = 0xd0,
     RESET = 0xe0,
-    /// measuring: [3]
-    /// im_update: [0]
+    // measuring: [3]
+    // im_update: [0]
     STATUS = 0xf3,
-    /// osrs_t: [7:5]
-    /// osrs_p: [4:2]
-    /// mode: [1:0]
+    // osrs_t: [7:5]
+    // osrs_p: [4:2]
+    // mode: [1:0]
     CTRL_MEAS = 0xf4,
-    /// t_sb: [7:5]
-    /// filter: [4:2]
-    /// spi3w_en: [0]
+    // t_sb: [7:5]
+    // filter: [4:2]
+    // spi3w_en: [0]
     CONFIG = 0xf5,
     PRESS_MSB = 0xf7,
     PRESS_LSB = 0xf8,
-    /// xlsb: [7:4]
+    // xlsb: [7:4]
     PRESS_XLSB = 0xf9,
     TEMP_MSB = 0xfa,
     TEMP_LSB = 0xfb,
-    /// xlsb: [7:4]
+    // xlsb: [7:4]
     TEMP_XLSB = 0xfc,
 }
 
@@ -77,12 +77,11 @@ impl CalibrationData {
         }
     }
 
-    fn temp_from_raw(&self, raw_temp: u32) -> i32 {
-        let temp = raw_temp as i32; // guaranteed to succeed because raw temp has only 20 significant bits maximum.
+    fn temp_from_raw(&self, temp: i32) -> i32 {
         let dig_t1 = self.dig_t1 as i32; // same, 16-bits
         let dig_t2 = self.dig_t2 as i32; // same, 16-bits
         let dig_t3 = self.dig_t3 as i32; // same, 16-bits
-                                         // From the datasheet
+        // From the datasheet
         let var1 = (((temp >> 3) - (dig_t1 << 1)) * dig_t2) >> 11;
         let a = (temp >> 4) - dig_t1;
         let var2 = (((a * a) >> 12) * dig_t3) >> 14;
@@ -140,11 +139,11 @@ impl State {
 }
 
 /// Complies with the reading and writing protocol used by the sensor.
-struct I2cWrapper<'a, I: i2c::I2CDevice> {
+struct I2cWrapper<'a, I: i2c::I2CDevice<'a>> {
     i2c: &'a I,
 }
 
-impl<'a, I: i2c::I2CDevice> I2cWrapper<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> I2cWrapper<'a, I> {
     fn write<const COUNT: usize>(
         &self,
         buffer: &'static mut [u8],
@@ -179,7 +178,7 @@ impl<'a, I: i2c::I2CDevice> I2cWrapper<'a, I> {
     }
 }
 
-pub struct Bmp280<'a, A: Alarm<'a>, I: i2c::I2CDevice> {
+pub struct Bmp280<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> {
     i2c: I2cWrapper<'a, I>,
     temperature_client: OptionalCell<&'a dyn hil::sensors::TemperatureClient>,
     // This might be better as a `RefCell`,
@@ -195,14 +194,14 @@ pub struct Bmp280<'a, A: Alarm<'a>, I: i2c::I2CDevice> {
     alarm: &'a A,
 }
 
-impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> Bmp280<'a, A, I> {
+impl<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> Bmp280<'a, A, I> {
     pub fn new(i2c: &'a I, buffer: &'static mut [u8], alarm: &'a A) -> Self {
         Self {
             i2c: I2cWrapper { i2c },
             temperature_client: OptionalCell::empty(),
             state: Cell::new(State::Uninitialized),
             buffer: TakeCell::new(buffer),
-            alarm: alarm,
+            alarm,
         }
     }
 
@@ -329,7 +328,7 @@ impl I2cOperation {
     }
 }
 
-impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> i2c::I2CClient for Bmp280<'a, A, I> {
+impl<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> i2c::I2CClient for Bmp280<'a, A, I> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         let mut temp_readout = None;
         let mut i2c_op = I2cOperation::Disable;
@@ -398,7 +397,8 @@ impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> i2c::I2CClient for Bmp280<'a, A, I> {
                     let msb = readout[0] as u32;
                     let lsb = readout[1] as u32;
                     let xlsb = readout[2] as u32;
-                    let raw_temp = (msb << 12) + (lsb << 4) + (xlsb >> 4);
+                    let raw_temp: i32 =
+                        ((((msb << 12) + (lsb << 4) + (xlsb >> 4)) << 12) as i32) >> 12; // ensure sign extention
                     temp_readout = Some(Ok(calibration.temp_from_raw(raw_temp)));
                     State::Idle(calibration)
                 }
@@ -469,7 +469,9 @@ impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> i2c::I2CClient for Bmp280<'a, A, I> {
     }
 }
 
-impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> hil::sensors::TemperatureDriver<'a> for Bmp280<'a, A, I> {
+impl<'a, A: Alarm<'a>, I: i2c::I2CDevice<'a>> hil::sensors::TemperatureDriver<'a>
+    for Bmp280<'a, A, I>
+{
     fn set_client(&self, client: &'a dyn hil::sensors::TemperatureClient) {
         self.temperature_client.set(client)
     }
@@ -479,7 +481,9 @@ impl<'a, A: Alarm<'a>, I: i2c::I2CDevice> hil::sensors::TemperatureDriver<'a> fo
     }
 }
 
-impl<'a, A: hil::time::Alarm<'a>, I: i2c::I2CDevice> hil::time::AlarmClient for Bmp280<'a, A, I> {
+impl<'a, A: hil::time::Alarm<'a>, I: i2c::I2CDevice<'a>> hil::time::AlarmClient
+    for Bmp280<'a, A, I>
+{
     fn alarm(&self) {
         self.handle_alarm()
     }

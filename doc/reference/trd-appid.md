@@ -9,7 +9,7 @@ Application IDs (AppID), Credentials, and Process Loading
 **Draft-Created:** 2021/09/01 <br/>
 **Draft-Modified:** 2022/10/14 <br/>
 **Draft-Version:** 10 <br/>
-**Draft-Discuss:** tock-dev@googlegroups.com<br/>
+**Draft-Discuss:** devel@lists.tockos.org<br/>
 
 Abstract
 -------------------------------
@@ -549,7 +549,7 @@ which credentials, are acceptable and which are rejected.
 
 ```rust
 pub enum CheckResult {
-    Accept,
+    Accept(Option<usize>),
     Pass,
     Reject
 }
@@ -581,6 +581,13 @@ each `TbfFooterV2Credentials` footer it encounters, the kernel calls
 `check_credentials` on the provided `AppCredentialsPolicy`. If
 `check_credentials` returns `CheckResult::Accept`, the kernel stops processing
 credentials and stores the process binary in the process binaries array.
+When an `AppCredentialsPolicy` accepts a credential it may include an opaque
+`usize` value. This will be stored along with the accepted credential
+and allows the `AppCredentialsPolicy` to share information about the accepted
+credential. For example, if `AppCredentialsPolicy` is checking signatures, the
+opaque value may communicate the owner of the private key that validated the
+signature. This information may be useful when assigning `ShortId`s.
+
 If the
 `AppCredentialsPolicy` returns `CheckResult::Reject`, the kernel stops processing
 credentials and does not load the process binary.
@@ -948,7 +955,7 @@ Stanford, CA 94305
 USA
 pal@cs.stanford.edu
 
-Johnathan Van Why <jrvanwhy@google.com>
+Johnathan Van Why <tock@jrvanwhy.net>
 
 Brad Campbell <bradjc@virginia.edu>
 ```

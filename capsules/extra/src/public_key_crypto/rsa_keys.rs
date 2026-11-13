@@ -5,12 +5,12 @@
 //! Helper library for RSA public and private keys
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil::public_key_crypto::keys::{
     PubKey, PubKeyMut, PubPrivKey, PubPrivKeyMut, RsaKey, RsaKeyMut, RsaPrivKey, RsaPrivKeyMut,
 };
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::mut_imut_buffer::MutImutBuffer;
-use kernel::ErrorCode;
 
 // Copy OpenSSL and use e as 65537
 const PUBLIC_EXPONENT: u32 = 65537;
@@ -301,10 +301,8 @@ impl<const L: usize> RsaPrivKey for RSAKeys<L> {
         if let Some(private_key) = self.private_key.take() {
             match private_key {
                 MutImutBuffer::Mutable(ref _buf) => unreachable!(),
-                MutImutBuffer::Immutable(buf) => {
-                    closure(buf);
-                }
-            };
+                MutImutBuffer::Immutable(buf) => closure(buf),
+            }
             self.private_key.replace(private_key);
             Some(())
         } else {
@@ -328,11 +326,9 @@ impl<const L: usize> RsaPrivKeyMut for RSAKeys<L> {
     fn map_exponent(&self, closure: &dyn Fn(&mut [u8])) -> Option<()> {
         if let Some(mut private_key) = self.private_key.take() {
             match private_key {
-                MutImutBuffer::Mutable(ref mut buf) => {
-                    closure(buf);
-                }
+                MutImutBuffer::Mutable(ref mut buf) => closure(buf),
                 MutImutBuffer::Immutable(_buf) => unreachable!(),
-            };
+            }
             self.private_key.replace(private_key);
             Some(())
         } else {

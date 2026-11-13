@@ -53,54 +53,129 @@
 /// The `ProcessManagementCapability` allows the holder to control
 /// process execution, such as related to creating, restarting, and
 /// otherwise managing processes.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait ProcessManagementCapability {}
 
-/// The `ProcessStartCapability` allows the holder to start a process. This is
-/// controlled and separate from `ProcessManagementCapability` because the
-/// process must have a unique application identifier and so only modules which
-/// check this may do so.
+/// The `ProcessStartCapability` allows the holder to start a process.
+///
+/// This is controlled and separate from `ProcessManagementCapability`
+/// because the process must have a unique application identifier and
+/// so only modules which check this may do so.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait ProcessStartCapability {}
 
 /// The `MainLoopCapability` capability allows the holder to start executing as
-/// well as manage the main scheduler loop in Tock. This is needed in a board's
-/// main.rs file to start the kernel. It also allows an external implementation
-/// of `Process` to update state in the kernel struct used by the main loop.
+/// well as manage the main scheduler loop in Tock.
+///
+/// This is needed in a board's main.rs file to start the kernel. It
+/// also allows an external implementation of `Process` to update
+/// state in the kernel struct used by the main loop.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait MainLoopCapability {}
 
 /// The `MemoryAllocationCapability` capability allows the holder to allocate
 /// memory, for example by creating grants.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait MemoryAllocationCapability {}
 
-/// The `ExternalProcessCapability` capability allows the holder to use the core
-/// kernel resources needed to successfully implement the `Process` trait
-/// from outside of the core kernel crate. Many of these operations are very
-/// sensitive, that is they cannot just be made public. In particular, certain
-/// objects can be used outside of the core kernel, but the constructors must be
+/// A capability that allows the holder to use the core kernel
+/// resources needed to implement the `Process` trait.
+///
+/// Many of these operations are very sensitive, that is they cannot
+/// just be made public. In particular, certain objects can be used
+/// outside of the core kernel, but the constructors must be
 /// restricted.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait ExternalProcessCapability {}
 
 /// The KernelruserStorageCapability` capability allows the holder to create
 /// permissions to access kernel-only stored values on the system.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait KerneluserStorageCapability {}
 
+/// The `ApplicationStorageCapability` capability allows the holder to create
+/// permissions to allow applications to have access to stored state on the
+/// system.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
+pub unsafe trait ApplicationStorageCapability {}
+
 /// The `UdpDriverCapability` capability allows the holder to use two functions
-/// only allowed by the UDP driver. The first is the `driver_send_to()` function
+/// only allowed by the UDP driver.
+///
+/// The first is the `driver_send_to()` function
 /// in udp_send.rs, which does not require being bound to a single port, since
 /// the driver manages port bindings for apps on its own. The second is the
 /// `set_user_ports()` function in `udp_port_table.rs`, which gives the UDP port
 /// table a reference to the UDP driver so that it can check which ports have
 /// been bound by apps.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait UdpDriverCapability {}
 
 /// The `CreatePortTableCapability` capability allows the holder to instantiate
-/// a new copy of the UdpPortTable struct. There should only ever be one
-/// instance of this struct, so this capability should not be distributed to
-/// capsules at all, as the port table should only be instantiated once by the
-/// kernel
+/// a new copy of the UdpPortTable struct.
+///
+/// There should only ever be one instance of this struct, so this
+/// capability should not be distributed to capsules at all, as the
+/// port table should only be instantiated once by the kernel.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait CreatePortTableCapability {}
 
-/// The `NetworkCapabilityCreationCapability` allows the holder to instantiate
-/// `NetworkCapability`S and visibility capabilities for the IP and UDP layers
-/// of the networking stack. A capsule would never hold this capability although
-/// it may hold capabilities created via this capability.
+/// A capability that allows the holder to instantiate
+/// `NetworkCapability`s and visibility capabilities.
+///
+/// A capsule would never hold this capability although it may hold
+/// capabilities created via this capability.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
 pub unsafe trait NetworkCapabilityCreationCapability {}
+
+/// The `SetDebugWriterCapability` allows the holder to set the debug writer
+/// mechanism in the kernel.
+///
+/// The debug writer is held by the kernel to enable the `debug!()` macro. The
+/// debug writer mechanism has access to debugging print messages which may
+/// contain information about the operation of the kernel.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
+pub unsafe trait SetDebugWriterCapability {}
+
+/// The `CpuStateControlCapability` allows the holder to perform low-level
+/// microcontroller operations.
+///
+/// These including resetting the MCU and putting it in sleep mode.
+///
+/// # Safety
+///
+/// Capabilities can only be created in trusted crates that can use `unsafe`.
+pub unsafe trait CpuStateControlCapability {}

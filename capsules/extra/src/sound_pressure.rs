@@ -42,7 +42,7 @@
 //!
 //! You need a device that provides the `hil::sensors::SoundPressure` trait.
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
@@ -84,7 +84,7 @@ impl<'a> SoundPressureSensor<'a> {
         grant: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<0>>,
     ) -> SoundPressureSensor<'a> {
         SoundPressureSensor {
-            driver: driver,
+            driver,
             apps: grant,
             busy: Cell::new(false),
         }
@@ -134,7 +134,7 @@ impl hil::sensors::SoundPressureClient for SoundPressureSensor<'_> {
                     self.busy.set(false);
                     app.subscribed = false;
                     if ret == Ok(()) {
-                        upcalls.schedule_upcall(0, (sound_val.into(), 0, 0)).ok();
+                        let _ = upcalls.schedule_upcall(0, (sound_val.into(), 0, 0));
                     }
                 }
             });

@@ -24,7 +24,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::{hil, static_init};
 
 //! sam4l::flashcalw::FLASH_CONTROLLER.configure();
@@ -42,10 +42,10 @@
 
 use core::cell::Cell;
 use core::cmp;
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::utilities::cells::NumericCellExt;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 /// This module is either waiting to do something, or handling a read/write.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,7 +81,7 @@ pub struct NonvolatileToPages<'a, F: hil::flash::Flash + 'static> {
 impl<'a, F: hil::flash::Flash> NonvolatileToPages<'a, F> {
     pub fn new(driver: &'a F, buffer: &'static mut F::Page) -> NonvolatileToPages<'a, F> {
         NonvolatileToPages {
-            driver: driver,
+            driver,
             client: OptionalCell::empty(),
             pagebuffer: TakeCell::new(buffer),
             state: Cell::new(State::Idle),
@@ -106,33 +106,34 @@ impl<'a, F: hil::flash::Flash> hil::nonvolatile_storage::NonvolatileStorage<'a>
         buffer: &'static mut [u8],
         address: usize,
         length: usize,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), (ErrorCode, &'static mut [u8])> {
         if self.state.get() != State::Idle {
-            return Err(ErrorCode::BUSY);
+            return Err((ErrorCode::BUSY, buffer));
         }
 
-        self.pagebuffer
-            .take()
-            .map_or(Err(ErrorCode::RESERVE), move |pagebuffer| {
-                let page_size = pagebuffer.as_mut().len();
+        let Some(pagebuffer) = self.pagebuffer.take() else {
+            return Err((ErrorCode::RESERVE, buffer));
+        };
 
-                // Just start reading. We'll worry about how much of the page we
-                // want later.
-                self.state.set(State::Read);
-                self.buffer.replace(buffer);
-                self.address.set(address);
-                self.length.set(length);
-                self.remaining_length.set(length);
-                self.buffer_index.set(0);
+        let page_size = pagebuffer.as_mut().len();
 
-                match self.driver.read_page(address / page_size, pagebuffer) {
-                    Ok(()) => Ok(()),
-                    Err((error_code, pagebuffer)) => {
-                        self.pagebuffer.replace(pagebuffer);
-                        Err(error_code)
-                    }
-                }
-            })
+        // Just start reading. We'll worry about how much of the page we
+        // want later.
+        self.state.set(State::Read);
+        self.buffer.replace(buffer);
+        self.address.set(address);
+        self.length.set(length);
+        self.remaining_length.set(length);
+        self.buffer_index.set(0);
+
+        match self.driver.read_page(address / page_size, pagebuffer) {
+            Ok(()) => Ok(()),
+            Err((error_code, pagebuffer)) => {
+                self.pagebuffer.replace(pagebuffer);
+                // We just stored the buffer above; reclaim it to return.
+                Err((error_code, self.buffer.take().unwrap()))
+            }
+        }
     }
 
     fn write(
@@ -140,54 +141,56 @@ impl<'a, F: hil::flash::Flash> hil::nonvolatile_storage::NonvolatileStorage<'a>
         buffer: &'static mut [u8],
         address: usize,
         length: usize,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), (ErrorCode, &'static mut [u8])> {
         if self.state.get() != State::Idle {
-            return Err(ErrorCode::BUSY);
+            return Err((ErrorCode::BUSY, buffer));
         }
 
-        self.pagebuffer
-            .take()
-            .map_or(Err(ErrorCode::RESERVE), move |pagebuffer| {
-                let page_size = pagebuffer.as_mut().len();
+        let Some(pagebuffer) = self.pagebuffer.take() else {
+            return Err((ErrorCode::RESERVE, buffer));
+        };
 
-                self.state.set(State::Write);
-                self.length.set(length);
+        let page_size = pagebuffer.as_mut().len();
 
-                if address % page_size == 0 && length >= page_size {
-                    // This write is aligned to a page and we are writing an entire
-                    // page or more.
+        self.state.set(State::Write);
+        self.length.set(length);
 
-                    // Copy data into page buffer.
-                    pagebuffer.as_mut()[..page_size].copy_from_slice(&buffer[..page_size]);
+        if address.is_multiple_of(page_size) && length >= page_size {
+            // This write is aligned to a page and we are writing an entire
+            // page or more.
 
-                    self.buffer.replace(buffer);
-                    self.address.set(address + page_size);
-                    self.remaining_length.set(length - page_size);
-                    self.buffer_index.set(page_size);
+            // Copy data into page buffer.
+            pagebuffer.as_mut()[..page_size].copy_from_slice(&buffer[..page_size]);
 
-                    match self.driver.write_page(address / page_size, pagebuffer) {
-                        Ok(()) => Ok(()),
-                        Err((error_code, pagebuffer)) => {
-                            self.pagebuffer.replace(pagebuffer);
-                            Err(error_code)
-                        }
-                    }
-                } else {
-                    // Need to do a read first.
-                    self.buffer.replace(buffer);
-                    self.address.set(address);
-                    self.remaining_length.set(length);
-                    self.buffer_index.set(0);
+            self.buffer.replace(buffer);
+            self.address.set(address + page_size);
+            self.remaining_length.set(length - page_size);
+            self.buffer_index.set(page_size);
 
-                    match self.driver.read_page(address / page_size, pagebuffer) {
-                        Ok(()) => Ok(()),
-                        Err((error_code, pagebuffer)) => {
-                            self.pagebuffer.replace(pagebuffer);
-                            Err(error_code)
-                        }
-                    }
+            match self.driver.write_page(address / page_size, pagebuffer) {
+                Ok(()) => Ok(()),
+                Err((error_code, pagebuffer)) => {
+                    self.pagebuffer.replace(pagebuffer);
+                    // We just stored the buffer above; reclaim it to return.
+                    Err((error_code, self.buffer.take().unwrap()))
                 }
-            })
+            }
+        } else {
+            // Need to do a read first.
+            self.buffer.replace(buffer);
+            self.address.set(address);
+            self.remaining_length.set(length);
+            self.buffer_index.set(0);
+
+            match self.driver.read_page(address / page_size, pagebuffer) {
+                Ok(()) => Ok(()),
+                Err((error_code, pagebuffer)) => {
+                    self.pagebuffer.replace(pagebuffer);
+                    // We just stored the buffer above; reclaim it to return.
+                    Err((error_code, self.buffer.take().unwrap()))
+                }
+            }
+        }
     }
 }
 

@@ -11,7 +11,7 @@
 ##
 
 # First, need to fill out some variables that the Makefile will use
-$(eval ALL_BOARDS := $(shell ./tools/list_boards.sh))
+$(eval ALL_BOARDS := $(shell ./tools/build/list_boards.sh))
 
 # Force the Shell to be bash as some systems have strange default shells
 SHELL := bash
@@ -52,8 +52,11 @@ usage:
 	@echo "             doc: Builds Tock documentation for all boards"
 	@echo "           stack: Prints a basic stack frame analysis for all boards"
 	@echo "           clean: Clean all builds"
-	@echo "          format: Runs the rustfmt tool on all kernel sources"
+	@echo "    format-check: Checks for formatting errors in kernel sources"
 	@echo "            list: Lists available boards"
+	@echo
+	@echo "We also define the following aliases:"
+	@echo "          format: cargo fmt"
 	@echo
 	@echo "The make system also drives all continuous integration and testing:"
 	@echo "         $$(tput bold)prepush$$(tput sgr0): Fast checks to run before pushing changes upstream"
@@ -132,7 +135,7 @@ endef
 ## Aggregate targets
 .PHONY: allaudit audit
 allaudit audit:
-	@for f in `./tools/list_lock.sh`;\
+	@for f in `./tools/build/list_lock.sh`;\
 		do echo "$$(tput bold)Auditing $$f";\
 		(cd "$$f" && cargo audit || exit 1);\
 		done
@@ -146,7 +149,7 @@ allboards boards:
 
 .PHONY: allcheck check
 allcheck check:
-	@cargo check
+	@cargo check $(TOCK_CARGO_FLAGS)
 
 .PHONY: alldoc doc
 alldoc doc:
@@ -164,7 +167,7 @@ allstack stack stack-analysis:
 .PHONY: licensecheck
 licensecheck:
 	$(call banner,License checker)
-	@cargo run --manifest-path=tools/license-checker/Cargo.toml --release
+	@cargo run --manifest-path=tools/ci/license-checker/Cargo.toml --release
 
 ## Commands
 .PHONY: clean
@@ -172,17 +175,18 @@ clean:
 	@echo "$$(tput bold)Clean top-level Cargo workspace" && cargo clean
 	@echo "$$(tput bold)Clean tools Cargo workspace" && cargo clean --manifest-path tools/Cargo.toml
 	@echo "$$(tput bold)Clean rustdoc" && rm -rf doc/rustdoc
-	@echo "$$(tput bold)Clean ci-artifacts" && rm -rf tools/ci-artifacts
+	@echo "$$(tput bold)Clean ci-artifacts" && rm -rf tools/ci/ci-artifacts
 
 .PHONY: fmt format
-fmt format: tools/.format_fresh
-	$(call banner,Formatting complete)
+fmt format:
+	$(call banner,Running \"cargo fmt\" -- for a complete format check run \"make format-check\")
+	cargo fmt
 
-# Get a list of all rust source files (everything fmt operates on)
-$(eval RUST_FILES_IN_TREE := $(shell (git ls-files | grep '\.rs$$') || find . -type f -name '*.rs'))
-tools/.format_fresh: $(RUST_FILES_IN_TREE)
-	@./tools/run_cargo_fmt.sh $(TOCK_FORMAT_MODE)
-	@touch tools/.format_fresh
+.PHONY: format-check
+format-check:
+	$(call banner,Formatting checker)
+	@./tools/ci/check_format.sh
+	$(call banner,Check for formatting complete)
 
 .PHONY: list
 list:
@@ -201,7 +205,7 @@ list:
 .PHONY: ci-all
 ci-all:\
 	ci-runner-github\
-	ci-runner-netlify
+	ci-runner-docs
 
 # Run all CI that doesn't require installation of extra tools.
 #
@@ -215,7 +219,7 @@ ci-nosetup:
 # This is designed for developers, to be run often and before submitting code upstream.
 .PHONY: prepush
 prepush:\
-	format\
+	format-check\
 	ci-job-clippy\
 	ci-job-syntax\
 	licensecheck
@@ -245,10 +249,10 @@ ci-help:
 	@echo "review the documentation at 'doc/CodeReview.md'."
 	@echo
 	@echo "The following CI runners are available:"
-	@$(MAKE) -pRrq -f $(lastword $(MAKEFILE_LIST)) : 2>/dev/null | awk -v RS= -F: '/^# File/,/^# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | sort | egrep -v -e '^[^[:alnum:]]' -e '^$@$$' | grep ci-runner | sed 's/^/ - /'
+	@$(MAKE) -pRrq -f $(lastword $(MAKEFILE_LIST)) : 2>/dev/null | awk -v RS= -F: '/^# File/,/^# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | sort | grep -E -v -e '^[^[:alnum:]]' -e '^$@$$' | grep ci-runner | sed 's/^/ - /'
 	@echo
 	@echo "The following CI jobs are available:"
-	@$(MAKE) -pRrq -f $(lastword $(MAKEFILE_LIST)) : 2>/dev/null | awk -v RS= -F: '/^# File/,/^# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | sort | egrep -v -e '^[^[:alnum:]]' -e '^$@$$' | grep ci-job | sed 's/^/ - /'
+	@$(MAKE) -pRrq -f $(lastword $(MAKEFILE_LIST)) : 2>/dev/null | awk -v RS= -F: '/^# File/,/^# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | sort | grep -E -v -e '^[^[:alnum:]]' -e '^$@$$' | grep ci-job | sed 's/^/ - /'
 	@echo
 	@echo To run the recommended local development CI run $$(tput bold)make prepush$$(tput sgr0).
 	@echo Developers are encouraged to always run this before pushing code.
@@ -284,7 +288,7 @@ ci-runner-github:\
 	ci-runner-github-clippy\
 	ci-runner-github-build\
 	ci-runner-github-tests\
-	ci-runner-github-qemu
+	ci-runner-github-flux
 	$(call banner,CI-Runner: All GitHub runners DONE)
 
 .PHONY: ci-runner-github-format
@@ -303,6 +307,7 @@ ci-runner-github-clippy:\
 ci-runner-github-build:\
 	ci-job-syntax\
 	ci-job-compilation\
+	ci-job-msrv\
 	ci-job-debug-support-targets\
 	ci-job-collect-artifacts
 	$(call banner,CI-Runner: GitHub build runner DONE)
@@ -319,18 +324,18 @@ ci-runner-github-tests:\
 	ci-job-miri # EXPERIMENTAL
 	$(call banner,CI-Runner: GitHub tests runner DONE)
 
-.PHONY: ci-runner-github-qemu
-ci-runner-github-qemu:\
-	ci-job-qemu
-	$(call banner,CI-Runner: GitHub qemu runner DONE)
+.PHONY: ci-runner-github-flux
+ci-runner-github-flux:\
+	ci-job-flux
+	$(call banner,CI-Runner: GitHub flux runner DONE)
 
 
-#n.b. netlify calls tools/netlify-build.sh, which is a wrapper
-#     that first installs toolchains, then calls this.
-.PHONY: ci-runner-netlify
-ci-runner-netlify:\
+# n.b. this runs from .github/workflows/docs.yml, which also uploads the
+#      resulting doc/rustdoc tree to GitHub pages when run on master.
+.PHONY: ci-runner-docs
+ci-runner-docs:\
 	ci-job-rustdoc
-	$(call banner,CI-Runner: Netlify runner DONE)
+	$(call banner,CI-Runner: Docs runner DONE)
 
 
 ## Jobs & Setup
@@ -348,11 +353,11 @@ ci-runner-netlify:\
 
 
 
+
 ### ci-runner-github-format jobs:
 .PHONY: ci-job-format
-ci-job-format: licensecheck
-	$(call banner,CI-Job: Format Check)
-	@NOWARNINGS=true TOCK_FORMAT_MODE=diff $(MAKE) format
+ci-job-format: licensecheck format-check
+	$(call banner,CI-Job: Format Check DONE)
 
 define ci_setup_markdown_toc
 	$(call banner,CI-Setup: Install markdown-toc)
@@ -369,7 +374,7 @@ ci-setup-markdown-toc:
 
 define ci_job_markdown_toc
 	$(call banner,CI-Job: Markdown Table of Contents Validation)
-	@NOWARNINGS=true PATH="node_modules/.bin:${PATH}" tools/toc.sh
+	@PATH="node_modules/.bin:${PATH}" tools/ci/toc.sh
 endef
 
 .PHONY: ci-job-markdown-toc
@@ -378,9 +383,9 @@ ci-job-markdown-toc: ci-setup-markdown-toc
 
 define ci_job_readme_check
 	$(call banner,CI-Job: README Validation)
-	tools/check_boards_readme.py
-	tools/check_capsule_readme.py
-	tools/check-for-readmes.sh
+	tools/ci/check-boards-readme.py
+	tools/ci/check-capsule-readme.py
+	tools/ci/check-for-readmes.sh
 endef
 
 .PHONY: ci-job-readme-check
@@ -393,20 +398,61 @@ ci-job-readme-check:
 .PHONY: ci-job-clippy
 ci-job-clippy:
 	$(call banner,CI-Job: Clippy)
-	@NOWARNINGS=true ./tools/run_clippy.sh
+	@cargo clippy -- -D warnings
+	# Run `cargo clippy` in select boards so we run clippy with targets that
+	# actually check the arch-specific functions.
+	# 
+	# - nrf52840dk: cortex-m4
+	# - raspberry_pi_pico: cortex-m0
+	# - hifive1: riscv
+	# - qemu_i486_q35: x86
+	@cd boards/nordic/nrf52840dk && cargo clippy -- -D warnings
+	@cd boards/raspberry_pi_pico && cargo clippy -- -D warnings
+	@cd boards/hifive1 && cargo clippy -- -D warnings
+	@cd boards/qemu_i486_q35 && cargo clippy -Zjson-target-spec -- -D warnings
 
 
 
 ### ci-runner-github-build jobs:
+# Path to a `.cargo/config.toml` fragment that denies warnings. Passed via
+# `cargo --config <path>` (see `TOCK_CARGO_FLAGS` above and in
+# `boards/Makefile.common`) rather than the `RUSTFLAGS` environment
+# variable, since the latter would entirely replace (not merge with) any
+# `rustflags` a crate already sets via its own `.cargo/config.toml`.
+DENY_WARNINGS_CARGO_CONFIG := $(CURDIR)/boards/cargo/deny_warnings.toml
+
 .PHONY: ci-job-syntax
 ci-job-syntax:
 	$(call banner,CI-Job: Syntax)
-	@NOWARNINGS=true $(MAKE) allcheck
+	@TOCK_CARGO_FLAGS="--config $(DENY_WARNINGS_CARGO_CONFIG)" $(MAKE) allcheck
 
 .PHONY: ci-job-compilation
 ci-job-compilation:
 	$(call banner,CI-Job: Compilation)
-	@NOWARNINGS=true $(MAKE) allboards
+	@TOCK_CARGO_FLAGS="--config $(DENY_WARNINGS_CARGO_CONFIG)" $(MAKE) allboards
+
+
+define ci_setup_msrv
+	$(call banner,CI-Setup: Install cargo-hack)
+	cargo install cargo-hack
+endef
+
+.PHONY: ci-setup-msrv
+ci-setup-msrv:
+	$(call ci_setup_helper,\
+		cargo hack -V &> /dev/null && echo yes,\
+		Install 'cargo-hack' using cargo,\
+		ci_setup_msrv,\
+		CI_JOB_MSRV)
+
+define ci_job_msrv
+	$(call banner,CI-Job: MSRV Check)
+	@cd boards/hail && cargo hack check --rust-version --target thumbv7em-none-eabihf
+endef
+
+.PHONY: ci-job-msrv
+ci-job-msrv: ci-setup-msrv
+	$(if $(CI_JOB_MSRV),$(call ci_job_msrv))
 
 .PHONY: ci-job-debug-support-targets
 ci-job-debug-support-targets:
@@ -416,9 +462,9 @@ ci-job-debug-support-targets:
 	# work, but don't build them for every board.
 	#
 	# The choice of building for the nrf52dk was chosen by random die roll.
-	@NOWARNINGS=true $(MAKE) -C boards/nordic/nrf52dk lst
-	@NOWARNINGS=true $(MAKE) -C boards/nordic/nrf52dk debug
-	@NOWARNINGS=true $(MAKE) -C boards/nordic/nrf52dk debug-lst
+	@TOCK_CARGO_FLAGS="--config $(DENY_WARNINGS_CARGO_CONFIG)" $(MAKE) -C boards/nordic/nrf52dk lst
+	@TOCK_CARGO_FLAGS="--config $(DENY_WARNINGS_CARGO_CONFIG)" $(MAKE) -C boards/nordic/nrf52dk debug
+	@TOCK_CARGO_FLAGS="--config $(DENY_WARNINGS_CARGO_CONFIG)" $(MAKE) -C boards/nordic/nrf52dk debug-lst
 
 .PHONY: ci-job-collect-artifacts
 ci-job-collect-artifacts: ci-job-compilation
@@ -427,11 +473,11 @@ ci-job-collect-artifacts: ci-job-compilation
 	#
 	# This is currently used only for code size detection changes, but in
 	# the future may also be used to support checks for deterministic builds.
-	@rm -rf "tools/ci-artifacts"
-	@mkdir tools/ci-artifacts
+	@rm -rf "tools/ci/ci-artifacts"
+	@mkdir tools/ci/ci-artifacts
 	@for f in $$(find target -iname '*.bin' | grep -E "release/.*\.bin");\
-		do mkdir -p "tools/ci-artifacts/$$(dirname $$f)";\
-		cp "$$f" "tools/ci-artifacts/$$f";\
+		do mkdir -p "tools/ci/ci-artifacts/$$(dirname $$f)";\
+		cp "$$f" "tools/ci/ci-artifacts/$$f";\
 		done
 
 
@@ -440,40 +486,41 @@ ci-job-collect-artifacts: ci-job-compilation
 .PHONY: ci-job-libraries
 ci-job-libraries:
 	$(call banner,CI-Job: Libraries)
-	@cd libraries/enum_primitive && NOWARNINGS=true RUSTFLAGS="-D warnings" cargo test
-	@cd libraries/riscv-csr && NOWARNINGS=true RUSTFLAGS="-D warnings" cargo test
-	@cd libraries/tock-cells && NOWARNINGS=true RUSTFLAGS="-D warnings" cargo test
-	@cd libraries/tock-register-interface && NOWARNINGS=true RUSTFLAGS="-D warnings" cargo test
-	@cd libraries/tickv && NOWARNINGS=true RUSTFLAGS="-D warnings" cargo test
+	@cd libraries/enum_primitive && cargo test --config $(DENY_WARNINGS_CARGO_CONFIG)
+	@cd libraries/riscv-csr && cargo test --config $(DENY_WARNINGS_CARGO_CONFIG)
+	@cd libraries/tock-cells && cargo test --config $(DENY_WARNINGS_CARGO_CONFIG)
+	@cd libraries/tickv && cargo test --config $(DENY_WARNINGS_CARGO_CONFIG)
 
 .PHONY: ci-job-archs
 ci-job-archs:
 	$(call banner,CI-Job: Archs)
-	@for arch in `./tools/list_archs.sh`;\
+	@for arch in `./tools/build/list_archs.sh`;\
 		do echo "$$(tput bold)Test $$arch";\
 		cd arch/$$arch;\
-		NOWARNINGS=true RUSTFLAGS="-D warnings" TOCK_KERNEL_VERSION=ci_test cargo test || exit 1;\
+		cargo test --config $(DENY_WARNINGS_CARGO_CONFIG) || exit 1;\
 		cd ../..;\
 		done
 
 .PHONY: ci-job-kernel
 ci-job-kernel:
 	$(call banner,CI-Job: Kernel)
-	@cd kernel && NOWARNINGS=true RUSTFLAGS="-D warnings" TOCK_KERNEL_VERSION=ci_test cargo test
+	@cd kernel && cargo test --config $(DENY_WARNINGS_CARGO_CONFIG)
 
 .PHONY: ci-job-capsules
 ci-job-capsules:
 	$(call banner,CI-Job: Capsules)
 	@# Capsule initialization depends on board/chip specific imports, so ignore doc tests
-	@cd capsules && NOWARNINGS=true RUSTFLAGS="-D warnings" TOCK_KERNEL_VERSION=ci_test cargo test --lib --examples
+	@cd capsules/core && cargo test --config $(DENY_WARNINGS_CARGO_CONFIG)
+	@cd capsules/extra && cargo test --config $(DENY_WARNINGS_CARGO_CONFIG)
+	@cd capsules/system && cargo test --config $(DENY_WARNINGS_CARGO_CONFIG)
 
 .PHONY: ci-job-chips
 ci-job-chips:
 	$(call banner,CI-Job: Chips)
-	@for chip in `./tools/list_chips.sh`;\
+	@for chip in `./tools/build/list_chips.sh`;\
 		do echo "$$(tput bold)Test $$chip";\
 		cd chips/$$chip;\
-		NOWARNINGS=true RUSTFLAGS="-D warnings" TOCK_KERNEL_VERSION=ci_test cargo test || exit 1;\
+		cargo test --config $(DENY_WARNINGS_CARGO_CONFIG) || exit 1;\
 		cd ../..;\
 		done
 
@@ -505,8 +552,8 @@ ci-setup-tools:
 
 define ci_job_tools
 	$(call banner,CI-Job: Tools)
-	@NOWARNINGS=true RUSTFLAGS="-D warnings" \
-		cargo test --all-targets --manifest-path=tools/Cargo.toml --workspace || exit 1
+	@cargo test --config $(DENY_WARNINGS_CARGO_CONFIG) \
+		--all-targets --manifest-path=tools/Cargo.toml --workspace || exit 1
 endef
 
 .PHONY: ci-job-tools
@@ -520,64 +567,75 @@ ci-job-miri:
 	#
 	# Note: This is highly experimental and limited at the moment.
 	#
-	@# Hangs forever during `Building` for this one :shrug:
-	@#cd libraries/tock-register-interface && NOWARNINGS=true cargo miri test
-	@cd kernel && NOWARNINGS=true cargo miri test
-	@for a in $$(tools/list_archs.sh); do cd arch/$$a && NOWARNINGS=true cargo miri test && cd ../..; done
-	@cd capsules && NOWARNINGS=true cargo miri test
-	@for c in $$(tools/list_chips.sh); do cd chips/$$c && NOWARNINGS=true cargo miri test && cd ../..; done
+	@cd kernel && cargo miri test
+	@for a in $$(tools/build/list_archs.sh); do cd arch/$$a && cargo miri test && cd ../..; done
+	@cd capsules/core && cargo miri test
+	@cd capsules/extra && cargo miri test
+	@cd capsules/system && cargo miri test
+	@for c in $$(tools/build/list_chips.sh); do cd chips/$$c && cargo miri test && cd ../..; done
 
 
 .PHONY: ci-job-cargo-test-build
 ci-job-cargo-test-build:
 	@$(MAKE) NO_RUN="--no-run" -C "boards/opentitan/earlgrey-cw310" test
 	@$(MAKE) NO_RUN="--no-run" -C "boards/esp32-c3-devkitM-1" test
+	@$(MAKE) NO_RUN="--no-run" -C "boards/apollo3/lora_things_plus" test
+	@$(MAKE) NO_RUN="--no-run" -C "boards/apollo3/lora_things_plus" test-atecc508a
+	@$(MAKE) NO_RUN="--no-run" -C "boards/apollo3/lora_things_plus" test-chirp_i2c_moisture
+	@$(MAKE) NO_RUN="--no-run" -C "boards/apollo3/redboard_artemis_atp" test
+	@$(MAKE) NO_RUN="--no-run" -C "boards/apollo3/redboard_artemis_nano" test
 
+
+
+### ci-runner-github-flux jobs:
+define ci_setup_flux
+	$(call banner,CI-Setup: Build Flux and its dependencies)
+	@cd tools/ci/flux-ci-runner; ./deps.sh install
+endef
+
+.PHONY: ci-setup-flux
+ci-setup-flux:
+	$(call ci_setup_helper,\
+		cd tools/ci/flux-ci-runner && ./deps.sh check > /dev/null 2>&1 && echo yes,\
+		Build Flux and install (or build) its dependencies,\
+		ci_setup_flux,\
+		CI_JOB_FLUX)
+	$(if $(CI_JOB_FLUX),$(eval CI_JOB_FLUX := true))
+
+define ci_job_flux
+	$(call banner,CI-Job: Flux)
+	source tools/ci/flux-ci-runner/deps.sh check && cargo flux --features=flux
+	$(call banner,CI-Job: Flux - Complete; all verification rules satisfied!)
+endef
+
+.PHONY: ci-job-flux
+ci-job-flux: ci-setup-flux
+	$(if $(CI_JOB_FLUX),$(call ci_job_flux))
 
 
 ### ci-runner-github-qemu jobs:
-QEMU_COMMIT_HASH=1600b9f46b1bd08b00fe86c46ef6dbb48cbe10d6
-define ci_setup_qemu_riscv
-	$(call banner,CI-Setup: Build QEMU)
-	@# Use the latest QEMU as it has OpenTitan support
-	@printf "Building QEMU, this could take a few minutes\n\n"
-	@git clone https://github.com/qemu/qemu ./tools/qemu 2>/dev/null || echo "qemu already cloned, checking out"
-	@cd tools/qemu; git checkout ${QEMU_COMMIT_HASH}; ../qemu/configure --target-list=riscv32-softmmu --disable-linux-io-uring --disable-libdaxctl;
-	@# Build qemu
-	@$(MAKE) -C "tools/qemu/build" -j2 || (echo "You might need to install some missing packages" || exit 127)
+define ci_job_qemu_virt
+	$(call banner,CI-Job: QEMU virt (rv64))
+	@cd tools/ci/qemu-virt-ci-runner;\
+		NOWARNINGS=true cargo run -- $(QEMU_VIRT_ARGS)
 endef
 
-.PHONY: ci-setup-qemu
-ci-setup-qemu:
-	$(call ci_setup_helper,\
-		[[ $$(git -C ./tools/qemu rev-parse HEAD 2>/dev/null || echo 0) == "${QEMU_COMMIT_HASH}" ]] && \
-			cd tools/qemu/build && make -q riscv32-softmmu && echo yes,\
-		Clone QEMU and run its build scripts,\
-		ci_setup_qemu_riscv,\
-		CI_JOB_QEMU_RISCV)
-	$(if $(CI_JOB_QEMU_RISCV),$(eval CI_JOB_QEMU := true))
-
-define ci_job_qemu
-	$(call banner,CI-Job: QEMU)
-	@cd tools/qemu-runner;\
-		PATH="$(shell pwd)/tools/qemu/build/riscv32-softmmu/:${PATH}"\
-		NOWARNINGS=true cargo run
-	@cd boards/opentitan/earlgrey-cw310;\
-		PATH="$(shell pwd)/tools/qemu/build/riscv32-softmmu/:${PATH}"\
-		make test
-endef
-
-.PHONY: ci-job-qemu
-ci-job-qemu: ci-setup-qemu
-	$(if $(CI_JOB_QEMU),$(call ci_job_qemu))
+.PHONY: ci-job-qemu-virt
+ci-job-qemu-virt:
+	$(call ci_job_qemu_virt)
 
 
-
-### ci-runner-netlify jobs:
+### ci-runner-docs jobs:
 .PHONY: ci-job-rustdoc
 ci-job-rustdoc:
 	$(call banner,CI-Job: Rustdoc Documentation)
-	@NOWARNINGS=true tools/build-all-docs.sh
+	@TOCK_CARGO_FLAGS="--config $(DENY_WARNINGS_CARGO_CONFIG)" tools/build/build_all_docs.sh
+	# `build_all_docs.sh` above builds the published doc site, but only for
+	# the host's native target: code gated on a board's real target (e.g.
+	# `#[cfg(target_arch = "arm", target_os = "none")]`) is never compiled,
+	# so rustdoc never checks it. `alldoc` builds each board's docs against
+	# its own real target/config, closing that gap.
+	@TOCK_CARGO_FLAGS="--config $(DENY_WARNINGS_CARGO_CONFIG)" $(MAKE) alldoc
 
 ## End CI rules
 ##
@@ -585,5 +643,5 @@ ci-job-rustdoc:
 
 .PHONY: board-release-test
 board-release-test:
-	@cd tools/board-runner;\
+	@cd tools/ci/board-runner;\
 		cargo run ${TARGET}

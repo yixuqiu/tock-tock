@@ -31,13 +31,12 @@
 //!   information on channel priorities, and how the DMA controller use priorities for scheduling.
 
 use kernel::utilities::{
+    StaticRef,
     cells::OptionalCell,
     registers::{
-        self,
+        self, ReadOnly, ReadWrite, WriteOnly,
         interfaces::{ReadWriteable, Readable, Writeable},
-        ReadOnly, ReadWrite, WriteOnly,
     },
-    StaticRef,
 };
 
 use core::cell::Cell;
@@ -465,7 +464,7 @@ impl DmaChannel {
             base: DMA_BASE,
             mux: DMA_MUX_BASE,
             channel,
-            client: OptionalCell::empty(),
+            client: const { OptionalCell::empty() },
             hardware_source: Cell::new(None),
         }
     }
@@ -734,7 +733,42 @@ impl<'a> Dma<'a> {
     /// Create a DMA peripheral.
     pub const fn new(ccm: &'a ccm::Ccm) -> Self {
         Dma {
-            channels: DMA_CHANNELS,
+            channels: const {
+                [
+                    DmaChannel::new(0),
+                    DmaChannel::new(1),
+                    DmaChannel::new(2),
+                    DmaChannel::new(3),
+                    DmaChannel::new(4),
+                    DmaChannel::new(5),
+                    DmaChannel::new(6),
+                    DmaChannel::new(7),
+                    DmaChannel::new(8),
+                    DmaChannel::new(9),
+                    DmaChannel::new(10),
+                    DmaChannel::new(11),
+                    DmaChannel::new(12),
+                    DmaChannel::new(13),
+                    DmaChannel::new(14),
+                    DmaChannel::new(15),
+                    DmaChannel::new(16),
+                    DmaChannel::new(17),
+                    DmaChannel::new(18),
+                    DmaChannel::new(19),
+                    DmaChannel::new(20),
+                    DmaChannel::new(21),
+                    DmaChannel::new(22),
+                    DmaChannel::new(23),
+                    DmaChannel::new(24),
+                    DmaChannel::new(25),
+                    DmaChannel::new(26),
+                    DmaChannel::new(27),
+                    DmaChannel::new(28),
+                    DmaChannel::new(29),
+                    DmaChannel::new(30),
+                    DmaChannel::new(31),
+                ]
+            },
             clock_gate: ccm::PeripheralClock::ccgr5(ccm, ccm::HCLK5::DMA),
             registers: DMA_BASE,
         }
@@ -770,39 +804,3 @@ impl<'a> Dma<'a> {
         })
     }
 }
-
-/// Helper constant for allocating DMA channels.
-const DMA_CHANNELS: [DmaChannel; 32] = [
-    DmaChannel::new(0),
-    DmaChannel::new(1),
-    DmaChannel::new(2),
-    DmaChannel::new(3),
-    DmaChannel::new(4),
-    DmaChannel::new(5),
-    DmaChannel::new(6),
-    DmaChannel::new(7),
-    DmaChannel::new(8),
-    DmaChannel::new(9),
-    DmaChannel::new(10),
-    DmaChannel::new(11),
-    DmaChannel::new(12),
-    DmaChannel::new(13),
-    DmaChannel::new(14),
-    DmaChannel::new(15),
-    DmaChannel::new(16),
-    DmaChannel::new(17),
-    DmaChannel::new(18),
-    DmaChannel::new(19),
-    DmaChannel::new(20),
-    DmaChannel::new(21),
-    DmaChannel::new(22),
-    DmaChannel::new(23),
-    DmaChannel::new(24),
-    DmaChannel::new(25),
-    DmaChannel::new(26),
-    DmaChannel::new(27),
-    DmaChannel::new(28),
-    DmaChannel::new(29),
-    DmaChannel::new(30),
-    DmaChannel::new(31),
-];

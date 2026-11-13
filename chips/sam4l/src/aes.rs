@@ -15,14 +15,16 @@
 use crate::pm;
 use crate::scif;
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::debug;
 use kernel::hil;
-use kernel::hil::symmetric_encryption::{AES128_BLOCK_SIZE, AES128_KEY_SIZE};
+use kernel::hil::symmetric_encryption::{AES_BLOCK_SIZE, AES128, AES128_KEY_SIZE};
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
+};
 
 #[allow(dead_code)]
 #[derive(Copy, Clone)]
@@ -34,36 +36,38 @@ enum ConfidentialityMode {
     CTR = 4,
 }
 
-/// The registers used to interface with the hardware
-#[repr(C)]
-struct AesRegisters {
-    ctrl: ReadWrite<u32, Control::Register>,         //   0x00
-    mode: ReadWrite<u32, Mode::Register>,            //   0x04
-    databufptr: ReadWrite<u32, DataBuf::Register>,   //   0x08
-    sr: ReadOnly<u32, Status::Register>,             //   0x0c
-    ier: WriteOnly<u32, Interrupt::Register>,        //   0x10
-    idr: WriteOnly<u32, Interrupt::Register>,        //   0x14
-    imr: ReadOnly<u32, Interrupt::Register>,         //   0x18
-    _reserved0: [u32; 1],                            //   0x1c
-    key0: WriteOnly<u32, Key::Register>,             //   0x20
-    key1: WriteOnly<u32, Key::Register>,             //   0x24
-    key2: WriteOnly<u32, Key::Register>,             //   0x28
-    key3: WriteOnly<u32, Key::Register>,             //   0x2c
-    key4: WriteOnly<u32, Key::Register>,             //   0x30
-    key5: WriteOnly<u32, Key::Register>,             //   0x34
-    key6: WriteOnly<u32, Key::Register>,             //   0x38
-    key7: WriteOnly<u32, Key::Register>,             //   0x3c
-    initvect0: WriteOnly<u32, InitVector::Register>, //   0x40
-    initvect1: WriteOnly<u32, InitVector::Register>, //   0x44
-    initvect2: WriteOnly<u32, InitVector::Register>, //   0x48
-    initvect3: WriteOnly<u32, InitVector::Register>, //   0x4c
-    idata: WriteOnly<u32, Data::Register>,           //   0x50
-    _reserved1: [u32; 3],                            //          0x54 - 0x5c
-    odata: ReadOnly<u32, Data::Register>,            //   0x60
-    _reserved2: [u32; 3],                            //          0x64 - 0x6c
-    drngseed: WriteOnly<u32, DrngSeed::Register>,    //   0x70
-    parameter: ReadOnly<u32, Parameter::Register>,   //   0x70
-    version: ReadOnly<u32, Version::Register>,       //   0x70
+register_structs! {
+    /// The registers used to interface with the hardware
+    AesRegisters {
+        (0x000 => ctrl: ReadWrite<u32, Control::Register>),
+        (0x004 => mode: ReadWrite<u32, Mode::Register>),
+        (0x008 => databufptr: ReadWrite<u32, DataBuf::Register>),
+        (0x00C => sr: ReadOnly<u32, Status::Register>),
+        (0x010 => ier: WriteOnly<u32, Interrupt::Register>),
+        (0x014 => idr: WriteOnly<u32, Interrupt::Register>),
+        (0x018 => imr: ReadOnly<u32, Interrupt::Register>),
+        (0x01C => _reserved0: [u32; 1]),
+        (0x020 => key0: WriteOnly<u32, Key::Register>),
+        (0x024 => key1: WriteOnly<u32, Key::Register>),
+        (0x028 => key2: WriteOnly<u32, Key::Register>),
+        (0x02C => key3: WriteOnly<u32, Key::Register>),
+        (0x030 => key4: WriteOnly<u32, Key::Register>),
+        (0x034 => key5: WriteOnly<u32, Key::Register>),
+        (0x038 => key6: WriteOnly<u32, Key::Register>),
+        (0x03C => key7: WriteOnly<u32, Key::Register>),
+        (0x040 => initvect0: WriteOnly<u32, InitVector::Register>),
+        (0x044 => initvect1: WriteOnly<u32, InitVector::Register>),
+        (0x048 => initvect2: WriteOnly<u32, InitVector::Register>),
+        (0x04C => initvect3: WriteOnly<u32, InitVector::Register>),
+        (0x050 => idata: WriteOnly<u32, Data::Register>),
+        (0x054 => _reserved1: [u32; 3]),
+        (0x060 => odata: ReadOnly<u32, Data::Register>),
+        (0x064 => _reserved2: [u32; 3]),
+        (0x070 => drngseed: WriteOnly<u32, DrngSeed::Register>),
+        (0x074 => parameter: ReadOnly<u32, Parameter::Register>),
+        (0x078 => version: ReadOnly<u32, Version::Register>),
+        (0x07C => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -240,8 +244,8 @@ impl<'a> Aes<'a> {
     }
 
     fn try_set_indices(&self, start_index: usize, stop_index: usize) -> bool {
-        stop_index.checked_sub(start_index).map_or(false, |sublen| {
-            sublen % AES128_BLOCK_SIZE == 0 && {
+        stop_index.checked_sub(start_index).is_some_and(|sublen| {
+            sublen % AES_BLOCK_SIZE == 0 && {
                 self.source.map_or_else(
                     || {
                         // The destination buffer is also the input
@@ -290,7 +294,7 @@ impl<'a> Aes<'a> {
                     },
                     |dest| {
                         let index = self.write_index.get();
-                        let more = index + AES128_BLOCK_SIZE <= self.stop_index.get();
+                        let more = index + AES_BLOCK_SIZE <= self.stop_index.get();
                         if !more {
                             return false;
                         }
@@ -301,18 +305,16 @@ impl<'a> Aes<'a> {
                             v |= (dest[index + (i * 4) + 3] as usize) << 24;
                             self.registers.idata.set(v as u32);
                         }
-                        self.write_index.set(index + AES128_BLOCK_SIZE);
+                        self.write_index.set(index + AES_BLOCK_SIZE);
 
-                        let more =
-                            self.write_index.get() + AES128_BLOCK_SIZE <= self.stop_index.get();
-                        more
+                        self.write_index.get() + AES_BLOCK_SIZE <= self.stop_index.get()
                     },
                 )
             },
             |source| {
                 let index = self.write_index.get();
 
-                let more = index + AES128_BLOCK_SIZE <= source.len();
+                let more = index + AES_BLOCK_SIZE <= source.len();
                 if !more {
                     return false;
                 }
@@ -325,10 +327,9 @@ impl<'a> Aes<'a> {
                     self.registers.idata.set(v as u32);
                 }
 
-                self.write_index.set(index + AES128_BLOCK_SIZE);
+                self.write_index.set(index + AES_BLOCK_SIZE);
 
-                let more = self.write_index.get() + AES128_BLOCK_SIZE <= source.len();
-                more
+                self.write_index.get() + AES_BLOCK_SIZE <= source.len()
             },
         )
     }
@@ -344,7 +345,7 @@ impl<'a> Aes<'a> {
             },
             |dest| {
                 let index = self.read_index.get();
-                let more = index + AES128_BLOCK_SIZE <= self.stop_index.get();
+                let more = index + AES_BLOCK_SIZE <= self.stop_index.get();
                 if !more {
                     return false;
                 }
@@ -357,10 +358,9 @@ impl<'a> Aes<'a> {
                     dest[index + (i * 4) + 3] = (v >> 24) as u8;
                 }
 
-                self.read_index.set(index + AES128_BLOCK_SIZE);
+                self.read_index.set(index + AES_BLOCK_SIZE);
 
-                let more = self.read_index.get() + AES128_BLOCK_SIZE <= self.stop_index.get();
-                more
+                self.read_index.get() + AES_BLOCK_SIZE <= self.stop_index.get()
             },
         )
     }
@@ -402,7 +402,7 @@ impl<'a> Aes<'a> {
     }
 }
 
-impl<'a> hil::symmetric_encryption::AES128<'a> for Aes<'a> {
+impl<'a> hil::symmetric_encryption::AES<'a, AES128> for Aes<'a> {
     fn enable(&self) {
         self.enable_clock();
         self.registers.ctrl.write(Control::ENABLE.val(1));
@@ -440,7 +440,7 @@ impl<'a> hil::symmetric_encryption::AES128<'a> for Aes<'a> {
     }
 
     fn set_iv(&self, iv: &[u8]) -> Result<(), ErrorCode> {
-        if iv.len() != AES128_BLOCK_SIZE {
+        if iv.len() != AES_BLOCK_SIZE {
             return Err(ErrorCode::INVAL);
         }
 
@@ -501,22 +501,22 @@ impl<'a> hil::symmetric_encryption::AES128<'a> for Aes<'a> {
     }
 }
 
-impl hil::symmetric_encryption::AES128Ctr for Aes<'_> {
-    fn set_mode_aes128ctr(&self, encrypting: bool) -> Result<(), ErrorCode> {
+impl hil::symmetric_encryption::AESCtr for Aes<'_> {
+    fn set_mode_aesctr(&self, encrypting: bool) -> Result<(), ErrorCode> {
         self.set_mode(encrypting, ConfidentialityMode::CTR);
         Ok(())
     }
 }
 
-impl hil::symmetric_encryption::AES128CBC for Aes<'_> {
-    fn set_mode_aes128cbc(&self, encrypting: bool) -> Result<(), ErrorCode> {
+impl hil::symmetric_encryption::AESCBC for Aes<'_> {
+    fn set_mode_aescbc(&self, encrypting: bool) -> Result<(), ErrorCode> {
         self.set_mode(encrypting, ConfidentialityMode::CBC);
         Ok(())
     }
 }
 
-impl kernel::hil::symmetric_encryption::AES128ECB for Aes<'_> {
-    fn set_mode_aes128ecb(&self, encrypting: bool) -> Result<(), ErrorCode> {
+impl kernel::hil::symmetric_encryption::AESECB for Aes<'_> {
+    fn set_mode_aesecb(&self, encrypting: bool) -> Result<(), ErrorCode> {
         self.set_mode(encrypting, ConfidentialityMode::ECB);
         Ok(())
     }

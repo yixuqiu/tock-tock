@@ -6,9 +6,6 @@
 
 BUILD_DIR="verilator_build/"
 
-# Preemptively cleanup layout (incase this was a test) so that following apps (non-tests) load the correct layout.
-rm $TOCK_ROOT_DIRECTORY/target/$TARGET/release/deps/layout.ld
-
 if [[ "${VERILATOR}" == "yes" ]]; then
 		if [ -d "$BUILD_DIR" ]; then
 			# Cleanup before we build again
@@ -41,5 +38,5 @@ elif [[ "${OPENTITAN_TREE}" != "" ]]; then
 
 	${OPENTITAN_TREE}/bazel-bin/sw/host/opentitantool/opentitantool.runfiles/lowrisc_opentitan/sw/host/opentitantool/opentitantool --interface=cw310 bootstrap binary
 else
-	../../../tools/qemu/build/qemu-system-riscv32 -M opentitan -nographic -serial stdio -monitor none -semihosting -kernel "${1}" -global driver=riscv.lowrisc.ibex.soc,property=resetvec,value=${QEMU_ENTRY_POINT}
+	../../../tools/ci/qemu/build/qemu-system-riscv32 -M opentitan -nographic -serial stdio -monitor none -semihosting -kernel "${1}" -global driver=riscv.lowrisc.ibex.soc,property=resetvec,value=${QEMU_ENTRY_POINT}
 fi

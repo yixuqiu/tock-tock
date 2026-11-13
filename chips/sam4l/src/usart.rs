@@ -9,47 +9,52 @@
 use core::cell::Cell;
 use core::cmp;
 use core::sync::atomic::{AtomicBool, Ordering};
-use kernel::deferred_call::{DeferredCall, DeferredCallClient};
-use kernel::hil;
-use kernel::hil::spi;
-use kernel::hil::uart;
-use kernel::utilities::cells::OptionalCell;
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
 use kernel::ErrorCode;
+use kernel::deferred_call::{DeferredCall, DeferredCallClient};
+use kernel::hil::spi;
+use kernel::hil::spi::cs::ChipSelectPolar;
+use kernel::hil::uart;
+use kernel::utilities::StaticRef;
+use kernel::utilities::cells::OptionalCell;
+use kernel::utilities::leasable_buffer::SubSliceMut;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::{
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
+};
 
 use crate::dma;
 use crate::pm;
 
 // Register map for SAM4L USART
-#[repr(C)]
-struct UsartRegisters {
-    cr: WriteOnly<u32, Control::Register>,       // 0x00
-    mr: ReadWrite<u32, Mode::Register>,          // 0x04
-    ier: WriteOnly<u32, Interrupt::Register>,    // 0x08
-    idr: WriteOnly<u32, Interrupt::Register>,    // 0x0C
-    imr: ReadOnly<u32, Interrupt::Register>,     // 0x10
-    csr: ReadOnly<u32, ChannelStatus::Register>, // 0x14
-    rhr: ReadOnly<u32, ReceiverHold::Register>,  // 0x18
-    thr: WriteOnly<u32, TransmitHold::Register>, // 0x1C
-    brgr: ReadWrite<u32, BaudRate::Register>,    // 0x20
-    rtor: ReadWrite<u32, RxTimeout::Register>,   // 0x24
-    ttgr: ReadWrite<u32, TxTimeGuard::Register>, // 0x28
-    _reserved0: [ReadOnly<u32>; 5],
-    fidi: ReadWrite<u32, FidiRatio::Register>, // 0x40
-    ner: ReadOnly<u32, NumErrors::Register>,   // 0x44
-    _reserved1: ReadOnly<u32>,
-    ifr: ReadWrite<u32, IrdaFilter::Register>, // 0x4C
-    man: ReadWrite<u32, Manchester::Register>, // 0x50
-    linmr: ReadWrite<u32, LinMode::Register>,  // 0x54
-    linir: ReadWrite<u32, LinID::Register>,    // 0x58
-    linbr: ReadOnly<u32, LinBaud::Register>,   // 0x5C
-    _reserved2: [ReadOnly<u32>; 33],
-    wpmr: ReadWrite<u32, ProtectMode::Register>,  // 0xE4
-    wpsr: ReadOnly<u32, ProtectStatus::Register>, // 0xE8
-    _reserved3: [ReadOnly<u32>; 4],
-    version: ReadOnly<u32, Version::Register>, // 0xFC
+register_structs! {
+    UsartRegisters {
+        (0x000 => cr: WriteOnly<u32, Control::Register>),
+        (0x004 => mr: ReadWrite<u32, Mode::Register>),
+        (0x008 => ier: WriteOnly<u32, Interrupt::Register>),
+        (0x00C => idr: WriteOnly<u32, Interrupt::Register>),
+        (0x010 => imr: ReadOnly<u32, Interrupt::Register>),
+        (0x014 => csr: ReadOnly<u32, ChannelStatus::Register>),
+        (0x018 => rhr: ReadOnly<u32, ReceiverHold::Register>),
+        (0x01C => thr: WriteOnly<u32, TransmitHold::Register>),
+        (0x020 => brgr: ReadWrite<u32, BaudRate::Register>),
+        (0x024 => rtor: ReadWrite<u32, RxTimeout::Register>),
+        (0x028 => ttgr: ReadWrite<u32, TxTimeGuard::Register>),
+        (0x02C => _reserved0: [ReadOnly<u32>; 5]),
+        (0x040 => fidi: ReadWrite<u32, FidiRatio::Register>),
+        (0x044 => ner: ReadOnly<u32, NumErrors::Register>),
+        (0x048 => _reserved1: ReadOnly<u32>),
+        (0x04C => ifr: ReadWrite<u32, IrdaFilter::Register>),
+        (0x050 => man: ReadWrite<u32, Manchester::Register>),
+        (0x054 => linmr: ReadWrite<u32, LinMode::Register>),
+        (0x058 => linir: ReadWrite<u32, LinID::Register>),
+        (0x05C => linbr: ReadOnly<u32, LinBaud::Register>),
+        (0x060 => _reserved2: [ReadOnly<u32>; 33]),
+        (0x0E4 => wpmr: ReadWrite<u32, ProtectMode::Register>),
+        (0x0E8 => wpsr: ReadOnly<u32, ProtectStatus::Register>),
+        (0x0EC => _reserved3: [ReadOnly<u32>; 4]),
+        (0x0FC => version: ReadOnly<u32, Version::Register>),
+        (0x100 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -302,7 +307,7 @@ impl<'a> USARTRegManager<'a> {
         if !pm::is_clock_enabled(usart.clock) {
             pm::enable_clock(usart.clock);
         }
-        let regs: &UsartRegisters = &*usart.registers;
+        let regs: &UsartRegisters = &usart.registers;
         USARTRegManager {
             registers: regs,
             clock: usart.clock,
@@ -335,8 +340,8 @@ impl Drop for USARTRegManager<'_> {
                 + Interrupt::RXRDY::SET,
         );
 
-        let rx_active = self.rx_dma.map_or(false, |rx_dma| rx_dma.is_enabled());
-        let tx_active = self.tx_dma.map_or(false, |tx_dma| tx_dma.is_enabled());
+        let rx_active = self.rx_dma.is_some_and(|rx_dma| rx_dma.is_enabled());
+        let tx_active = self.tx_dma.is_some_and(|tx_dma| tx_dma.is_enabled());
 
         // Special-case panic here as panic does not actually use the
         // USART driver code in this file, rather it writes the registers
@@ -406,7 +411,7 @@ pub struct USART<'a> {
 
     client: OptionalCell<UsartClient<'a>>,
 
-    spi_chip_select: OptionalCell<&'a dyn hil::gpio::Pin>,
+    spi_chip_select: OptionalCell<ChipSelectPolar<'a, crate::gpio::GPIOPin<'a>>>,
     pm: &'a pm::PowerManager,
     dc_state: OptionalCell<DeferredCallState>,
     deferred_call: DeferredCall,
@@ -431,10 +436,10 @@ impl<'a> USART<'a> {
 
             // these get defined later by `chip.rs`
             rx_dma: Cell::new(None),
-            rx_dma_peripheral: rx_dma_peripheral,
+            rx_dma_peripheral,
             rx_len: Cell::new(0),
             tx_dma: Cell::new(None),
-            tx_dma_peripheral: tx_dma_peripheral,
+            tx_dma_peripheral,
             tx_len: Cell::new(0),
 
             // this gets defined later by `main.rs`
@@ -656,7 +661,7 @@ impl<'a> USART<'a> {
             // `transmit_complete` callback is in a "bad" part of the USART
             // state machine, and clients cannot issue other USART calls from
             // the callback.
-            let txbuffer = self.tx_dma.get().map_or(None, |tx_dma| {
+            let txbuffer = self.tx_dma.get().and_then(|tx_dma| {
                 let buf = tx_dma.abort_transfer();
                 tx_dma.disable();
                 buf
@@ -685,13 +690,13 @@ impl<'a> USART<'a> {
                                 self.rts_disable_spi_deassert_cs(usart);
                             },
                             |cs| {
-                                cs.set();
+                                cs.deactivate();
                             },
                         );
 
                         // Get the RX buffer, and it is ok if we didn't use one,
                         // we can just return None.
-                        let rxbuf = self.rx_dma.get().map_or(None, |dma| {
+                        let rxbuf = self.rx_dma.get().and_then(|dma| {
                             let buf = dma.abort_transfer();
                             dma.disable();
                             buf
@@ -702,7 +707,11 @@ impl<'a> USART<'a> {
                         // state.
                         let len = self.tx_len.get();
                         self.tx_len.set(0);
-                        client.read_write_done(txbuffer.unwrap(), rxbuf, len, Ok(()));
+                        client.read_write_done(
+                            txbuffer.unwrap().into(),
+                            rxbuf.map(|b| b.into()),
+                            Ok(len),
+                        );
                     }
                 }
             });
@@ -737,8 +746,8 @@ impl<'a> USART<'a> {
                 let cd = system_frequency / baud_rate;
                 usart.registers.brgr.write(BaudRate::CD.val(cd));
             }
-            _ => {}
-        };
+            UsartMode::Unused => {}
+        }
     }
 
     /// In non-SPI mode, this drives RTS low.
@@ -1051,7 +1060,7 @@ impl<'a> uart::ReceiveAdvanced<'a> for USART<'a> {
 
 /// SPI
 impl<'a> spi::SpiMaster<'a> for USART<'a> {
-    type ChipSelect = Option<&'static dyn hil::gpio::Pin>;
+    type ChipSelect = ChipSelectPolar<'a, crate::gpio::GPIOPin<'a>>;
 
     fn init(&self) -> Result<(), ErrorCode> {
         let usart = &USARTRegManager::new(self);
@@ -1086,20 +1095,25 @@ impl<'a> spi::SpiMaster<'a> for USART<'a> {
 
     fn read_write_bytes(
         &self,
-        write_buffer: &'static mut [u8],
-        read_buffer: Option<&'static mut [u8]>,
-        len: usize,
-    ) -> Result<(), (ErrorCode, &'static mut [u8], Option<&'static mut [u8]>)> {
+        write_buffer: SubSliceMut<'static, u8>,
+        read_buffer: Option<SubSliceMut<'static, u8>>,
+    ) -> Result<
+        (),
+        (
+            ErrorCode,
+            SubSliceMut<'static, u8>,
+            Option<SubSliceMut<'static, u8>>,
+        ),
+    > {
         let usart = &USARTRegManager::new(self);
 
         self.enable_tx(usart);
         self.enable_rx(usart);
 
         // Calculate the correct length for the transmission
-        let buflen = read_buffer.as_ref().map_or(write_buffer.len(), |rbuf| {
+        let count = read_buffer.as_ref().map_or(write_buffer.len(), |rbuf| {
             cmp::min(rbuf.len(), write_buffer.len())
         });
-        let count = cmp::min(buflen, len);
 
         self.tx_len.set(count);
 
@@ -1111,7 +1125,7 @@ impl<'a> spi::SpiMaster<'a> for USART<'a> {
                 self.rts_enable_spi_assert_cs(usart);
             },
             |cs| {
-                cs.clear();
+                cs.activate();
             },
         );
 
@@ -1128,12 +1142,12 @@ impl<'a> spi::SpiMaster<'a> for USART<'a> {
                         self.usart_tx_state.set(USARTStateTX::DMA_Transmitting);
                         self.usart_rx_state.set(USARTStateRX::Idle);
                         dma.enable();
-                        dma.do_transfer(self.tx_dma_peripheral, write_buffer, count);
+                        dma.do_transfer(self.tx_dma_peripheral, write_buffer.take(), count);
 
                         // Start the read transaction.
                         self.usart_rx_state.set(USARTStateRX::DMA_Receiving);
                         read.enable();
-                        read.do_transfer(self.rx_dma_peripheral, rbuf, count);
+                        read.do_transfer(self.rx_dma_peripheral, rbuf.take(), count);
                     });
                 });
             });
@@ -1143,49 +1157,16 @@ impl<'a> spi::SpiMaster<'a> for USART<'a> {
                 self.usart_tx_state.set(USARTStateTX::DMA_Transmitting);
                 self.usart_rx_state.set(USARTStateRX::Idle);
                 dma.enable();
-                dma.do_transfer(self.tx_dma_peripheral, write_buffer, count);
+                dma.do_transfer(self.tx_dma_peripheral, write_buffer.take(), count);
             });
         }
 
         Ok(())
     }
 
-    fn write_byte(&self, val: u8) -> Result<(), ErrorCode> {
-        let usart = &USARTRegManager::new(self);
-        usart
-            .registers
-            .cr
-            .write(Control::RXEN::SET + Control::TXEN::SET);
-        usart
-            .registers
-            .thr
-            .write(TransmitHold::TXCHR.val(val as u32));
-        Ok(())
-    }
-
-    fn read_byte(&self) -> Result<u8, ErrorCode> {
-        let usart = &USARTRegManager::new(self);
-        Ok(usart.registers.rhr.read(ReceiverHold::RXCHR) as u8)
-    }
-
-    fn read_write_byte(&self, val: u8) -> Result<u8, ErrorCode> {
-        let usart = &USARTRegManager::new(self);
-        usart
-            .registers
-            .cr
-            .write(Control::RXEN::SET + Control::TXEN::SET);
-
-        usart
-            .registers
-            .thr
-            .write(TransmitHold::TXCHR.val(val as u32));
-        while !usart.registers.csr.is_set(ChannelStatus::RXRDY) {}
-        Ok(usart.registers.rhr.read(ReceiverHold::RXCHR) as u8)
-    }
-
     /// Pass in a None to use the HW chip select pin on the USART (RTS).
     fn specify_chip_select(&self, cs: Self::ChipSelect) -> Result<(), ErrorCode> {
-        self.spi_chip_select.insert(cs);
+        self.spi_chip_select.set(cs);
         Ok(())
     }
 

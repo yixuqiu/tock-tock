@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2023.
 
-use crate::net::stream::{encode_bytes, SResult};
-use crate::net::thread::tlv::{unwrap_tlv_offset, LinkMode, MulticastResponder, Tlv};
+use crate::net::stream::{SResult, encode_bytes};
+use crate::net::thread::tlv::{LinkMode, MulticastResponder, Tlv, unwrap_tlv_offset};
 use crate::net::{ieee802154::MacAddress, ipv6::ip_utils::IPAddr};
 pub const THREAD_PORT_NUMBER: u16 = 19788;
 
@@ -196,15 +196,15 @@ pub fn form_child_id_req(
     // Response TLV //
     let received_challenge_tlv: Result<&[u8], ErrorCode> = find_challenge(&recv_buf[1..]);
 
-    if received_challenge_tlv.is_err() {
-        // Challenge TLV not found; malformed request
-        return Err(ErrorCode::FAIL);
-    } else {
+    if let Ok(received_challenge_tlv_inner) = received_challenge_tlv {
         // Encode response into output
         let mut rsp_buf: [u8; 8] = [0; 8];
-        rsp_buf.copy_from_slice(received_challenge_tlv.unwrap());
+        rsp_buf.copy_from_slice(received_challenge_tlv_inner);
         rsp_buf.reverse(); // NEED TO DISCUSS BIG/LITTLE ENDIAN ASSUMPTIONS
         offset += unwrap_tlv_offset(Tlv::encode(&Tlv::Response(rsp_buf), &mut output[offset..]));
+    } else {
+        // Challenge TLV not found; malformed request
+        return Err(ErrorCode::FAIL);
     }
 
     // Link-layer Frame Counter TLV //

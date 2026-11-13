@@ -5,16 +5,15 @@
 //! UDP userspace interface for transmit and receive.
 //!
 //! Implements a userspace interface for sending and receiving UDP messages.
-//! Processes use this driver to send UDP packets from a common interface
-//! and bind to UDP ports for receiving packets.
-//! Also exposes a list of interface addresses to the application (currently
-//! hard-coded).
+//! Processes use this driver to send UDP packets from a common interface and
+//! bind to UDP ports for receiving packets. Also exposes a list of interface
+//! addresses to the application (currently hard-coded).
 
 use crate::net::ipv6::ip_utils::IPAddr;
 use crate::net::network_capabilities::NetworkCapability;
-use crate::net::stream::encode_u16;
-use crate::net::stream::encode_u8;
 use crate::net::stream::SResult;
+use crate::net::stream::encode_u8;
+use crate::net::stream::encode_u16;
 use crate::net::udp::udp_port_table::{PortQuery, UdpPortManager};
 use crate::net::udp::udp_recv::UDPRecvClient;
 use crate::net::udp::udp_send::{UDPSendClient, UDPSender};
@@ -42,10 +41,11 @@ mod upcall {
     /// `RESERVE` to indicate that port binding is is a prerequisite to
     /// reception.
     pub const PACKET_RECEIVED: usize = 0;
-    /// Callback for when packet is transmitted. Notably, this callback receives
-    /// the result of the send_done callback from udp_send.rs, which does not
-    /// currently pass information regarding whether packets were acked at the
-    /// link layer.
+    /// Callback for when packet is transmitted.
+    ///
+    /// Notably, this callback receives the result of the send_done callback
+    /// from udp_send.rs, which does not currently pass information regarding
+    /// whether packets were acked at the link layer.
     pub const PACKET_TRANSMITTED: usize = 1;
     /// Number of upcalls.
     pub const COUNT: u8 = 2;
@@ -87,8 +87,8 @@ impl UDPEndpoint {
     ///
     /// # Arguments
     ///
-    /// `buf` - A mutable buffer to serialize the `UDPEndpoint` into
-    /// `offset` - The current offset into the provided buffer
+    /// - `buf` - A mutable buffer to serialize the `UDPEndpoint` into
+    /// - `offset` - The current offset into the provided buffer
     ///
     /// # Return Value
     ///
@@ -165,15 +165,15 @@ impl<'a> UDPDriver<'a> {
         net_cap: &'static NetworkCapability,
     ) -> UDPDriver<'a> {
         UDPDriver {
-            sender: sender,
+            sender,
             apps: grant,
             current_app: Cell::new(None),
-            interface_list: interface_list,
-            max_tx_pyld_len: max_tx_pyld_len,
-            port_table: port_table,
+            interface_list,
+            max_tx_pyld_len,
+            port_table,
             kernel_buffer: MapCell::new(kernel_buffer),
-            driver_send_cap: driver_send_cap,
-            net_cap: net_cap,
+            driver_send_cap,
+            net_cap,
         }
     }
 
@@ -208,12 +208,10 @@ impl<'a> UDPDriver<'a> {
         let result = self.perform_tx_sync(processid);
         if result != Ok(()) {
             let _ = self.apps.enter(processid, |_app, upcalls| {
-                upcalls
-                    .schedule_upcall(
-                        upcall::PACKET_TRANSMITTED,
-                        (kernel::errorcode::into_statuscode(result), 0, 0),
-                    )
-                    .ok();
+                let _ = upcalls.schedule_upcall(
+                    upcall::PACKET_TRANSMITTED,
+                    (kernel::errorcode::into_statuscode(result), 0, 0),
+                );
             });
         }
     }
@@ -322,7 +320,7 @@ impl<'a> UDPDriver<'a> {
             addr.0.copy_from_slice(a);
 
             let pair = UDPEndpoint {
-                addr: addr,
+                addr,
                 port: host_slice_to_u16(p),
             };
             Some(pair)
@@ -330,53 +328,55 @@ impl<'a> UDPDriver<'a> {
     }
 }
 
-impl<'a> SyscallDriver for UDPDriver<'a> {
+impl SyscallDriver for UDPDriver<'_> {
     /// UDP control
     ///
     /// ### `command_num`
     ///
     /// - `0`: Driver existence check.
-    /// - `1`: Get the interface list
-    ///        app_cfg (out): 16 * `n` bytes: the list of interface IPv6 addresses, length
-    ///                       limited by `app_cfg` length.
-    ///        Returns INVAL if the cfg buffer is the wrong size, or not available.
+    /// - `1`: Get the interface list app_cfg (out): 16 * `n` bytes: the list of
+    ///   interface IPv6 addresses, length limited by `app_cfg` length. Returns
+    ///   INVAL if the cfg buffer is the wrong size, or not available.
     /// - `2`: Transmit payload.
-    ///        Returns BUSY is this process already has a pending tx.
-    ///        Returns INVAL if no valid buffer has been loaded into the write buffer,
-    ///        or if the config buffer is the wrong length, or if the destination and source
-    ///        port/address pairs cannot be parsed.
-    ///        Otherwise, returns the result of do_next_tx_immediate(). Notably, a successful
-    ///        transmit can produce two different success values. If success is returned,
-    ///        this simply means that the packet was queued. In this case, the app still
-    ///        still needs to wait for a callback to check if any errors occurred before
-    ///        the packet was passed to the radio. However, if Success_U32
-    ///        is returned with value 1, this means the the packet was successfully passed
-    ///        the radio without any errors, which tells the userland application that it does
-    ///        not need to wait for a callback to check if any errors occurred while the packet
-    ///        was being passed down to the radio. Any successful return value indicates that
-    ///        the app should wait for a send_done() callback before attempting to queue another
-    ///        packet.
-    ///        Currently, only will transmit if the app has bound to the port passed in the tx_cfg
-    ///        buf as the source address. If no port is bound, returns RESERVE, if it tries to
-    ///        send on a port other than the port which is bound, returns INVALID.
-    ///        Notably, the currently transmit implementation allows for starvation - an
-    ///        an app with a lower app id can send constantly and starve an app with a
-    ///        later ID.
-    /// - `3`: Bind to the address in rx_cfg. Returns Ok(()) if that addr/port combo is free,
-    ///        returns INVAL if the address requested is not a local interface, or if the port
-    ///        requested is 0. Returns BUSY if that port is already bound to by another app.
-    ///        This command should be called after allow() is called on the rx_cfg buffer, and
-    ///        before subscribe() is used to set up the recv callback. Additionally, apps can only
-    ///        send on ports after they have bound to said port. If this command is called
-    ///        and the address in rx_cfg is 0::0 : 0, this command will reset the option
-    ///        containing the bound port to None. Notably,
-    ///        the current implementation of this only allows for each app to bind to a single
-    ///        port at a time, as such an implementation conserves memory (and is similar
-    ///        to the approach applied by TinyOS and Riot).
-    ///        /// - `4`: Returns the maximum payload that can be transmitted by apps using this driver.
-    ///        This represents the size of the payload buffer in the kernel. Apps can use this
-    ///        syscall to ensure they do not attempt to send too-large messages.
-
+    ///   - Returns BUSY is this process already has a pending tx.
+    ///   - Returns INVAL if no valid buffer has been loaded into the write
+    ///     buffer, or if the config buffer is the wrong length, or if the
+    ///     destination and source port/address pairs cannot be parsed.
+    ///   - Otherwise, returns the result of do_next_tx_immediate(). Notably, a
+    ///     successful transmit can produce two different success values. If
+    ///     success is returned, this simply means that the packet was queued.
+    ///     In this case, the app still still needs to wait for a callback to
+    ///     check if any errors occurred before the packet was passed to the
+    ///     radio. However, if Success_U32 is returned with value 1, this means
+    ///     the the packet was successfully passed the radio without any errors,
+    ///     which tells the userland application that it does not need to wait
+    ///     for a callback to check if any errors occurred while the packet was
+    ///     being passed down to the radio. Any successful return value
+    ///     indicates that the app should wait for a send_done() callback before
+    ///     attempting to queue another packet. Currently, only will transmit if
+    ///     the app has bound to the port passed in the tx_cfg buf as the source
+    ///     address.
+    ///   - If no port is bound, returns RESERVE,
+    ///   - if it tries to send on a port other than the port which is bound,
+    ///     returns INVALID. Notably, the currently transmit implementation
+    ///     allows for starvation: an an app with a lower app id can send
+    ///     constantly and starve an app with a later ID.
+    /// - `3`: Bind to the address in rx_cfg. Returns Ok(()) if that addr/port
+    ///   combo is free, returns INVAL if the address requested is not a local
+    ///   interface, or if the port requested is 0. Returns BUSY if that port is
+    ///   already bound to by another app. This command should be called after
+    ///   allow() is called on the rx_cfg buffer, and before subscribe() is used
+    ///   to set up the recv callback. Additionally, apps can only send on ports
+    ///   after they have bound to said port. If this command is called and the
+    ///   address in rx_cfg is 0::0 : 0, this command will reset the option
+    ///   containing the bound port to None. Notably, the current implementation
+    ///   of this only allows for each app to bind to a single port at a time,
+    ///   as such an implementation conserves memory (and is similar to the
+    ///   approach applied by TinyOS and Riot).
+    /// - `4`: Returns the maximum payload that can be transmitted by apps using
+    ///   this driver. This represents the size of the payload buffer in the
+    ///   kernel. Apps can use this syscall to ensure they do not attempt to
+    ///   send too-large messages.
     fn command(
         &self,
         command_num: usize,
@@ -467,10 +467,9 @@ impl<'a> SyscallDriver for UDPDriver<'a> {
                     })
                     .unwrap_or_else(|err| Err(err.into()));
                 match res {
-                    Ok(()) => self.do_next_tx_immediate(processid).map_or_else(
-                        |err| CommandReturn::failure(err),
-                        |v| CommandReturn::success_u32(v),
-                    ),
+                    Ok(()) => self
+                        .do_next_tx_immediate(processid)
+                        .map_or_else(CommandReturn::failure, CommandReturn::success_u32),
                     Err(e) => CommandReturn::failure(e),
                 }
             }
@@ -491,13 +490,7 @@ impl<'a> SyscallDriver for UDPDriver<'a> {
                                         cfg[mem::size_of::<UDPEndpoint>()..]
                                             .copy_to_slice(&mut tmp_endpoint);
 
-                                        if let Some(local_iface) =
-                                            self.parse_ip_port_pair(&tmp_endpoint)
-                                        {
-                                            Some(local_iface)
-                                        } else {
-                                            None
-                                        }
+                                        self.parse_ip_port_pair(&tmp_endpoint)
                                     }
                                 })
                             })
@@ -559,19 +552,17 @@ impl<'a> SyscallDriver for UDPDriver<'a> {
     }
 }
 
-impl<'a> UDPSendClient for UDPDriver<'a> {
+impl UDPSendClient for UDPDriver<'_> {
     fn send_done(&self, result: Result<(), ErrorCode>, mut dgram: SubSliceMut<'static, u8>) {
         // Replace the returned kernel buffer. Now we can send the next msg.
         dgram.reset();
         self.kernel_buffer.replace(dgram);
         self.current_app.get().map(|processid| {
             let _ = self.apps.enter(processid, |_app, upcalls| {
-                upcalls
-                    .schedule_upcall(
-                        upcall::PACKET_TRANSMITTED,
-                        (kernel::errorcode::into_statuscode(result), 0, 0),
-                    )
-                    .ok();
+                let _ = upcalls.schedule_upcall(
+                    upcall::PACKET_TRANSMITTED,
+                    (kernel::errorcode::into_statuscode(result), 0, 0),
+                );
             });
         });
         self.current_app.set(None);
@@ -579,7 +570,7 @@ impl<'a> UDPSendClient for UDPDriver<'a> {
     }
 }
 
-impl<'a> UDPRecvClient for UDPDriver<'a> {
+impl UDPRecvClient for UDPDriver<'_> {
     fn receive(
         &self,
         src_addr: IPAddr,
@@ -617,9 +608,7 @@ impl<'a> UDPRecvClient for UDPDriver<'a> {
                             addr: src_addr,
                             port: src_port,
                         };
-                        kernel_data
-                            .schedule_upcall(upcall::PACKET_RECEIVED, (len, 0, 0))
-                            .ok();
+                        let _ = kernel_data.schedule_upcall(upcall::PACKET_RECEIVED, (len, 0, 0));
                         const CFG_LEN: usize = 2 * size_of::<UDPEndpoint>();
                         let _ = kernel_data
                             .get_readwrite_processbuffer(rw_allow::RX_CFG)
@@ -642,7 +631,7 @@ impl<'a> UDPRecvClient for UDPDriver<'a> {
     }
 }
 
-impl<'a> PortQuery for UDPDriver<'a> {
+impl PortQuery for UDPDriver<'_> {
     // Returns true if |port| is bound (on any iface), false otherwise.
     fn is_bound(&self, port: u16) -> bool {
         let mut port_bound = false;

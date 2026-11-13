@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
+use core::cell::Cell;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::ptr::addr_of;
@@ -9,16 +10,11 @@ use core::ptr::addr_of_mut;
 use kernel::ErrorCode;
 
 use kernel::debug;
-use kernel::debug::IoWrite;
 use kernel::hil::led;
 use kernel::hil::uart::Transmit;
 use kernel::hil::uart::{self};
-use kernel::utilities::cells::VolatileCell;
+use kernel::utilities::io_write::IoWrite;
 use nrf52840::gpio::Pin;
-
-use crate::CHIP;
-use crate::PROCESSES;
-use crate::PROCESS_PRINTER;
 
 struct Writer {
     initialized: bool,
@@ -37,11 +33,11 @@ const BUF_LEN: usize = 512;
 static mut STATIC_PANIC_BUF: [u8; BUF_LEN] = [0; BUF_LEN];
 
 static mut DUMMY: DummyUsbClient = DummyUsbClient {
-    fired: VolatileCell::new(false),
+    fired: Cell::new(false),
 };
 
 struct DummyUsbClient {
-    fired: VolatileCell<bool>,
+    fired: Cell<bool>,
 }
 
 impl uart::TransmitClient for DummyUsbClient {
@@ -110,13 +106,13 @@ impl IoWrite for Writer {
                         n.clear_pending();
                         n.enable();
                     }
-                    if DUMMY.fired.get() {
+                    if (*addr_of!(DUMMY)).fired.get() {
                         // buffer finished transmitting, return so we can output additional
                         // messages when requested by the panic handler.
                         break;
                     }
                 }
-                DUMMY.fired.set(false);
+                (*addr_of!(DUMMY)).fired.set(false);
             });
         }
         buf.len()
@@ -127,19 +123,18 @@ impl IoWrite for Writer {
 ///
 /// We just use the standard default provided by the debug module in the kernel.
 #[cfg(not(test))]
-#[no_mangle]
 #[panic_handler]
-pub unsafe fn panic_fmt(pi: &PanicInfo) -> ! {
-    let led_kernel_pin = &nrf52840::gpio::GPIOPin::new(Pin::P1_01);
+pub fn panic_fmt(pi: &PanicInfo) -> ! {
+    let led_kernel_pin = &nrf52840::gpio::nrf52840_gpio_create_pin(Pin::P1_01);
     let led = &mut led::LedHigh::new(led_kernel_pin);
-    let writer = &mut *addr_of_mut!(WRITER);
-    debug::panic(
-        &mut [led],
-        writer,
-        pi,
-        &cortexm4::support::nop,
-        &*addr_of!(PROCESSES),
-        &*addr_of!(CHIP),
-        &*addr_of!(PROCESS_PRINTER),
-    )
+    let writer = unsafe { &mut *addr_of_mut!(WRITER) };
+    unsafe {
+        debug::panic_old(
+            &mut [led],
+            writer,
+            pi,
+            &cortexm4::support::nop,
+            crate::PANIC_RESOURCES.get(),
+        )
+    }
 }

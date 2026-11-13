@@ -11,7 +11,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! let mux_i2c = components::i2c::I2CMuxComponent::new(&stm32f4xx::i2c::I2C1)
 //!     .finalize(components::i2c_mux_component_helper!());
 //!
@@ -27,11 +27,11 @@
 use core::cell::Cell;
 use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
+use kernel::ErrorCode;
 use kernel::hil::gpio;
 use kernel::hil::i2c;
 use kernel::hil::touch::{self, GestureEvent, TouchEvent, TouchStatus};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
 pub static NO_TOUCH: TouchEvent = TouchEvent {
     id: 0,
@@ -50,7 +50,7 @@ enum_from_primitive! {
     }
 }
 
-pub struct Ft6x06<'a, I: i2c::I2CDevice> {
+pub struct Ft6x06<'a, I: i2c::I2CDevice<'a>> {
     i2c: &'a I,
     interrupt_pin: &'a dyn gpio::InterruptPin<'a>,
     touch_client: OptionalCell<&'a dyn touch::TouchClient>,
@@ -61,7 +61,7 @@ pub struct Ft6x06<'a, I: i2c::I2CDevice> {
     events: TakeCell<'static, [TouchEvent]>,
 }
 
-impl<'a, I: i2c::I2CDevice> Ft6x06<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> Ft6x06<'a, I> {
     pub fn new(
         i2c: &'a I,
         interrupt_pin: &'a dyn gpio::InterruptPin<'a>,
@@ -71,8 +71,8 @@ impl<'a, I: i2c::I2CDevice> Ft6x06<'a, I> {
         // setup and return struct
         interrupt_pin.enable_interrupts(gpio::InterruptEdge::FallingEdge);
         Ft6x06 {
-            i2c: i2c,
-            interrupt_pin: interrupt_pin,
+            i2c,
+            interrupt_pin,
             touch_client: OptionalCell::empty(),
             gesture_client: OptionalCell::empty(),
             multi_touch_client: OptionalCell::empty(),
@@ -83,7 +83,7 @@ impl<'a, I: i2c::I2CDevice> Ft6x06<'a, I> {
     }
 }
 
-impl<'a, I: i2c::I2CDevice> i2c::I2CClient for Ft6x06<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> i2c::I2CClient for Ft6x06<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], _status: Result<(), i2c::Error>) {
         self.num_touches.set((buffer[1] & 0x0F) as usize);
         self.touch_client.map(|client| {
@@ -168,7 +168,7 @@ impl<'a, I: i2c::I2CDevice> i2c::I2CClient for Ft6x06<'a, I> {
     }
 }
 
-impl<'a, I: i2c::I2CDevice> gpio::Client for Ft6x06<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> gpio::Client for Ft6x06<'a, I> {
     fn fired(&self) {
         self.buffer.take().map(|buffer| {
             self.interrupt_pin.disable_interrupts();
@@ -187,7 +187,7 @@ impl<'a, I: i2c::I2CDevice> gpio::Client for Ft6x06<'a, I> {
     }
 }
 
-impl<'a, I: i2c::I2CDevice> touch::Touch<'a> for Ft6x06<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> touch::Touch<'a> for Ft6x06<'a, I> {
     fn enable(&self) -> Result<(), ErrorCode> {
         Ok(())
     }
@@ -201,13 +201,13 @@ impl<'a, I: i2c::I2CDevice> touch::Touch<'a> for Ft6x06<'a, I> {
     }
 }
 
-impl<'a, I: i2c::I2CDevice> touch::Gesture<'a> for Ft6x06<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> touch::Gesture<'a> for Ft6x06<'a, I> {
     fn set_client(&self, client: &'a dyn touch::GestureClient) {
         self.gesture_client.replace(client);
     }
 }
 
-impl<'a, I: i2c::I2CDevice> touch::MultiTouch<'a> for Ft6x06<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> touch::MultiTouch<'a> for Ft6x06<'a, I> {
     fn enable(&self) -> Result<(), ErrorCode> {
         Ok(())
     }

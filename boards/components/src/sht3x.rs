@@ -22,6 +22,7 @@ use capsules_extra::sht3x::SHT3x;
 use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::i2c;
+use kernel::hil::i2c::I2CDevice as _;
 use kernel::hil::time::Alarm;
 
 // Setup static space for the objects.
@@ -43,7 +44,7 @@ macro_rules! sht3x_component_static {
         );
 
         (sht3x_alarm, i2c_device, sht3x, buffer)
-    };};
+    }};
 }
 
 pub type SHT3xComponentType<A, I> = capsules_extra::sht3x::SHT3x<'static, A, I>;

@@ -25,15 +25,12 @@
 //! * Date: March 01, 2017
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil::entropy::{self, Continue};
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
-
-const RNG_BASE: StaticRef<RngRegisters> =
-    unsafe { StaticRef::new(0x4000D000 as *const RngRegisters) };
+use kernel::utilities::registers::{ReadOnly, ReadWrite, WriteOnly, register_bitfields};
 
 #[repr(C)]
 pub struct RngRegisters {
@@ -117,9 +114,9 @@ pub struct Trng<'a> {
 }
 
 impl<'a> Trng<'a> {
-    pub const fn new() -> Trng<'a> {
+    pub const fn new(registers: StaticRef<RngRegisters>) -> Trng<'a> {
         Trng {
-            registers: RNG_BASE,
+            registers,
             client: OptionalCell::empty(),
             index: Cell::new(0),
             randomness: Cell::new(0),

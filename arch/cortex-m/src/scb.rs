@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-//! ARM System Control Block
+//! Cortex-M System Control Block (SCB)
 //!
 //! <http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0553a/CIHFDJCA.html>
 
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
+use kernel::capabilities;
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
 register_structs! {
     /// In an ARMv7-M processor, a System Control Block (SCB) in the SCS
@@ -275,18 +276,56 @@ const SCB: StaticRef<ScbRegisters> = unsafe { StaticRef::new(0xE000ED00 as *cons
 /// Allow the core to go into deep sleep on WFI.
 ///
 /// The specific definition of "deep sleep" is chip specific.
-pub unsafe fn set_sleepdeep() {
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn set_sleepdeep(_cap: &dyn capabilities::CpuStateControlCapability) {
+    use core::arch::asm;
+
     SCB.scr.modify(SystemControl::SLEEPDEEP::SET);
+
+    // # Safety
+    //
+    // - INPUTS: This does not use the existing value of any registers.
+    // - OUTPUTS: This does not write any registers.
+    // - Options set:
+    //   - nomem: We do not read or write memory.
+    //   - nostack: This does not use the stack.
+    //   - preserves_flags: This does not change flags.
+    // - Options not set:
+    //   - pure: not required
+    //   - readonly: implied by nomem
+    //   - noreturn: we do fall-through
+    //   - att_syntax: not on arm
+    //   - raw: not required
+    unsafe {
+        asm!(
+            "
+    dsb                 // Data Synchronization Barrier
+    isb                 // Instruction Synchronization Barrier
+            ",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 }
+
+// Mock implementation for tests on Travis-CI.
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn set_sleepdeep(_cap: &dyn capabilities::CpuStateControlCapability) {
+    // Dummy operation to satisfy the `Writable` trait import on
+    // non-ARM platforms.
+    SCB.scr.modify(SystemControl::SLEEPDEEP::SET);
+
+    unimplemented!()
+}
+
 /// Do not allow the core to go into deep sleep on WFI.
 ///
 /// The specific definition of "deep sleep" is chip specific.
-pub unsafe fn unset_sleepdeep() {
+pub fn unset_sleepdeep(_cap: &dyn capabilities::CpuStateControlCapability) {
     SCB.scr.modify(SystemControl::SLEEPDEEP::CLEAR);
 }
 
 /// Software reset using the ARM System Control Block
-pub unsafe fn reset() {
+pub fn reset(_cap: &dyn capabilities::CpuStateControlCapability) {
     SCB.aircr.modify(
         ApplicationInterruptAndReset::VECTKEY.val(0x05FA)
             + ApplicationInterruptAndReset::PRIGROUP.val(0b111)
@@ -306,7 +345,29 @@ pub unsafe fn disable_fpca() {
     SCB.cpacr
         .modify(CoprocessorAccessControl::CP10::CLEAR + CoprocessorAccessControl::CP11::CLEAR);
 
-    asm!("dsb", "isb", options(nomem, nostack, preserves_flags));
+    // # Safety
+    //
+    // - INPUTS: This does not use the existing value of any registers.
+    // - OUTPUTS: This does not write any registers.
+    // - Options set:
+    //   - nomem: We do not read or write memory.
+    //   - nostack: This does not use the stack.
+    //   - preserves_flags: This does not change flags.
+    // - Options not set:
+    //   - pure: not required
+    //   - readonly: implied by nomem
+    //   - noreturn: we do fall-through
+    //   - att_syntax: not on arm
+    //   - raw: not required
+    unsafe {
+        asm!(
+            "
+    dsb                 // Data Synchronization Barrier
+    isb                 // Instruction Synchronization Barrier
+            ",
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 
     if SCB.cpacr.read(CoprocessorAccessControl::CP10) != 0
         || SCB.cpacr.read(CoprocessorAccessControl::CP11) != 0
@@ -323,4 +384,37 @@ pub unsafe fn disable_fpca() {
     let _ = SCB.cpacr.read(CoprocessorAccessControl::CP10);
 
     unimplemented!()
+}
+
+/// Disable the MemFault exception.
+///
+/// # Notes
+///
+/// This escalates the exception to a HardFault instead of triggering a
+/// MemFault exception, so it does not _disable_ MemFault completely.
+pub fn disable_memfault(_cap: &dyn capabilities::CpuStateControlCapability) {
+    SCB.shcsr
+        .modify(SystemHandlerControlAndState::MEMFAULTENA::CLEAR);
+}
+
+/// Disable the UsageFault exception.
+///
+/// # Notes
+///
+/// This escalates the exception to a HardFault instead of triggering a
+/// UsageFault exception, so it does not _disable_ UsageFault completely.
+pub fn disable_usagefault(_cap: &dyn capabilities::CpuStateControlCapability) {
+    SCB.shcsr
+        .modify(SystemHandlerControlAndState::USGFAULTENA::CLEAR);
+}
+
+/// Disable the BusFault exception.
+///
+/// # Notes
+///
+/// This escalates the exception to a HardFault instead of triggering a
+/// BusFault exception, so it does not _disable_ BusFault completely.
+pub fn disable_busfault(_cap: &dyn capabilities::CpuStateControlCapability) {
+    SCB.shcsr
+        .modify(SystemHandlerControlAndState::BUSFAULTENA::CLEAR);
 }

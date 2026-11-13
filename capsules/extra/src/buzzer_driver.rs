@@ -15,7 +15,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let virtual_pwm_buzzer = static_init!(
@@ -110,10 +110,10 @@ impl<'a, B: hil::buzzer::Buzzer<'a>> Buzzer<'a, B> {
         grant: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<0>>,
     ) -> Buzzer<'a, B> {
         Buzzer {
-            buzzer: buzzer,
+            buzzer,
             apps: grant,
             active_app: OptionalCell::empty(),
-            max_duration_ms: max_duration_ms,
+            max_duration_ms,
         }
     }
 
@@ -158,7 +158,7 @@ impl<'a, B: hil::buzzer::Buzzer<'a>> Buzzer<'a, B> {
             let processid = appiter.processid();
             let started_command = appiter.enter(|app, _| {
                 // If this app has a pending command let's use it.
-                app.pending_command.take().map_or(false, |command| {
+                app.pending_command.take().is_some_and(|command| {
                     // Mark this driver as being in use.
                     self.active_app.set(processid);
                     // Actually make the buzz happen.
@@ -192,9 +192,8 @@ impl<'a, B: hil::buzzer::Buzzer<'a>> hil::buzzer::BuzzerClient for Buzzer<'a, B>
         // Mark the active app as None and see if there is a callback.
         self.active_app.take().map(|processid| {
             let _ = self.apps.enter(processid, |_app, upcalls| {
-                upcalls
-                    .schedule_upcall(0, (kernel::errorcode::into_statuscode(status), 0, 0))
-                    .ok();
+                let _ =
+                    upcalls.schedule_upcall(0, (kernel::errorcode::into_statuscode(status), 0, 0));
             });
         });
 

@@ -5,5 +5,9 @@
 [package]
 name = "tock-cells"
 version = "0.1.0"
-authors = ["Tock Project Developers <tock-dev@googlegroups.com>"]
+authors = ["Tock Project Developers <devel@lists.tockos.org>"]
+edition = "2024"
 
+
+[lints]
+workspace = true

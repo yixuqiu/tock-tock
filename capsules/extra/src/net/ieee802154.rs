@@ -7,8 +7,8 @@
 //! frames, MAC command frames, and the like.
 
 use crate::net::stream::SResult;
-use crate::net::stream::{decode_bytes_be, decode_u16, decode_u32, decode_u8};
-use crate::net::stream::{encode_bytes, encode_bytes_be, encode_u16, encode_u32, encode_u8};
+use crate::net::stream::{decode_bytes_be, decode_u8, decode_u16, decode_u32};
+use crate::net::stream::{encode_bytes, encode_bytes_be, encode_u8, encode_u16, encode_u32};
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum MacAddress {
@@ -327,10 +327,10 @@ impl Security {
         stream_done!(
             off,
             Security {
-                level: level,
-                asn_in_nonce: asn_in_nonce,
-                frame_counter: frame_counter,
-                key_id: key_id,
+                level,
+                asn_in_nonce,
+                frame_counter,
+                key_id,
             }
         );
     }
@@ -411,8 +411,8 @@ impl HeaderIE<'_> {
             0x7e => HeaderIE::Termination1,
             0x7f => HeaderIE::Termination2,
             element_id => HeaderIE::Undissected {
-                element_id: element_id,
-                content: content,
+                element_id,
+                content,
             },
         };
 
@@ -474,10 +474,7 @@ impl PayloadIE<'_> {
 
         let ie = match element_id {
             0xf => PayloadIE::Termination,
-            group_id => PayloadIE::Undissected {
-                group_id: group_id,
-                content: content,
-            },
+            group_id => PayloadIE::Undissected { group_id, content },
         };
 
         stream_done!(off + content_len, ie);
@@ -636,11 +633,8 @@ impl Header<'_> {
                 stream_cond!(self.dst_addr.is_some() == self.dst_pan.is_some());
                 stream_cond!(self.src_addr.is_some() == self.src_pan.is_some());
 
-                match (self.dst_pan, self.src_pan) {
-                    (Some(dst_pan), Some(src_pan)) => {
-                        drop_src_pan = dst_pan == src_pan;
-                    }
-                    _ => {}
+                if let (Some(dst_pan), Some(src_pan)) = (self.dst_pan, self.src_pan) {
+                    drop_src_pan = dst_pan == src_pan;
                 }
                 drop_src_pan
             }
@@ -770,20 +764,20 @@ impl Header<'_> {
             off,
             (
                 Header {
-                    frame_type: frame_type,
-                    frame_pending: frame_pending,
-                    ack_requested: ack_requested,
-                    version: version,
-                    seq: seq,
-                    dst_pan: dst_pan,
-                    dst_addr: dst_addr,
-                    src_pan: src_pan,
-                    src_addr: src_addr,
-                    security: security,
-                    header_ies: header_ies,
-                    header_ies_len: header_ies_len,
-                    payload_ies: payload_ies,
-                    payload_ies_len: payload_ies_len,
+                    frame_type,
+                    frame_pending,
+                    ack_requested,
+                    version,
+                    seq,
+                    dst_pan,
+                    dst_addr,
+                    src_pan,
+                    src_addr,
+                    security,
+                    header_ies,
+                    header_ies_len,
+                    payload_ies,
+                    payload_ies_len,
                 },
                 mac_payload_off
             )

@@ -9,6 +9,7 @@ use capsules_extra::lps22hb::Lps22hb;
 use core::mem::MaybeUninit;
 use kernel::component::Component;
 use kernel::hil::i2c;
+use kernel::hil::i2c::I2CDevice as _;
 
 #[macro_export]
 macro_rules! lps22hb_component_static {
@@ -24,7 +25,7 @@ macro_rules! lps22hb_component_static {
         let buffer = kernel::static_buf!([u8; 4]);
 
         (i2c_device, lps22hb, buffer)
-    };};
+    }};
 }
 
 pub struct Lps22hbComponent<I: 'static + i2c::I2CMaster<'static>> {

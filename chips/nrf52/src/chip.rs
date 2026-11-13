@@ -2,21 +2,91 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
+//! Top-level chip definition for the nRF52 microcontroller.
+
 use core::fmt::Write;
-use cortexm4::{nvic, CortexM4, CortexMVariant};
+use cortexm4f::{CortexM4F, CortexMVariant, nvic};
 use kernel::platform::chip::InterruptService;
+use kernel::utilities::StaticRef;
+
+//
+// Peripheral Registers Instantiations
+//
+
+const AESECB_BASE: StaticRef<crate::aes::AesEcbRegisters> =
+    unsafe { StaticRef::new(0x4000E000 as *const crate::aes::AesEcbRegisters) };
+
+const APPROTECT_BASE: StaticRef<crate::approtect::ApprotectRegisters> =
+    unsafe { StaticRef::new(0x40000000 as *const crate::approtect::ApprotectRegisters) };
+
+const CLOCK_BASE: StaticRef<crate::clock::ClockRegisters> =
+    unsafe { StaticRef::new(0x40000000 as *const crate::clock::ClockRegisters) };
+
+const COMP_BASE: StaticRef<crate::acomp::CompRegisters> =
+    unsafe { StaticRef::new(0x40013000 as *const crate::acomp::CompRegisters) };
+
+pub const FICR_BASE: StaticRef<crate::ficr::FicrRegisters> =
+    unsafe { StaticRef::new(0x10000000 as *const crate::ficr::FicrRegisters) };
+
+const NVMC_BASE: StaticRef<crate::nvmc::NvmcRegisters> =
+    unsafe { StaticRef::new(0x4001E400 as *const crate::nvmc::NvmcRegisters) };
+
+const POWER_BASE: StaticRef<crate::power::PowerRegisters> =
+    unsafe { StaticRef::new(0x40000000 as *const crate::power::PowerRegisters) };
+
+const PWM0_BASE: StaticRef<crate::pwm::PwmRegisters> =
+    unsafe { StaticRef::new(0x4001C000 as *const crate::pwm::PwmRegisters) };
+
+const RADIO_BASE: StaticRef<crate::ble_radio::RadioRegisters> =
+    unsafe { StaticRef::new(0x40001000 as *const crate::ble_radio::RadioRegisters) };
+
+const RTC1_BASE: StaticRef<crate::rtc::RtcRegisters> =
+    unsafe { StaticRef::new(0x40011000 as *const crate::rtc::RtcRegisters) };
+
+const SAADC_BASE: StaticRef<crate::adc::AdcRegisters> =
+    unsafe { StaticRef::new(0x40007000 as *const crate::adc::AdcRegisters) };
+
+const SPIM0_BASE: StaticRef<crate::spi::SpimRegisters> =
+    unsafe { StaticRef::new(0x40003000 as *const crate::spi::SpimRegisters) };
+
+const SPIM2_BASE: StaticRef<crate::spi::SpimRegisters> =
+    unsafe { StaticRef::new(0x40023000 as *const crate::spi::SpimRegisters) };
+
+const TEMP_BASE: StaticRef<crate::temperature::TempRegisters> =
+    unsafe { StaticRef::new(0x4000C000 as *const crate::temperature::TempRegisters) };
+
+const TIMER0_BASE: StaticRef<crate::timer::TimerRegisters> =
+    unsafe { StaticRef::new(0x40008000 as *const crate::timer::TimerRegisters) };
+
+const TIMER1_BASE: StaticRef<crate::timer::TimerRegisters> =
+    unsafe { StaticRef::new(0x40009000 as *const crate::timer::TimerRegisters) };
+
+const TIMER2_BASE: StaticRef<crate::timer::TimerRegisters> =
+    unsafe { StaticRef::new(0x4000A000 as *const crate::timer::TimerRegisters) };
+
+const TWI1_BASE: StaticRef<crate::i2c::TwiRegisters> =
+    unsafe { StaticRef::new(0x40004000 as *const crate::i2c::TwiRegisters) };
+
+const UICR_BASE: StaticRef<crate::uicr::UicrRegisters> =
+    unsafe { StaticRef::new(0x10001200 as *const crate::uicr::UicrRegisters) };
+
+const RNG_BASE: StaticRef<crate::trng::RngRegisters> =
+    unsafe { StaticRef::new(0x4000D000 as *const crate::trng::RngRegisters) };
 
 pub struct NRF52<'a, I: InterruptService + 'a> {
-    mpu: cortexm4::mpu::MPU,
-    userspace_kernel_boundary: cortexm4::syscall::SysCall,
+    mpu: cortexm4f::mpu::MPU,
+    userspace_kernel_boundary: cortexm4f::syscall::SysCall,
     interrupt_service: &'a I,
 }
 
 impl<'a, I: InterruptService + 'a> NRF52<'a, I> {
-    pub unsafe fn new(interrupt_service: &'a I) -> Self {
+    pub fn new(interrupt_service: &'a I) -> Self {
+        // SAFETY: All nRF52 chips are Cortex-M4F cores with valid MPU hardware.
+        let mpu = unsafe { cortexm4f::mpu::new() };
+
         Self {
-            mpu: cortexm4::mpu::MPU::new(),
-            userspace_kernel_boundary: cortexm4::syscall::SysCall::new(),
+            mpu,
+            userspace_kernel_boundary: cortexm4f::syscall::SysCall::new(),
             interrupt_service,
         }
     }
@@ -38,42 +108,62 @@ pub struct Nrf52DefaultPeripherals<'a> {
     pub timer0: crate::timer::TimerAlarm<'a>,
     pub timer1: crate::timer::TimerAlarm<'a>,
     pub timer2: crate::timer::Timer,
-    pub uarte0: crate::uart::Uarte<'a>,
+    pub uarte0: crate::uarte::Uarte<'a>,
     pub spim0: crate::spi::SPIM<'a>,
-    pub twi0: crate::i2c::TWI<'a>,
-    pub spim1: crate::spi::SPIM<'a>,
     pub twi1: crate::i2c::TWI<'a>,
     pub spim2: crate::spi::SPIM<'a>,
     pub adc: crate::adc::Adc<'a>,
     pub nvmc: crate::nvmc::Nvmc,
     pub clock: crate::clock::Clock,
     pub pwm0: crate::pwm::Pwm,
+    pub uicr: crate::uicr::Uicr<'a>,
+    pub approtect: crate::approtect::Approtect<'a>,
+    pub ficr: &'a crate::ficr::Ficr,
 }
 
 impl<'a> Nrf52DefaultPeripherals<'a> {
-    pub fn new() -> Self {
+    /// Create default peripherals for an nRF52-based microcontroller.
+    ///
+    /// # Safety
+    ///
+    /// Some of these peripherals use DMA. As such, the default peripherals must
+    /// be unique. This requires:
+    ///
+    /// - This constructor must be called at most once.
+    /// - There must not be additional instances of the DMA-enabled peripheral
+    ///   drivers.
+    /// - There must not be any other code that accesses the DMA buffer and
+    ///   length registers of the DMA-enabled peripherals.
+    pub unsafe fn new(ficr: &'a crate::ficr::Ficr, aes_ecb_buffer: &'static mut [u8; 48]) -> Self {
+        // SAFETY: See function-level doc.
+        let aes_registers = unsafe { crate::aes::AesEcbRegistersManager::new(AESECB_BASE) };
+
+        // SAFETY: See function-level doc.
+        let uarte0_registers = unsafe { crate::uarte::UarteRegistersManager::new_uarte0() };
+
         Self {
-            acomp: crate::acomp::Comparator::new(),
-            ecb: crate::aes::AesECB::new(),
-            pwr_clk: crate::power::Power::new(),
-            ble_radio: crate::ble_radio::Radio::new(),
-            trng: crate::trng::Trng::new(),
-            rtc: crate::rtc::Rtc::new(),
-            temp: crate::temperature::Temp::new(),
-            timer0: crate::timer::TimerAlarm::new(0),
-            timer1: crate::timer::TimerAlarm::new(1),
-            timer2: crate::timer::Timer::new(2),
-            uarte0: crate::uart::Uarte::new(crate::uart::UARTE0_BASE),
-            spim0: crate::spi::SPIM::new(0),
-            twi0: crate::i2c::TWI::new_twi0(),
-            spim1: crate::spi::SPIM::new(1),
-            twi1: crate::i2c::TWI::new_twi1(),
-            spim2: crate::spi::SPIM::new(2),
+            acomp: crate::acomp::Comparator::new(COMP_BASE),
+            ecb: crate::aes::AesECB::new(aes_registers, aes_ecb_buffer),
+            pwr_clk: crate::power::Power::new(POWER_BASE),
+            ble_radio: crate::ble_radio::Radio::new(RADIO_BASE),
+            trng: crate::trng::Trng::new(RNG_BASE),
+            rtc: crate::rtc::Rtc::new(RTC1_BASE),
+            temp: crate::temperature::Temp::new(TEMP_BASE),
+            timer0: crate::timer::TimerAlarm::new(TIMER0_BASE),
+            timer1: crate::timer::TimerAlarm::new(TIMER1_BASE),
+            timer2: crate::timer::Timer::new(TIMER2_BASE),
+            uarte0: crate::uarte::Uarte::new(uarte0_registers),
+            spim0: crate::spi::SPIM::new(SPIM0_BASE),
+            spim2: crate::spi::SPIM::new(SPIM2_BASE),
+            twi1: crate::i2c::TWI::new(TWI1_BASE),
             // Default to 3.3 V VDD reference.
-            adc: crate::adc::Adc::new(3300),
-            nvmc: crate::nvmc::Nvmc::new(),
-            clock: crate::clock::Clock::new(),
-            pwm0: crate::pwm::Pwm::new(),
+            adc: crate::adc::Adc::new(SAADC_BASE, 3300),
+            nvmc: crate::nvmc::Nvmc::new(NVMC_BASE),
+            clock: crate::clock::Clock::new(CLOCK_BASE),
+            pwm0: crate::pwm::Pwm::new(PWM0_BASE),
+            uicr: crate::uicr::Uicr::new(UICR_BASE, ficr),
+            approtect: crate::approtect::Approtect::new(APPROTECT_BASE, ficr),
+            ficr,
         }
     }
     // Necessary for setting up circular dependencies
@@ -81,8 +171,8 @@ impl<'a> Nrf52DefaultPeripherals<'a> {
         kernel::deferred_call::DeferredCallClient::register(&self.nvmc);
     }
 }
-impl<'a> kernel::platform::chip::InterruptService for Nrf52DefaultPeripherals<'a> {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+impl kernel::platform::chip::InterruptService for Nrf52DefaultPeripherals<'_> {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
             crate::peripheral_interrupts::COMP => self.acomp.handle_interrupt(),
             crate::peripheral_interrupts::ECB => self.ecb.handle_interrupt(),
@@ -98,34 +188,8 @@ impl<'a> kernel::platform::chip::InterruptService for Nrf52DefaultPeripherals<'a
             crate::peripheral_interrupts::TIMER1 => self.timer1.handle_interrupt(),
             crate::peripheral_interrupts::TIMER2 => self.timer2.handle_interrupt(),
             crate::peripheral_interrupts::UART0 => self.uarte0.handle_interrupt(),
-            crate::peripheral_interrupts::SPI0_TWI0 => {
-                // SPI0 and TWI0 share interrupts.
-                // Dispatch the correct handler.
-                match (self.spim0.is_enabled(), self.twi0.is_enabled()) {
-                    (false, false) => (),
-                    (true, false) => self.spim0.handle_interrupt(),
-                    (false, true) => self.twi0.handle_interrupt(),
-                    (true, true) => debug_assert!(
-                        false,
-                        "SPIM0 and TWIM0 cannot be \
-                         enabled at the same time."
-                    ),
-                }
-            }
-            crate::peripheral_interrupts::SPI1_TWI1 => {
-                // SPI1 and TWI1 share interrupts.
-                // Dispatch the correct handler.
-                match (self.spim1.is_enabled(), self.twi1.is_enabled()) {
-                    (false, false) => (),
-                    (true, false) => self.spim1.handle_interrupt(),
-                    (false, true) => self.twi1.handle_interrupt(),
-                    (true, true) => debug_assert!(
-                        false,
-                        "SPIM1 and TWIM1 cannot be \
-                         enabled at the same time."
-                    ),
-                }
-            }
+            crate::peripheral_interrupts::SPI0_TWI0 => self.spim0.handle_interrupt(),
+            crate::peripheral_interrupts::SPI1_TWI1 => self.twi1.handle_interrupt(),
             crate::peripheral_interrupts::SPIM2_SPIS2_SPI2 => self.spim2.handle_interrupt(),
             crate::peripheral_interrupts::ADC => self.adc.handle_interrupt(),
             _ => return false,
@@ -135,8 +199,25 @@ impl<'a> kernel::platform::chip::InterruptService for Nrf52DefaultPeripherals<'a
 }
 
 impl<'a, I: InterruptService + 'a> kernel::platform::chip::Chip for NRF52<'a, I> {
-    type MPU = cortexm4::mpu::MPU;
-    type UserspaceKernelBoundary = cortexm4::syscall::SysCall;
+    type MPU = cortexm4f::mpu::MPU;
+    type UserspaceKernelBoundary = cortexm4f::syscall::SysCall;
+    type ThreadIdProvider = cortexm4f::thread_id::CortexMThreadIdProvider;
+
+    fn init() {
+        // # Safety
+        //
+        // We are setting up the nRF52 chip, so these memory locations are valid
+        // on the nRF52 and this is OK to call.
+        unsafe {
+            crate::crt1::fix_errata();
+        }
+        crate::crt1::initialize_vector_table();
+
+        // # Safety
+        //
+        // Need to enable interrupts.
+        nvic::enable_all();
+    }
 
     fn mpu(&self) -> &Self::MPU {
         &self.mpu
@@ -147,40 +228,33 @@ impl<'a, I: InterruptService + 'a> kernel::platform::chip::Chip for NRF52<'a, I>
     }
 
     fn service_pending_interrupts(&self) {
-        unsafe {
-            loop {
-                if let Some(interrupt) = nvic::next_pending() {
-                    if !self.interrupt_service.service_interrupt(interrupt) {
-                        panic!("unhandled interrupt {}", interrupt);
-                    }
-                    let n = nvic::Nvic::new(interrupt);
-                    n.clear_pending();
-                    n.enable();
-                } else {
-                    break;
-                }
+        while let Some(interrupt) = nvic::next_pending() {
+            if !self.interrupt_service.service_interrupt(interrupt) {
+                panic!("unhandled interrupt {}", interrupt);
             }
+            let n = nvic::Nvic::new(interrupt);
+            n.clear_pending();
+            n.enable();
         }
     }
 
     fn has_pending_interrupts(&self) -> bool {
-        unsafe { nvic::has_pending() }
+        nvic::has_pending()
     }
 
     fn sleep(&self) {
-        unsafe {
-            cortexm4::support::wfi();
-        }
+        let cap = kernel::create_capability!(kernel::capabilities::CpuStateControlCapability);
+        cortexm4f::support::wfi(&cap);
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        cortexm4::support::atomic(f)
+        cortexm4f::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, write: &mut dyn Write) {
-        CortexM4::print_cortexm_state(write);
+    unsafe fn print_state(_this: Option<&Self>, write: &mut dyn Write) {
+        CortexM4F::print_cortexm_state(write);
     }
 }

@@ -23,7 +23,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let lps22hb_i2c = static_init!(
@@ -37,16 +37,16 @@
 //! ```
 
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::hil::i2c::{self, I2CClient, I2CDevice};
 use kernel::hil::sensors::{PressureClient, PressureDriver};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::ErrorCode;
 
-/// Syscall driver number.
 use capsules_core::driver;
+/// Syscall driver number.
 pub const DRIVER_NUM: usize = driver::NUM::Pressure as usize;
 
-/// Register values
+// Register values
 
 const REGISTER_AUTO_INCREMENT: u8 = 0x80;
 const CTRL_REG1_ONE_SHOT: u8 = 0x00;
@@ -78,7 +78,7 @@ enum Registers {
     LpfpRes = 0x33,
 }
 
-pub struct Lps22hb<'a, I: I2CDevice> {
+pub struct Lps22hb<'a, I: I2CDevice<'a>> {
     buffer: TakeCell<'static, [u8]>,
     i2c_bus: &'a I,
     pressure_client: OptionalCell<&'a dyn PressureClient>,
@@ -86,11 +86,11 @@ pub struct Lps22hb<'a, I: I2CDevice> {
     state: Cell<State>,
 }
 
-impl<'a, I: I2CDevice> Lps22hb<'a, I> {
+impl<'a, I: I2CDevice<'a>> Lps22hb<'a, I> {
     pub fn new(i2c_bus: &'a I, buffer: &'static mut [u8]) -> Lps22hb<'a, I> {
         Lps22hb {
             buffer: TakeCell::new(buffer),
-            i2c_bus: i2c_bus,
+            i2c_bus,
             pressure_client: OptionalCell::empty(),
             pending_pressure: Cell::new(false),
             state: Cell::new(State::Sleep),
@@ -131,7 +131,7 @@ impl<'a, I: I2CDevice> Lps22hb<'a, I> {
     }
 }
 
-impl<'a, I: I2CDevice> PressureDriver<'a> for Lps22hb<'a, I> {
+impl<'a, I: I2CDevice<'a>> PressureDriver<'a> for Lps22hb<'a, I> {
     fn set_client(&self, client: &'a dyn PressureClient) {
         self.pressure_client.set(client);
     }
@@ -158,7 +158,7 @@ pub enum State {
     GotMeasurement,
 }
 
-impl<'a, I: I2CDevice> I2CClient for Lps22hb<'a, I> {
+impl<'a, I: I2CDevice<'a>> I2CClient for Lps22hb<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         if let Err(i2c_err) = status {
             self.state.set(State::Idle);

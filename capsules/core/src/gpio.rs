@@ -15,7 +15,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let gpio_pins = static_init!(
@@ -25,8 +25,8 @@
 //!      Option<&sam4l::gpio::PB[11]>,
 //!      Option<&sam4l::gpio::PB[12]>]);
 //! let gpio = static_init!(
-//!     capsules::gpio::GPIO<'static, sam4l::gpio::GPIOPin>,
-//!     capsules::gpio::GPIO::new(gpio_pins));
+//!     capsules_core::gpio::GPIO<'static, sam4l::gpio::GPIOPin>,
+//!     capsules_core::gpio::GPIO::new(gpio_pins));
 //! for maybe_pin in gpio_pins.iter() {
 //!     if let Some(pin) = maybe_pin {
 //!         pin.set_client(gpio);
@@ -63,8 +63,8 @@ use kernel::{ErrorCode, ProcessId};
 
 /// ### `subscribe_num`
 ///
-/// - `0`: Subscribe to interrupts from all pins with interrupts enabled.
-///        The callback signature is `fn(pin_num: usize, pin_state: bool)`
+/// - `0`: Subscribe to interrupts from all pins with interrupts enabled. The
+///   callback signature is `fn(pin_num: usize, pin_state: bool)`
 const UPCALL_NUM: usize = 0;
 
 pub struct GPIO<'a, IP: gpio::InterruptPin<'a>> {
@@ -82,10 +82,7 @@ impl<'a, IP: gpio::InterruptPin<'a>> GPIO<'a, IP> {
                 pin.set_value(i as u32);
             }
         }
-        Self {
-            pins: pins,
-            apps: grant,
-        }
+        Self { pins, apps: grant }
     }
 
     fn configure_input_pin(&self, pin_num: u32, config: usize) -> CommandReturn {
@@ -149,9 +146,8 @@ impl<'a, IP: gpio::InterruptPin<'a>> gpio::ClientWithValue for GPIO<'a, IP> {
 
             // schedule callback with the pin number and value
             self.apps.each(|_, _, upcalls| {
-                upcalls
-                    .schedule_upcall(UPCALL_NUM, (pin_num as usize, pin_state as usize, 0))
-                    .ok();
+                let _ =
+                    upcalls.schedule_upcall(UPCALL_NUM, (pin_num as usize, pin_state as usize, 0));
             });
         }
     }
@@ -167,14 +163,14 @@ impl<'a, IP: gpio::InterruptPin<'a>> SyscallDriver for GPIO<'a, IP> {
     ///
     /// Other data bytes:
     ///
-    ///   - `pin_config`: An internal resistor setting.
-    ///                   Set to `0` for a pull-up resistor.
-    ///                   Set to `1` for a pull-down resistor.
-    ///                   Set to `2` for none.
-    ///   - `irq_config`: Interrupt configuration setting.
-    ///                   Set to `0` to interrupt on either edge.
-    ///                   Set to `1` for rising edge.
-    ///                   Set to `2` for falling edge.
+    /// - `pin_config`: An internal resistor setting.
+    ///   - Set to `0` for a pull-up resistor.
+    ///   - Set to `1` for a pull-down resistor.
+    ///   - Set to `2` for none.
+    /// - `irq_config`: Interrupt configuration setting.
+    ///   - Set to `0` to interrupt on either edge.
+    ///   - Set to `1` for rising edge.
+    ///   - Set to `2` for falling edge.
     ///
     /// ### `command_num`
     ///
@@ -194,10 +190,15 @@ impl<'a, IP: gpio::InterruptPin<'a>> SyscallDriver for GPIO<'a, IP> {
         command_num: usize,
         data1: usize,
         data2: usize,
-        _: ProcessId,
+        processid: ProcessId,
     ) -> CommandReturn {
         let pins = self.pins;
         let pin_index = data1;
+
+        // This app did anything with the GPIO driver. We mark it as enabled
+        // by allocating the grant region. This allows for upcalls.
+        let grant_ret = self.apps.enter(processid, |_, _| {});
+
         match command_num {
             // Check existence.
             0 => CommandReturn::success(),
@@ -291,6 +292,14 @@ impl<'a, IP: gpio::InterruptPin<'a>> SyscallDriver for GPIO<'a, IP> {
             // configure interrupts on pin
             // (no affect or reliance on registered callback)
             7 => {
+                // If the grant entry failed, meaning we could not allocate the
+                // grant, we want to ensure the app does not try to wait on an
+                // interrupt upcall using Yield-WaitFor which will never return. So,
+                // we return an error for this operation.
+                if grant_ret.is_err() {
+                    return CommandReturn::failure(ErrorCode::NOMEM);
+                }
+
                 let irq_config = data2;
                 if pin_index >= pins.len() {
                     /* impossible pin */
@@ -303,6 +312,14 @@ impl<'a, IP: gpio::InterruptPin<'a>> SyscallDriver for GPIO<'a, IP> {
             // disable interrupts on pin, also disables pin
             // (no affect or reliance on registered callback)
             8 => {
+                // If the grant entry failed, meaning we could not allocate the
+                // grant, we want to ensure the app does not try to wait on an
+                // interrupt upcall using Yield-WaitFor which will never return. So,
+                // we return an error for this operation.
+                if grant_ret.is_err() {
+                    return CommandReturn::failure(ErrorCode::NOMEM);
+                }
+
                 if pin_index >= pins.len() {
                     /* impossible pin */
                     CommandReturn::failure(ErrorCode::INVAL)

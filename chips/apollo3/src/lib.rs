@@ -4,15 +4,23 @@
 
 //! Peripheral implementations for the Apollo3 MCU.
 
-#![crate_name = "apollo3"]
-#![crate_type = "rlib"]
 #![no_std]
+// Fixes this error introduced in nightly-2026-07:
+//
+// ```
+// error: queries overflow the depth limit!
+//   |
+//   = help: consider increasing the recursion limit by adding a `#![recursion_limit = "256"]` attribute to your crate (`apollo3`)
+//   = note: query depth increased by 130 when simplifying constant for the type system `mcuctrl::_`
+// ```
+#![recursion_limit = "256"]
 
 // Peripherals
 pub mod ble;
 pub mod cachectrl;
 pub mod chip;
 pub mod clkgen;
+pub mod flashctrl;
 pub mod gpio;
 pub mod iom;
 pub mod ios;
@@ -22,7 +30,7 @@ pub mod pwrctrl;
 pub mod stimer;
 pub mod uart;
 
-use cortexm4::{initialize_ram_jump_to_main, scb, unhandled_interrupt, CortexM4, CortexMVariant};
+use cortexm4f::{CortexM4F, CortexMVariant, initialize_ram_jump_to_main, scb, unhandled_interrupt};
 
 extern "C" {
     // _estack is not really a function, but it makes the types work
@@ -39,20 +47,20 @@ extern "C" {
 pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
     _estack,
     initialize_ram_jump_to_main,
-    unhandled_interrupt,          // NMI
-    CortexM4::HARD_FAULT_HANDLER, // Hard Fault
-    unhandled_interrupt,          // MemManage
-    unhandled_interrupt,          // BusFault
-    unhandled_interrupt,          // UsageFault
+    unhandled_interrupt,           // NMI
+    CortexM4F::HARD_FAULT_HANDLER, // Hard Fault
+    unhandled_interrupt,           // MemManage
+    unhandled_interrupt,           // BusFault
+    unhandled_interrupt,           // UsageFault
     unhandled_interrupt,
     unhandled_interrupt,
     unhandled_interrupt,
     unhandled_interrupt,
-    CortexM4::SVC_HANDLER, // SVC
-    unhandled_interrupt,   // DebugMon
+    CortexM4F::SVC_HANDLER, // SVC
+    unhandled_interrupt,    // DebugMon
     unhandled_interrupt,
-    unhandled_interrupt,       // PendSV
-    CortexM4::SYSTICK_HANDLER, // SysTick
+    unhandled_interrupt,        // PendSV
+    CortexM4F::SYSTICK_HANDLER, // SysTick
 ];
 
 #[cfg_attr(
@@ -61,7 +69,7 @@ pub static BASE_VECTORS: [unsafe extern "C" fn(); 16] = [
 )]
 // used Ensures that the symbol is kept until the final binary
 #[cfg_attr(all(target_arch = "arm", target_os = "none"), used)]
-pub static IRQS: [unsafe extern "C" fn(); 32] = [CortexM4::GENERIC_ISR; 32];
+pub static IRQS: [unsafe extern "C" fn(); 32] = [CortexM4F::GENERIC_ISR; 32];
 
 // The Patch table.
 //
@@ -79,33 +87,16 @@ pub static PATCH: [unsafe extern "C" fn(); 16] = [unhandled_interrupt; 16];
 // `main()` otherwise we end up with a clobbered stack.
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[inline(always)]
-pub unsafe fn init() {
+pub unsafe fn actually_disable_fpu() {
     use core::arch::asm;
-    let cache_ctrl = crate::cachectrl::CacheCtrl::new();
-    cache_ctrl.enable_cache();
-
-    // Explicitly tell the core where Tock's vector table is located. If Tock is the
-    // only thing on the chip then this is effectively a no-op. If, however, there is
-    // a bootloader present then we want to ensure that the vector table is set
-    // correctly for Tock. The bootloader _may_ set this for us, but it may not
-    // so that any errors early in the Tock boot process trap back to the bootloader.
-    // To be safe we unconditionally set the vector table.
-    scb::set_vector_table_offset(BASE_VECTORS.as_ptr() as *const ());
-
-    // Disable the FPU (it might be enalbed by a prior stage)
-    scb::disable_fpca();
 
     // This ensures the FPU is actually disabled
     asm!("svc 0xff", out("r0") _, out("r1") _, out("r2") _, out("r3") _, out("r12") _);
-
-    cortexm4::nvic::disable_all();
-    cortexm4::nvic::clear_all_pending();
-    cortexm4::nvic::enable_all();
 }
 
 // Mock implementation for tests
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-pub unsafe fn init() {
+pub unsafe fn actually_disable_fpu() {
     // Prevent unused code warning.
     scb::disable_fpca();
 

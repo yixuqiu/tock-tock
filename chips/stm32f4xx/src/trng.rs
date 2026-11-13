@@ -4,21 +4,23 @@
 
 //! True random number generator
 
-use crate::rcc;
+use crate::clocks::{Stm32f4Clocks, phclk};
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::hil::entropy::Continue;
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
-#[repr(C)]
-pub struct RngRegisters {
-    cr: ReadWrite<u32, Control::Register>,
-    sr: ReadWrite<u32, Status::Register>,
-    data: ReadOnly<u32, Data::Register>,
+register_structs! {
+    pub RngRegisters {
+        (0x000 => cr: ReadWrite<u32, Control::Register>),
+        (0x004 => sr: ReadWrite<u32, Status::Register>),
+        (0x008 => data: ReadOnly<u32, Data::Register>),
+        (0x00C => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -58,12 +60,15 @@ pub struct Trng<'a> {
 }
 
 impl<'a> Trng<'a> {
-    pub const fn new(registers: StaticRef<RngRegisters>, rcc: &'a rcc::Rcc) -> Trng<'a> {
+    pub const fn new(
+        registers: StaticRef<RngRegisters>,
+        clocks: &'a dyn Stm32f4Clocks,
+    ) -> Trng<'a> {
         Trng {
-            registers: registers,
-            clock: RngClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::AHB2(rcc::HCLK2::RNG),
-                rcc,
+            registers,
+            clock: RngClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::AHB2(phclk::HCLK2::RNG),
+                clocks,
             )),
             client: OptionalCell::empty(),
         }
@@ -108,7 +113,7 @@ impl<'a> Trng<'a> {
     }
 }
 
-struct RngClock<'a>(rcc::PeripheralClock<'a>);
+struct RngClock<'a>(phclk::PeripheralClock<'a>);
 
 impl ClockInterface for RngClock<'_> {
     fn is_enabled(&self) -> bool {

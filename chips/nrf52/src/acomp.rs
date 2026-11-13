@@ -24,15 +24,24 @@
 //! - Single-pin capacitive sensor support
 //! - Event generation on output changes
 
+use kernel::ErrorCode;
 use kernel::hil::analog_comparator;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, register_structs, ReadOnly, ReadWrite, WriteOnly,
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
 };
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
 
+/// Only one channel
+#[derive(Copy, Clone, Debug)]
+#[repr(u8)]
+pub enum ChannelNumber {
+    AC0 = 0x00,
+}
+
+/// Analog comparator channels.
+///
 /// The nrf52840 only has one analog comparator, so it does need channels
 /// However, the HIL was designed to support having multiple comparators, each
 /// one with a separate channel. So we create a dummy channel with only
@@ -42,30 +51,20 @@ pub struct Channel {
     _chan_num: u32,
 }
 
-/// Only one channel
-#[derive(Copy, Clone, Debug)]
-#[repr(u8)]
-enum ChannelNumber {
-    AC0 = 0x00,
-}
-
 /// Initialization of an AC channel.
 impl Channel {
     /// Create a new AC channel.
     ///
     /// - `channel`: Channel enum representing the channel number
-    const fn new(channel: ChannelNumber) -> Channel {
+    pub const fn new(channel: ChannelNumber) -> Channel {
         Channel {
             _chan_num: (channel as u32) & 0x0F,
         }
     }
 }
 
-/// Uses only comparator, with VIN+=AIN5 and VIN-=AIN0
-pub static mut CHANNEL_AC0: Channel = Channel::new(ChannelNumber::AC0);
-
 register_structs! {
-    CompRegisters {
+    pub CompRegisters {
         /// TASK REGISTERS
         /// Trigger task by writing 1
         /// start comparator. Needed before comparator does anything.
@@ -221,10 +220,10 @@ pub struct Comparator<'a> {
     client: OptionalCell<&'a dyn analog_comparator::Client>,
 }
 
-impl<'a> Comparator<'a> {
-    pub const fn new() -> Self {
+impl Comparator<'_> {
+    pub const fn new(registers: StaticRef<CompRegisters>) -> Self {
         Comparator {
-            registers: ACOMP_BASE,
+            registers,
             client: OptionalCell::empty(),
         }
     }
@@ -334,6 +333,3 @@ impl<'a> analog_comparator::AnalogComparator<'a> for Comparator<'a> {
         self.client.set(client);
     }
 }
-
-const ACOMP_BASE: StaticRef<CompRegisters> =
-    unsafe { StaticRef::new(0x40013000 as *const CompRegisters) };

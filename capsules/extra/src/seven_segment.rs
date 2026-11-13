@@ -17,7 +17,7 @@
 //! Microbit Pins: <https://tech.microbit.org/hardware/schematic/>
 //! 4 digit 7 segment display pinout: <https://www.dotnetlovers.com/images/4digit7segmentdisplay85202024001AM.jpg>
 //!
-//! ```rust
+//! ```rust,ignore
 //! const NUM_DIGITS: usize = 4;
 //! const DIGITS: [Pin; 4] = [Pin::P1_02, Pin::P0_12, Pin::P0_30, Pin::P0_09]; // [D1, D2, D3, D4]
 //! const SEGMENTS: [Pin; 7] = [
@@ -150,12 +150,12 @@
 
 use core::cell::Cell;
 
+use kernel::ErrorCode;
+use kernel::ProcessId;
 use kernel::hil::gpio::{ActivationMode, Pin};
 use kernel::hil::time::{Alarm, AlarmClient, ConvertTicks};
 use kernel::syscall::{CommandReturn, SyscallDriver};
 use kernel::utilities::cells::TakeCell;
-use kernel::ErrorCode;
-use kernel::ProcessId;
 
 /// Syscall driver number.
 use capsules_core::driver;
@@ -184,7 +184,6 @@ const DIGITS: [u8; 10] = [
 ];
 
 /// Holds an array of digits and an array of segments for each digit.
-
 pub struct SevenSegmentDriver<'a, P: Pin, A: Alarm<'a>, const NUM_DIGITS: usize> {
     /// An array of 8 segment pins (7 for digit segments and one dot segment)
     segments: &'a [&'a P; 8],
@@ -224,8 +223,8 @@ impl<'a, P: Pin, A: Alarm<'a>, const NUM_DIGITS: usize> SevenSegmentDriver<'a, P
             digits,
             buffer: TakeCell::new(buffer),
             alarm,
-            segment_activation: segment_activation,
-            digit_activation: digit_activation,
+            segment_activation,
+            digit_activation,
             current_digit: Cell::new(0),
             timing: (1000 / (refresh_rate * digits.len())) as u8,
         }
@@ -362,15 +361,15 @@ impl<'a, P: Pin, A: Alarm<'a>, const NUM_DIGITS: usize> SyscallDriver
     /// ### `command_num`
     ///
     /// - `0`: Driver existence check.
-    /// - `1`: Prints one digit at the requested position. Returns `INVAL` if the
-    ///        position is not valid.
+    /// - `1`: Prints one digit at the requested position. Returns `INVAL` if
+    ///   the position is not valid.
     /// - `2`: Clears all digits currently being displayed.
-    /// - `3`: Print a dot at the requested digit position. Returns
-    ///        `INVAL` if the position is not valid.
-    /// - `4`: Print a custom pattern for a certain digit. Returns
-    ///        `INVAL` if the position is not valid.
-    /// - `5`: Returns the number of digits on the display. This will always be 0 or
-    ///        greater, and therefore also allows for checking for this driver.
+    /// - `3`: Print a dot at the requested digit position. Returns `INVAL` if
+    ///   the position is not valid.
+    /// - `4`: Print a custom pattern for a certain digit. Returns `INVAL` if
+    ///   the position is not valid.
+    /// - `5`: Returns the number of digits on the display. This will always be
+    ///   0 or greater, and therefore also allows for checking for this driver.
     fn command(
         &self,
         command_num: usize,

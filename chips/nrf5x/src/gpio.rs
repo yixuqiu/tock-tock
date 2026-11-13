@@ -13,10 +13,10 @@ use enum_primitive::cast::FromPrimitive;
 use enum_primitive::enum_from_primitive;
 use kernel::debug;
 use kernel::hil;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadWrite, register_bitfields};
 
 #[cfg(feature = "nrf51")]
 const NUM_GPIOTE: usize = 4;
@@ -32,19 +32,18 @@ const NUM_GPIOTE: usize = 4;
 
 const GPIO_PER_PORT: usize = 32;
 
-const GPIOTE_BASE: StaticRef<GpioteRegisters> =
-    unsafe { StaticRef::new(0x40006000 as *const GpioteRegisters) };
+pub const GPIO_BASE_ADDRESS: usize = 0x50000000;
+pub const GPIO_SIZE: usize = 0x300;
 
-const GPIO_BASE_ADDRESS: usize = 0x50000000;
-const GPIO_SIZE: usize = 0x300;
-
+/// nRF5x GPIOTE Registers
+///
 /// The nRF5x doesn't automatically provide GPIO interrupts. Instead, to receive
 /// interrupts from a GPIO line, you must allocate a GPIOTE (GPIO Task and
 /// Event) channel, and bind the channel to the desired pin. There are 4
 /// channels for the nrf51 and 8 channels for the nrf52. This means that
 /// requesting an interrupt can fail, if they are all already allocated.
 #[repr(C)]
-struct GpioteRegisters {
+pub struct GpioteRegisters {
     /// Task for writing to pin specified in CONFIG\[n\].PSEL.
     /// Action on pin is configured in CONFIG\[n\].POLARITY
     ///
@@ -84,7 +83,7 @@ struct GpioteRegisters {
 }
 
 #[repr(C)]
-struct GpioRegisters {
+pub struct GpioRegisters {
     /// Reserved
     _reserved1: [u32; 321],
     /// Write GPIO port
@@ -346,6 +345,7 @@ register_bitfields! [u32,
 
 enum_from_primitive! {
     #[derive(Copy, Clone, Debug, PartialEq)]
+    #[repr(u32)]
     #[rustfmt::skip]
     pub enum Pin {
         P0_00, P0_01, P0_02, P0_03, P0_04, P0_05, P0_06, P0_07,
@@ -364,21 +364,22 @@ pub struct GPIOPin<'a> {
     client: OptionalCell<&'a dyn hil::gpio::Client>,
     gpiote_registers: StaticRef<GpioteRegisters>,
     gpio_registers: StaticRef<GpioRegisters>,
+    allocated_channel: OptionalCell<usize>,
 }
 
 impl<'a> GPIOPin<'a> {
-    pub const fn new(pin: Pin) -> GPIOPin<'a> {
+    pub const fn new(
+        pin: Pin,
+        gpiote_registers: StaticRef<GpioteRegisters>,
+        gpio_registers: StaticRef<GpioRegisters>,
+    ) -> GPIOPin<'a> {
         GPIOPin {
             pin: ((pin as usize) % GPIO_PER_PORT) as u8,
             port: ((pin as usize) / GPIO_PER_PORT) as u8,
             client: OptionalCell::empty(),
-            gpio_registers: unsafe {
-                StaticRef::new(
-                    (GPIO_BASE_ADDRESS + ((pin as usize) / GPIO_PER_PORT) * GPIO_SIZE)
-                        as *const GpioRegisters,
-                )
-            },
-            gpiote_registers: GPIOTE_BASE,
+            gpio_registers,
+            gpiote_registers,
+            allocated_channel: OptionalCell::empty(),
         }
     }
 
@@ -495,7 +496,7 @@ impl<'a> hil::gpio::Interrupt<'a> for GPIOPin<'a> {
     }
 
     fn is_pending(&self) -> bool {
-        if let Ok(channel) = self.find_channel(self.pin) {
+        if let Some(channel) = self.allocated_channel.get() {
             let ev = &self.gpiote_registers.event_in[channel];
             ev.any_matching_bits_set(EventsIn::EVENT::Ready)
         } else {
@@ -504,26 +505,41 @@ impl<'a> hil::gpio::Interrupt<'a> for GPIOPin<'a> {
     }
 
     fn enable_interrupts(&self, mode: hil::gpio::InterruptEdge) {
-        if let Ok(channel) = self.allocate_channel() {
-            let polarity = match mode {
-                hil::gpio::InterruptEdge::EitherEdge => Config::POLARITY::Toggle,
-                hil::gpio::InterruptEdge::RisingEdge => Config::POLARITY::LoToHi,
-                hil::gpio::InterruptEdge::FallingEdge => Config::POLARITY::HiToLo,
-            };
-            let pin: u32 = (GPIO_PER_PORT as u32 * self.port as u32) + self.pin as u32;
-            self.gpiote_registers.config[channel]
-                .write(Config::MODE::Event + Config::PSEL.val(pin) + polarity);
-            self.gpiote_registers.intenset.set(1 << channel);
+        let channel = if let Some(chan) = self.allocated_channel.get() {
+            // We only support one interrupt mode per pin, despite the
+            // hardware supporting multiple. This is to comply with
+            // expectations in other Tock components, such as the button
+            // driver which re-registers interrupts for a restarted app,
+            // assuming the old ones to be overwritten.
+            chan
+        } else if let Ok(chan) = self.allocate_channel() {
+            // Don't have a channel yet, got a new one:
+            chan
         } else {
             debug!("No available GPIOTE interrupt channels");
-        }
+            return;
+        };
+
+        // Remember that we have allocated this channel for this pin:
+        self.allocated_channel.set(channel);
+
+        let polarity = match mode {
+            hil::gpio::InterruptEdge::EitherEdge => Config::POLARITY::Toggle,
+            hil::gpio::InterruptEdge::RisingEdge => Config::POLARITY::LoToHi,
+            hil::gpio::InterruptEdge::FallingEdge => Config::POLARITY::HiToLo,
+        };
+        let pin: u32 = (GPIO_PER_PORT as u32 * self.port as u32) + self.pin as u32;
+        self.gpiote_registers.config[channel]
+            .write(Config::MODE::Event + Config::PSEL.val(pin) + polarity);
+        self.gpiote_registers.intenset.set(1 << channel);
     }
 
     fn disable_interrupts(&self) {
-        if let Ok(channel) = self.find_channel(self.pin) {
+        if let Some(channel) = self.allocated_channel.get() {
             self.gpiote_registers.config[channel]
                 .write(Config::MODE::CLEAR + Config::PSEL::CLEAR + Config::POLARITY::CLEAR);
             self.gpiote_registers.intenclr.set(1 << channel);
+            self.allocated_channel.clear();
         }
     }
 }
@@ -534,18 +550,6 @@ impl GPIOPin<'_> {
     fn allocate_channel(&self) -> Result<usize, ()> {
         for (i, ch) in self.gpiote_registers.config.iter().enumerate() {
             if ch.matches_all(Config::MODE::Disabled) {
-                return Ok(i);
-            }
-        }
-        Err(())
-    }
-
-    /// Return which channel is allocated to a pin,
-    /// If the channel is not found return an error instead
-    fn find_channel(&self, pin: u8) -> Result<usize, ()> {
-        for (i, ch) in self.gpiote_registers.config.iter().enumerate() {
-            let encoded_pin = (GPIO_PER_PORT as u32 * self.port as u32) + pin as u32;
-            if ch.matches_all(Config::PSEL.val(encoded_pin)) {
                 return Ok(i);
             }
         }

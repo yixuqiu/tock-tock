@@ -8,15 +8,15 @@
 //! Low-level CAN driver for STM32F4XX chips
 //!
 
-use crate::rcc;
+use crate::clocks::{Stm32f4Clocks, phclk};
 use core::cell::Cell;
 use kernel::deferred_call::{DeferredCall, DeferredCallClient};
 use kernel::hil::can::{self, StandardBitTiming};
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadWrite};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
 pub const BRP_MIN_STM32: u32 = 0;
 pub const BRP_MAX_STM32: u32 = 1023;
@@ -472,12 +472,12 @@ pub struct Can<'a> {
 }
 
 impl<'a> Can<'a> {
-    pub fn new(rcc: &'a rcc::Rcc, registers: StaticRef<Registers>) -> Can<'a> {
+    pub fn new(clocks: &'a dyn Stm32f4Clocks, registers: StaticRef<Registers>) -> Can<'a> {
         Can {
-            registers: registers,
-            clock: CanClock(rcc::PeripheralClock::new(
-                rcc::PeripheralClockType::APB1(rcc::PCLK1::CAN1),
-                rcc,
+            registers,
+            clock: CanClock(phclk::PeripheralClock::new(
+                phclk::PeripheralClockType::APB1(phclk::PCLK1::CAN1),
+                clocks,
             )),
             can_state: Cell::new(CanState::Sleep),
             error_interrupt_counter: Cell::new(0),
@@ -844,16 +844,15 @@ impl<'a> Can<'a> {
             }
         }
 
-        match state {
-            Err(err) => self.can_state.set(CanState::RunningError(err)),
-            _ => {}
+        if let Err(err) = state {
+            self.can_state.set(CanState::RunningError(err))
         }
 
-        self.transmit_client
-            .map(|transmit_client| match self.tx_buffer.take() {
-                Some(buf) => transmit_client.transmit_complete(state, buf),
-                None => {}
-            });
+        self.transmit_client.map(|transmit_client| {
+            if let Some(buf) = self.tx_buffer.take() {
+                transmit_client.transmit_complete(state, buf)
+            }
+        });
     }
 
     pub fn process_received_message(
@@ -989,13 +988,10 @@ impl<'a> Can<'a> {
         self.error_interrupt_counter
             .replace(self.error_interrupt_counter.get() + 1);
 
-        match self.can_state.get() {
-            CanState::RunningError(err) => {
-                self.controller_client.map(|controller_client| {
-                    controller_client.state_changed(kernel::hil::can::State::Error(err));
-                });
-            }
-            _ => {}
+        if let CanState::RunningError(err) = self.can_state.get() {
+            self.controller_client.map(|controller_client| {
+                controller_client.state_changed(kernel::hil::can::State::Error(err));
+            });
         }
     }
 
@@ -1113,7 +1109,7 @@ impl DeferredCallClient for Can<'_> {
     }
 }
 
-struct CanClock<'a>(rcc::PeripheralClock<'a>);
+struct CanClock<'a>(phclk::PeripheralClock<'a>);
 
 impl ClockInterface for CanClock<'_> {
     fn is_enabled(&self) -> bool {

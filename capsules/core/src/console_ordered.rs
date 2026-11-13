@@ -3,9 +3,10 @@
 // Copyright Tock Contributors 2022.
 
 //! Provides userspace with access to a serial interface whose output
-//! is in-order with respect to kernel debug!() operations. Prints to
-//! the console are atomic up to particular constant length, which
-//! can be set at capsule instantiation.
+//! is in-order with respect to kernel debug!() operations.
+//!
+//! Prints to the console are atomic up to particular constant length,
+//! which can be set at capsule instantiation.
 //!
 //! Note that this capsule does *not* buffer writes in an additional
 //! buffer; this is critical to ensure ordering. Instead, it pushes
@@ -23,15 +24,14 @@
 //! truncated) that kernel and userspace print operations are in
 //! order. It requires a reference to an Alarm for timers to issue
 //! callbacks and send more data. The three configuration constants are:
-//!   - ATOMIC_SIZE: the minimum block of buffer that will be sent. If
-//!                  there is not enough space in the debug buffer to
-//!                  send ATOMIC_SIZE bytes, the console retries later.
-//!   - RETRY_TIMER: if there is not enough space in the debug buffer
-//!                  to send the next chunk of a write, the console
-//!                  waits RETRY_TIMER ticks of the supplied alarm.
-//!   - WRITE_TIMER: after completing a write, the console waits
-//!                  WRITE_TIMER ticks of the supplied alarm before
-//!                  issuing a callback or writing more.
+//!   - ATOMIC_SIZE: the minimum block of buffer that will be sent. If there is
+//!     not enough space in the debug buffer to send ATOMIC_SIZE bytes, the
+//!     console retries later.
+//!   - RETRY_TIMER: if there is not enough space in the debug buffer to send
+//!     the next chunk of a write, the console waits RETRY_TIMER ticks of the
+//!     supplied alarm.
+//!   - WRITE_TIMER: after completing a write, the console waits WRITE_TIMER
+//!     ticks of the supplied alarm before issuing a callback or writing more.
 //!
 //! RETRY_TIMER and WRITE_TIMER should be set based on the speed of
 //! the underlying UART and desired load. Generally speaking, setting
@@ -40,7 +40,7 @@
 //! reasonable. ATOMIC_SIZE should be at least 80 (row width
 //! of a standard console).
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //! # use capsules_core::console_ordered::ConsoleOrdered;
 //! let console = static_init!(
@@ -162,11 +162,11 @@ impl<'a, A: Alarm<'a>> ConsoleOrdered<'a, A> {
         write_timer: u32,
     ) -> ConsoleOrdered<'a, A> {
         ConsoleOrdered {
-            uart: uart,
+            uart,
             apps: grant,
             tx_in_progress: Cell::new(false),
             tx_counter: Cell::new(0),
-            alarm: alarm,
+            alarm,
 
             rx_counter: Cell::new(0),
             rx_in_progress: OptionalCell::empty(),
@@ -210,10 +210,10 @@ impl<'a, A: Alarm<'a>> ConsoleOrdered<'a, A> {
             app.pending_write = true;
         } else if app.write_len <= debug_space_avail {
             // Space for the full write, make it
-            app.write_position = self.send(app, kernel_data).map_or(0, |len| len);
+            app.write_position = self.send(app, kernel_data).unwrap_or(0);
         } else if self.atomic_size.get() <= debug_space_avail {
             // Space for a partial write, make it
-            app.write_position = self.send(app, kernel_data).map_or(0, |len| len);
+            app.write_position = self.send(app, kernel_data).unwrap_or(0);
         } else {
             // No space even for a partial, minimum size write: enqueue
             app.pending_write = true;
@@ -254,8 +254,11 @@ impl<'a, A: Alarm<'a>> ConsoleOrdered<'a, A> {
                     app.writing = true;
                     self.tx_in_progress.set(true);
                     if real_write_len > 0 {
-                        let count = debug_process_slice!(remaining_data);
-                        count
+                        // If the debug printing fails we have no recourse. Just
+                        // pretend like we wrote everything so we make forward
+                        // progress, and maybe the debug writer will start
+                        // working in the future.
+                        debug_process_slice!(remaining_data).unwrap_or(real_write_len)
                     } else {
                         0
                     }
@@ -342,8 +345,7 @@ impl<'a, A: Alarm<'a>> AlarmClient for ConsoleOrdered<'a, A> {
 
                             // Write, or if there isn't space for a minimum write, retry later
                             if minimum_write <= debug_space_avail {
-                                app.write_position +=
-                                    self.send(app, kernel_data).map_or(0, |len| len);
+                                app.write_position += self.send(app, kernel_data).unwrap_or(0);
                             } else {
                                 self.alarm.set_alarm(
                                     self.alarm.now(),
@@ -400,20 +402,20 @@ impl<'a, A: Alarm<'a>> SyscallDriver for ConsoleOrdered<'a, A> {
     /// ### `allow_num`
     ///
     /// - `0`: Readonly buffer for write buffer
-
-    // Setup callbacks.
-    //
-    // ### `subscribe_num`
-    //
-    // - `1`: Write buffer completed callback
-
+    ///
+    /// Setup callbacks.
+    ///
+    /// ### `subscribe_num`
+    ///
+    /// - `1`: Write buffer completed callback
+    ///
     /// Initiate serial transfers
     ///
     /// ### `command_num`
     ///
     /// - `0`: Driver existence check.
-    /// - `1`: Transmits a buffer passed via `allow`, up to the length
-    ///        passed in `arg1`
+    /// - `1`: Transmits a buffer passed via `allow`, up to the length passed in
+    ///   `arg1`
     fn command(&self, cmd_num: usize, arg1: usize, _: usize, appid: ProcessId) -> CommandReturn {
         let res = self
             .apps
@@ -460,98 +462,85 @@ impl<'a, A: Alarm<'a>> uart::ReceiveClient for ConsoleOrdered<'a, A> {
         error: uart::Error,
     ) {
         // First, handle this read, then see if there's another read to process.
-        self.rx_in_progress
-            .take()
-            .map(|processid| {
-                self.apps
-                    .enter(processid, |app, kernel_data| {
-                        // An iterator over the returned buffer yielding only the first `rx_len`
-                        // bytes
-                        let rx_buffer = buffer.iter().take(rx_len);
-                        app.read_len = 0; // Mark that we are no longer reading.
-                        match error {
-                            uart::Error::None | uart::Error::Aborted => {
-                                // Receive some bytes, signal error type and return bytes to process buffer
-                                let count = kernel_data
-                                    .get_readwrite_processbuffer(rw_allow::READ)
-                                    .and_then(|read| {
-                                        read.mut_enter(|data| {
-                                            let mut c = 0;
-                                            for (a, b) in data.iter().zip(rx_buffer) {
-                                                c += 1;
-                                                a.set(*b);
-                                            }
-                                            c
-                                        })
+        self.rx_in_progress.take().map_or_default(|processid| {
+            self.apps
+                .enter(processid, |app, kernel_data| {
+                    // An iterator over the returned buffer yielding only the first `rx_len`
+                    // bytes
+                    let rx_buffer = buffer.iter().take(rx_len);
+                    app.read_len = 0; // Mark that we are no longer reading.
+                    match error {
+                        uart::Error::None | uart::Error::Aborted => {
+                            // Receive some bytes, signal error type and return bytes to process buffer
+                            let count = kernel_data
+                                .get_readwrite_processbuffer(rw_allow::READ)
+                                .and_then(|read| {
+                                    read.mut_enter(|data| {
+                                        let mut c = 0;
+                                        for (a, b) in data.iter().zip(rx_buffer) {
+                                            c += 1;
+                                            a.set(*b);
+                                        }
+                                        c
                                     })
-                                    .unwrap_or(-1);
+                                })
+                                .unwrap_or(-1);
 
-                                // Make sure we report the same number
-                                // of bytes that we actually copied into
-                                // the app's buffer. This is defensive:
-                                // we shouldn't ever receive more bytes
-                                // than will fit in the app buffer since
-                                // we use the app_buffer's length when
-                                // calling `receive()`. However, a buggy
-                                // lower layer could return more bytes
-                                // than we asked for, and we don't want
-                                // to propagate that length error to
-                                // userspace. However, we do return an
-                                // error code so that userspace knows
-                                // something went wrong.
-                                //
-                                // If count < 0 this means the buffer
-                                // disappeared: return NOMEM.
-                                let read_buffer_len = kernel_data
-                                    .get_readwrite_processbuffer(rw_allow::READ)
-                                    .map_or(0, |read| read.len());
-                                let (ret, received_length) = if count < 0 {
-                                    (Err(ErrorCode::NOMEM), 0)
-                                } else if rx_len > read_buffer_len {
-                                    // Return `SIZE` indicating that
-                                    // some received bytes were dropped.
-                                    // We report the length that we
-                                    // actually copied into the buffer,
-                                    // but also indicate that there was
-                                    // an issue in the kernel with the
-                                    // receive.
-                                    (Err(ErrorCode::SIZE), read_buffer_len)
-                                } else {
-                                    // This is the normal and expected
-                                    // case.
-                                    (rcode, rx_len)
-                                };
-                                kernel_data
-                                    .schedule_upcall(
-                                        2,
-                                        (
-                                            kernel::errorcode::into_statuscode(ret),
-                                            received_length,
-                                            0,
-                                        ),
-                                    )
-                                    .ok();
-                            }
-                            _ => {
-                                // Some UART error occurred
-                                kernel_data
-                                    .schedule_upcall(
-                                        2,
-                                        (
-                                            kernel::errorcode::into_statuscode(Err(
-                                                ErrorCode::FAIL,
-                                            )),
-                                            0,
-                                            0,
-                                        ),
-                                    )
-                                    .ok();
-                            }
+                            // Make sure we report the same number
+                            // of bytes that we actually copied into
+                            // the app's buffer. This is defensive:
+                            // we shouldn't ever receive more bytes
+                            // than will fit in the app buffer since
+                            // we use the app_buffer's length when
+                            // calling `receive()`. However, a buggy
+                            // lower layer could return more bytes
+                            // than we asked for, and we don't want
+                            // to propagate that length error to
+                            // userspace. However, we do return an
+                            // error code so that userspace knows
+                            // something went wrong.
+                            //
+                            // If count < 0 this means the buffer
+                            // disappeared: return NOMEM.
+                            let read_buffer_len = kernel_data
+                                .get_readwrite_processbuffer(rw_allow::READ)
+                                .map_or(0, |read| read.len());
+                            let (ret, received_length) = if count < 0 {
+                                (Err(ErrorCode::NOMEM), 0)
+                            } else if rx_len > read_buffer_len {
+                                // Return `SIZE` indicating that
+                                // some received bytes were dropped.
+                                // We report the length that we
+                                // actually copied into the buffer,
+                                // but also indicate that there was
+                                // an issue in the kernel with the
+                                // receive.
+                                (Err(ErrorCode::SIZE), read_buffer_len)
+                            } else {
+                                // This is the normal and expected
+                                // case.
+                                (rcode, rx_len)
+                            };
+                            let _ = kernel_data.schedule_upcall(
+                                2,
+                                (kernel::errorcode::into_statuscode(ret), received_length, 0),
+                            );
                         }
-                    })
-                    .unwrap_or_default();
-            })
-            .unwrap_or_default();
+                        _ => {
+                            // Some UART error occurred
+                            let _ = kernel_data.schedule_upcall(
+                                2,
+                                (
+                                    kernel::errorcode::into_statuscode(Err(ErrorCode::FAIL)),
+                                    0,
+                                    0,
+                                ),
+                            );
+                        }
+                    }
+                })
+                .unwrap_or_default();
+        });
 
         // Whatever happens, we want to make sure to replace the rx_buffer for future transactions
         self.rx_buffer.replace(buffer);

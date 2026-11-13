@@ -19,7 +19,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! let i2cmux = I2CMuxComponent::new(i2c0, None).finalize(components::i2c_mux_component_static!());
 //!
 //! let at24c_buffer = static_init!([u8; 34], [0; 34]);
@@ -47,7 +47,7 @@ use core::cmp;
 
 use kernel::hil::i2c::{Error, I2CClient, I2CDevice};
 use kernel::utilities::cells::{OptionalCell, TakeCell};
-use kernel::{hil, ErrorCode};
+use kernel::{ErrorCode, hil};
 
 const PAGE_SIZE: usize = 32;
 
@@ -74,7 +74,7 @@ enum State {
 }
 
 pub struct AT24C<'a> {
-    i2c: &'a dyn I2CDevice,
+    i2c: &'a dyn I2CDevice<'a>,
     buffer: TakeCell<'static, [u8]>,
     client_page: TakeCell<'a, EEPROMPage>,
     flash_client: OptionalCell<&'a dyn hil::flash::Client<AT24C<'a>>>,
@@ -82,7 +82,7 @@ pub struct AT24C<'a> {
 }
 
 impl<'a> AT24C<'a> {
-    pub fn new(i2c: &'a dyn I2CDevice, buffer: &'static mut [u8]) -> Self {
+    pub fn new(i2c: &'a dyn I2CDevice<'a>, buffer: &'static mut [u8]) -> Self {
         Self {
             i2c,
             buffer: TakeCell::new(buffer),
@@ -224,7 +224,7 @@ impl I2CClient for AT24C<'static> {
     }
 }
 
-impl<'a> hil::flash::Flash for AT24C<'a> {
+impl hil::flash::Flash for AT24C<'_> {
     type Page = EEPROMPage;
 
     fn read_page(

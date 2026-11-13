@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-//! Library of randomness structures, including a system call driver for
-//! userspace applications to request randomness, entropy conversion, entropy
-//! to randomness conversion, and synchronous random number generation.
+//! Library of randomness structures.
+//!
+//! A library for randomness structures including a system call driver
+//! for userspace applications to request randomness, entropy
+//! conversion, entropy to randomness conversion, and synchronous
+//! random number generation.
 //!
 //!
 //! The RNG accepts a user-defined callback and buffer to hold received
@@ -14,7 +17,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use kernel::static_init;
 //!
 //! let rng = static_init!(
@@ -28,9 +31,9 @@ use core::cell::Cell;
 
 use kernel::grant::{AllowRoCount, AllowRwCount, Grant, UpcallCount};
 use kernel::hil::entropy;
-use kernel::hil::entropy::{Entropy32, Entropy8};
+use kernel::hil::entropy::{Entropy8, Entropy32};
 use kernel::hil::rng;
-use kernel::hil::rng::{Client, Continue, Random, Rng};
+use kernel::hil::rng::Rng;
 use kernel::processbuffer::WriteableProcessBuffer;
 use kernel::syscall::{CommandReturn, SyscallDriver};
 use kernel::utilities::cells::OptionalCell;
@@ -65,7 +68,7 @@ impl<'a, R: Rng<'a>> RngDriver<'a, R> {
         grant: Grant<App, UpcallCount<1>, AllowRoCount<0>, AllowRwCount<{ rw_allow::COUNT }>>,
     ) -> Self {
         Self {
-            rng: rng,
+            rng,
             apps: grant,
             getting_randomness: Cell::new(false),
         }
@@ -149,7 +152,7 @@ impl<'a, R: Rng<'a>> rng::Client for RngDriver<'a, R> {
                     if app.remaining > 0 {
                         done = false;
                     } else {
-                        kernel_data.schedule_upcall(0, (0, newidx, 0)).ok();
+                        let _ = kernel_data.schedule_upcall(0, (0, newidx, 0));
                     }
                 }
             });
@@ -225,7 +228,7 @@ pub struct Entropy32ToRandom<'a, E: Entropy32<'a>> {
 impl<'a, E: Entropy32<'a>> Entropy32ToRandom<'a, E> {
     pub fn new(egen: &'a E) -> Self {
         Self {
-            egen: egen,
+            egen,
             client: OptionalCell::empty(),
         }
     }
@@ -288,7 +291,7 @@ pub struct Entropy8To32<'a, E: Entropy8<'a>> {
 impl<'a, E: Entropy8<'a>> Entropy8To32<'a, E> {
     pub fn new(egen: &'a E) -> Self {
         Self {
-            egen: egen,
+            egen,
             client: OptionalCell::empty(),
             count: Cell::new(0),
             bytes: Cell::new(0),
@@ -384,7 +387,7 @@ pub struct Entropy32To8<'a, E: Entropy32<'a>> {
 impl<'a, E: Entropy32<'a>> Entropy32To8<'a, E> {
     pub fn new(egen: &'a E) -> Self {
         Self {
-            egen: egen,
+            egen,
             client: OptionalCell::empty(),
             entropy: Cell::new(0),
             bytes_consumed: Cell::new(0),
@@ -456,63 +459,6 @@ impl<'a, 'b: 'a, E: Entropy32<'b>> Iterator for Entropy32To8Iter<'a, 'b, E> {
             Some(byte)
         } else {
             None
-        }
-    }
-}
-
-pub struct SynchronousRandom<'a, R: Rng<'a>> {
-    rgen: &'a R,
-    seed: Cell<u32>,
-}
-
-#[allow(dead_code)]
-impl<'a, R: Rng<'a>> SynchronousRandom<'a, R> {
-    fn new(rgen: &'a R) -> Self {
-        Self {
-            rgen: rgen,
-            seed: Cell::new(0),
-        }
-    }
-}
-
-impl<'a, R: Rng<'a>> Random<'a> for SynchronousRandom<'a, R> {
-    fn initialize(&'a self) {
-        self.rgen.set_client(self);
-        let _ = self.rgen.get();
-    }
-
-    fn reseed(&self, seed: u32) {
-        self.seed.set(seed);
-    }
-
-    // This implementation uses a linear congruential generator due to
-    // its efficiency. The parameters for the generator are those
-    // recommended in Numerical Recipes by Press, Teukolsky,
-    // Vetterling, and Flannery.
-
-    fn random(&self) -> u32 {
-        const LCG_MULTIPLIER: u32 = 1_644_525;
-        const LCG_INCREMENT: u32 = 1_013_904_223;
-        let val = self.seed.get();
-        let val = val.wrapping_mul(LCG_MULTIPLIER);
-        let val = val.wrapping_add(LCG_INCREMENT);
-        self.seed.set(val);
-        val
-    }
-}
-
-impl<'a, R: Rng<'a>> Client for SynchronousRandom<'a, R> {
-    fn randomness_available(
-        &self,
-        randomness: &mut dyn Iterator<Item = u32>,
-        _error: Result<(), ErrorCode>,
-    ) -> Continue {
-        match randomness.next() {
-            None => Continue::More,
-            Some(val) => {
-                self.seed.set(val);
-                Continue::Done
-            }
         }
     }
 }

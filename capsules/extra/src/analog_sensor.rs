@@ -9,9 +9,9 @@
 //!
 //! It includes support for analog light sensors and analog temperature sensors.
 
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::utilities::cells::OptionalCell;
-use kernel::ErrorCode;
 
 /// The type of the sensor implies how the raw ADC reading should be converted
 /// to a light value.
@@ -31,11 +31,11 @@ impl<'a, A: hil::adc::Adc<'a>> AnalogLightSensor<'a, A> {
         adc: &'a A,
         channel: &'a <A as kernel::hil::adc::Adc<'a>>::Channel,
         sensor_type: AnalogLightSensorType,
-    ) -> AnalogLightSensor<'a, A> {
-        AnalogLightSensor {
-            adc: adc,
-            channel: channel,
-            sensor_type: sensor_type,
+    ) -> Self {
+        Self {
+            adc,
+            channel,
+            sensor_type,
             client: OptionalCell::empty(),
         }
     }
@@ -82,12 +82,12 @@ impl<'a, A: hil::adc::Adc<'a>> AnalogTemperatureSensor<'a, A> {
     pub fn new(
         adc: &'a A,
         channel: &'a <A as kernel::hil::adc::Adc<'a>>::Channel,
-        sensor_type: AnalogLightSensorType,
-    ) -> AnalogLightSensor<'a, A> {
-        AnalogLightSensor {
-            adc: adc,
-            channel: channel,
-            sensor_type: sensor_type,
+        sensor_type: AnalogTemperatureSensorType,
+    ) -> Self {
+        Self {
+            adc,
+            channel,
+            sensor_type,
             client: OptionalCell::empty(),
         }
     }

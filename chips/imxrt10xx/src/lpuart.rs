@@ -5,12 +5,12 @@
 use core::cell::Cell;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite};
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields};
 
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::platform::chip::ClockInterface;
 use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
 
 use crate::{ccm, dma};
 
@@ -369,7 +369,7 @@ impl<'a> Lpuart<'a> {
     ) -> Lpuart<'a> {
         Lpuart {
             registers: base_addr,
-            clock: clock,
+            clock,
 
             tx_client: OptionalCell::empty(),
             rx_client: OptionalCell::empty(),
@@ -393,9 +393,12 @@ impl<'a> Lpuart<'a> {
     /// Set the DMA channel for transferring data from this UART peripheral
     pub fn set_tx_dma_channel(&'static self, dma_channel: &'static dma::DmaChannel) {
         dma_channel.set_client(self, self.tx_dma_source);
+        let destination: *const ReadWrite<u32, DATA::Register> =
+            core::ptr::addr_of!(self.registers.data);
+        let destination: *const u8 = destination.cast();
         unsafe {
             // Safety: pointing to static memory
-            dma_channel.set_destination(core::ptr::addr_of!(self.registers.data) as *const u8);
+            dma_channel.set_destination(destination);
         }
         dma_channel.set_interrupt_on_completion(true);
         dma_channel.set_disable_on_completion(true);
@@ -405,9 +408,12 @@ impl<'a> Lpuart<'a> {
     /// Set the DMA channel used for receiving data from this UART peripheral
     pub fn set_rx_dma_channel(&'static self, dma_channel: &'static dma::DmaChannel) {
         dma_channel.set_client(self, self.rx_dma_source);
+        let destination: *const ReadWrite<u32, DATA::Register> =
+            core::ptr::addr_of!(self.registers.data);
+        let destination: *const u8 = destination.cast();
         unsafe {
             // Safety: pointing to static memory
-            dma_channel.set_source(core::ptr::addr_of!(self.registers.data) as *const u8);
+            dma_channel.set_source(destination);
         }
         dma_channel.set_interrupt_on_completion(true);
         dma_channel.set_disable_on_completion(true);
@@ -801,7 +807,7 @@ impl<'a> hil::uart::Transmit<'a> for Lpuart<'a> {
     }
 }
 
-impl<'a> hil::uart::Configure for Lpuart<'a> {
+impl hil::uart::Configure for Lpuart<'_> {
     fn configure(&self, params: hil::uart::Parameters) -> Result<(), ErrorCode> {
         if params.baud_rate != 115200
             || params.stop_bits != hil::uart::StopBits::One
@@ -916,7 +922,7 @@ impl ClockInterface for LpuartClock<'_> {
     }
 }
 
-impl<'a> dma::DmaClient for Lpuart<'a> {
+impl dma::DmaClient for Lpuart<'_> {
     fn transfer_complete(&self, result: dma::Result) {
         match result {
             // Successful transfer from memory to peripheral

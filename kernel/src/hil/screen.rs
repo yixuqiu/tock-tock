@@ -30,8 +30,8 @@
 //! Configuration sets cause a `command_complete` callback unless noted
 //! otherwise.
 
-use crate::utilities::leasable_buffer::SubSliceMut;
 use crate::ErrorCode;
+use crate::utilities::leasable_buffer::SubSliceMut;
 use core::ops::Add;
 use core::ops::Sub;
 
@@ -97,19 +97,32 @@ impl Sub for ScreenRotation {
 #[allow(non_camel_case_types)]
 pub enum ScreenPixelFormat {
     /// Pixels encoded as 1-bit, used for monochromatic displays.
-    Mono,
-    /// Pixels encoded as 2-bit red channel, 3-bit green channel, 3-bit blue
+    Mono = 0,
+    /// Pixels encoded as 1-bit, used for monochromatic displays.
+    ///
+    /// The pixel order uses 8-bit (1-byte) pages where each page is displayed
+    /// vertically. That is, `buffer[0]` bit0 is pixel (0,0), but `buffer[0]`
+    /// bit1 is pixel (0,1). The page continues, so `buffer[0]` bit7 is
+    /// pixel (0,7). Then the page advances horizontally, so `buffer[1]` bit0 is
+    /// pixel (1,0), and `buffer[1]` bit4 is pixel (1,4).
+    ///
+    /// An example of a screen driver that uses this format is the SSD1306.
+    Mono_8BitPage = 6,
+    /// Pixels encoded as 1-bit blue, 1-bit green, 1-bit red,
+    /// and 1-bit for opaque (1) vs transparent (0)
+    RGB_4BIT = 5,
+    /// Pixels encoded as 3-bit red channel, 3-bit green channel, 2-bit blue
     /// channel.
-    RGB_233,
+    RGB_332 = 1,
     /// Pixels encoded as 5-bit red channel, 6-bit green channel, 5-bit blue
     /// channel.
-    RGB_565,
+    RGB_565 = 2,
     /// Pixels encoded as 8-bit red channel, 8-bit green channel, 8-bit blue
     /// channel.
-    RGB_888,
-    /// Pixels encoded as 8-bit alpha channel, 8-bit red channel, 8-bit green
-    /// channel, 8-bit blue channel.
-    ARGB_8888,
+    RGB_888 = 3,
+    /// Pixels encoded as 8-bit blue channel, 8-bit green channel,
+    /// 8-bit red channel, 8-bit alpha channel.
+    BGRA_8888 = 4,
     // other pixel formats may be defined.
 }
 
@@ -117,10 +130,12 @@ impl ScreenPixelFormat {
     pub fn get_bits_per_pixel(&self) -> usize {
         match self {
             Self::Mono => 1,
-            Self::RGB_233 => 8,
+            Self::Mono_8BitPage => 1,
+            Self::RGB_4BIT => 4,
+            Self::RGB_332 => 8,
             Self::RGB_565 => 16,
             Self::RGB_888 => 24,
-            Self::ARGB_8888 => 32,
+            Self::BGRA_8888 => 32,
         }
     }
 }

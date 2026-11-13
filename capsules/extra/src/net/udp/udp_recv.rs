@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-//! This file contains the definition and implementation for the UDP reception
-//! interface. It follows the same virtualization model as that described in `udp_send.rs`,
-//! except that no queueing is needed because received packets are immediately dispatched to the
-//! appropriate capsule / app. Once again, port binding for userspace apps is managed separately
-//! by the UDP userspace driver, which must correctly check bindings of kernel apps to ensure
-//! correctness when dispatching received packets to the appropriate client.
+//! Definition and implementation for the UDP reception interface.
+//!
+//! It follows the same virtualization model as that described in
+//! `udp_send.rs`, except that no queueing is needed because received
+//! packets are immediately dispatched to the appropriate capsule /
+//! app. Once again, port binding for userspace apps is managed
+//! separately by the UDP userspace driver, which must correctly check
+//! bindings of kernel apps to ensure correctness when dispatching
+//! received packets to the appropriate client.
 
+use crate::net::ipv6::IP6Header;
 use crate::net::ipv6::ip_utils::IPAddr;
 use crate::net::ipv6::ipv6_recv::IP6RecvClient;
-use crate::net::ipv6::IP6Header;
+use crate::net::udp::UDPHeader;
 use crate::net::udp::driver::UDPDriver;
 use crate::net::udp::udp_port_table::{PortQuery, UdpPortBindingRx};
-use crate::net::udp::UDPHeader;
 
 use kernel::collections::list::{List, ListLink, ListNode};
 use kernel::debug;
@@ -42,65 +45,62 @@ impl<'a> MuxUdpReceiver<'a> {
     }
 }
 
-impl<'a> IP6RecvClient for MuxUdpReceiver<'a> {
+impl IP6RecvClient for MuxUdpReceiver<'_> {
     fn receive(&self, ip_header: IP6Header, payload: &[u8]) {
-        match UDPHeader::decode(payload).done() {
-            Some((offset, udp_header)) => {
-                let len = udp_header.get_len() as usize;
-                let dst_port = udp_header.get_dst_port();
-                if len > payload.len() {
-                    debug!("[UDP_RECV] Error: Received UDP length too long");
-                    return;
-                }
-                for rcvr in self.rcvr_list.iter() {
-                    match rcvr.binding.take() {
-                        Some(binding) => {
-                            if binding.get_port() == dst_port {
-                                rcvr.client.map(|client| {
-                                    client.receive(
-                                        ip_header.get_src_addr(),
-                                        ip_header.get_dst_addr(),
-                                        udp_header.get_src_port(),
-                                        udp_header.get_dst_port(),
-                                        &payload[offset..],
-                                    );
-                                });
-                                rcvr.binding.replace(binding);
+        if let Some((offset, udp_header)) = UDPHeader::decode(payload).done() {
+            let len = udp_header.get_len() as usize;
+            let dst_port = udp_header.get_dst_port();
+            if len > payload.len() {
+                debug!("[UDP_RECV] Error: Received UDP length too long");
+                return;
+            }
+            for rcvr in self.rcvr_list.iter() {
+                match rcvr.binding.take() {
+                    Some(binding) => {
+                        if binding.get_port() == dst_port {
+                            rcvr.client.map(|client| {
+                                client.receive(
+                                    ip_header.get_src_addr(),
+                                    ip_header.get_dst_addr(),
+                                    udp_header.get_src_port(),
+                                    udp_header.get_dst_port(),
+                                    &payload[offset..],
+                                );
+                            });
+                            rcvr.binding.replace(binding);
+                            break;
+                        }
+                        rcvr.binding.replace(binding);
+                    }
+                    // The UDPReceiver used by the driver will not have a binding
+                    None => {
+                        if let Some(driver) = self.driver.take() {
+                            if driver.is_bound(dst_port) {
+                                driver.receive(
+                                    ip_header.get_src_addr(),
+                                    ip_header.get_dst_addr(),
+                                    udp_header.get_src_port(),
+                                    udp_header.get_dst_port(),
+                                    &payload[offset..],
+                                );
+                                self.driver.replace(driver);
                                 break;
                             }
-                            rcvr.binding.replace(binding);
+                            self.driver.replace(driver);
                         }
-                        // The UDPReceiver used by the driver will not have a binding
-                        None => match self.driver.take() {
-                            Some(driver) => {
-                                if driver.is_bound(dst_port) {
-                                    driver.receive(
-                                        ip_header.get_src_addr(),
-                                        ip_header.get_dst_addr(),
-                                        udp_header.get_src_port(),
-                                        udp_header.get_dst_port(),
-                                        &payload[offset..],
-                                    );
-                                    self.driver.replace(driver);
-                                    break;
-                                }
-                                self.driver.replace(driver);
-                            }
-                            None => {}
-                        },
                     }
                 }
             }
-            None => {}
         }
     }
 }
 
-/// The UDP driver implements this client interface trait to receive
-/// packets passed up the network stack to the UDPReceiver, and then
-/// distributes them to userland applications from there.
-/// Kernel apps can also instantiate structs that implement this trait
-/// in order to receive UDP packets
+/// Client interface trait to receive UDP packets.
+///
+/// Intended to received packets passed up the network stack to the
+/// UDPReceiver, and then distributes them to userland applications
+/// from there.  Kernel apps can also instantiate structs that
+/// implement this trait in order to receive UDP packets
 pub trait UDPRecvClient {
     fn receive(
         &self,

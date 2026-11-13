@@ -3,17 +3,19 @@
 // Copyright Tock Contributors 2022.
 
 //! This file contains the structs and methods associated with the UDP header.
+//!
 //! This includes getters and setters for the various header fields, as well
 //! as the standard encode/decode functionality required for serializing
 //! the struct for transmission.
 
+use crate::net::stream::SResult;
 use crate::net::stream::decode_u16;
 use crate::net::stream::encode_u16;
-use crate::net::stream::SResult;
 
 // Note: All UDP Header fields are stored in network byte order
 
 /// The `UDPHeader` struct follows the layout for the UDP packet header.
+///
 /// Note that the implementation of this struct provides getters and setters
 /// for the various fields of the header, to avoid confusion with endian-ness.
 #[derive(Copy, Clone, Debug)]

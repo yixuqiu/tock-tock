@@ -15,7 +15,7 @@
 //! Usage
 //! -----
 //!
-//! ```rust
+//! ```rust,ignore
 //! let mux_i2c = components::i2c::I2CMuxComponent::new(&stm32f3xx::i2c::I2C1)
 //!     .finalize(components::i2c_mux_component_helper!());
 //!
@@ -35,7 +35,7 @@
 //!
 //! NideDof Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
 //! let grant_ninedof = board_kernel.create_grant(&grant_cap);
 //!
@@ -58,7 +58,7 @@
 //!
 //! Temperature Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
 //! let grant_temp = board_kernel.create_grant(&grant_cap);
 //!
@@ -95,8 +95,8 @@ use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::{ErrorCode, ProcessId};
 
 use crate::lsm303xx::{
-    AccelerometerRegisters, Lsm303AccelDataRate, Lsm303MagnetoDataRate, Lsm303Range, Lsm303Scale,
-    CTRL_REG1, CTRL_REG4, RANGE_FACTOR_X_Y, RANGE_FACTOR_Z, SCALE_FACTOR,
+    AccelerometerRegisters, CTRL_REG1, CTRL_REG4, Lsm303AccelDataRate, Lsm303MagnetoDataRate,
+    Lsm303Range, Lsm303Scale, RANGE_FACTOR_X_Y, RANGE_FACTOR_Z, SCALE_FACTOR,
 };
 
 use capsules_core::driver;
@@ -138,7 +138,7 @@ enum State {
     ReadMagnetometerXYZ,
 }
 
-pub struct Lsm303dlhcI2C<'a, I: i2c::I2CDevice> {
+pub struct Lsm303dlhcI2C<'a, I: i2c::I2CDevice<'a>> {
     config_in_progress: Cell<bool>,
     i2c_accelerometer: &'a I,
     i2c_magnetometer: &'a I,
@@ -160,7 +160,7 @@ pub struct Lsm303dlhcI2C<'a, I: i2c::I2CDevice> {
 #[derive(Default)]
 pub struct App {}
 
-impl<'a, I: i2c::I2CDevice> Lsm303dlhcI2C<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> Lsm303dlhcI2C<'a, I> {
     pub fn new(
         i2c_accelerometer: &'a I,
         i2c_magnetometer: &'a I,
@@ -170,8 +170,8 @@ impl<'a, I: i2c::I2CDevice> Lsm303dlhcI2C<'a, I> {
         // setup and return struct
         Lsm303dlhcI2C {
             config_in_progress: Cell::new(false),
-            i2c_accelerometer: i2c_accelerometer,
-            i2c_magnetometer: i2c_magnetometer,
+            i2c_accelerometer,
+            i2c_magnetometer,
             state: Cell::new(State::Idle),
             accel_scale: Cell::new(Lsm303Scale::Scale2G),
             mag_range: Cell::new(Lsm303Range::Range1G),
@@ -398,7 +398,7 @@ impl<'a, I: i2c::I2CDevice> Lsm303dlhcI2C<'a, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> i2c::I2CClient for Lsm303dlhcI2C<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], status: Result<(), i2c::Error>) {
         match self.state.get() {
             State::IsPresent => {
@@ -406,9 +406,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
 
                 self.current_process.map(|process_id| {
                     let _ = self.apps.enter(process_id, |_grant, upcalls| {
-                        upcalls
-                            .schedule_upcall(0, (usize::from(present), 0, 0))
-                            .ok();
+                        let _ = upcalls.schedule_upcall(0, (usize::from(present), 0, 0));
                     });
                 });
 
@@ -421,9 +419,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
 
                 self.current_process.map(|process_id| {
                     let _ = self.apps.enter(process_id, |_grant, upcalls| {
-                        upcalls
-                            .schedule_upcall(0, (usize::from(set_power), 0, 0))
-                            .ok();
+                        let _ = upcalls.schedule_upcall(0, (usize::from(set_power), 0, 0));
                     });
                 });
 
@@ -442,9 +438,8 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
 
                 self.current_process.map(|process_id| {
                     let _ = self.apps.enter(process_id, |_grant, upcalls| {
-                        upcalls
-                            .schedule_upcall(0, (usize::from(set_scale_and_resolution), 0, 0))
-                            .ok();
+                        let _ = upcalls
+                            .schedule_upcall(0, (usize::from(set_scale_and_resolution), 0, 0));
                     });
                 });
 
@@ -497,9 +492,9 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
                 self.current_process.map(|process_id| {
                     let _ = self.apps.enter(process_id, |_grant, upcalls| {
                         if values {
-                            upcalls.schedule_upcall(0, (x, y, z)).ok();
+                            let _ = upcalls.schedule_upcall(0, (x, y, z));
                         } else {
-                            upcalls.schedule_upcall(0, (0, 0, 0)).ok();
+                            let _ = upcalls.schedule_upcall(0, (0, 0, 0));
                         }
                     });
                 });
@@ -513,12 +508,10 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
 
                 self.current_process.map(|process_id| {
                     let _ = self.apps.enter(process_id, |_grant, upcalls| {
-                        upcalls
-                            .schedule_upcall(
-                                0,
-                                (usize::from(set_temperature_and_magneto_data_rate), 0, 0),
-                            )
-                            .ok();
+                        let _ = upcalls.schedule_upcall(
+                            0,
+                            (usize::from(set_temperature_and_magneto_data_rate), 0, 0),
+                        );
                     });
                 });
 
@@ -536,9 +529,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
 
                 self.current_process.map(|process_id| {
                     let _ = self.apps.enter(process_id, |_grant, upcalls| {
-                        upcalls
-                            .schedule_upcall(0, (usize::from(set_range), 0, 0))
-                            .ok();
+                        let _ = upcalls.schedule_upcall(0, (usize::from(set_range), 0, 0));
                     });
                 });
 
@@ -564,9 +555,9 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
                 self.current_process.map(|process_id| {
                     let _ = self.apps.enter(process_id, |_grant, upcalls| {
                         if let Ok(temp) = values {
-                            upcalls.schedule_upcall(0, (temp as usize, 0, 0)).ok();
+                            let _ = upcalls.schedule_upcall(0, (temp as usize, 0, 0));
                         } else {
-                            upcalls.schedule_upcall(0, (0, 0, 0)).ok();
+                            let _ = upcalls.schedule_upcall(0, (0, 0, 0));
                         }
                     });
                 });
@@ -606,9 +597,9 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
                 self.current_process.map(|process_id| {
                     let _ = self.apps.enter(process_id, |_grant, upcalls| {
                         if values {
-                            upcalls.schedule_upcall(0, (x, y, z)).ok();
+                            let _ = upcalls.schedule_upcall(0, (x, y, z));
                         } else {
-                            upcalls.schedule_upcall(0, (0, 0, 0)).ok();
+                            let _ = upcalls.schedule_upcall(0, (0, 0, 0));
                         }
                     });
                 });
@@ -626,7 +617,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for Lsm303dlhcI2C<'_, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> SyscallDriver for Lsm303dlhcI2C<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> SyscallDriver for Lsm303dlhcI2C<'a, I> {
     fn command(
         &self,
         command_num: usize,
@@ -736,7 +727,7 @@ impl<I: i2c::I2CDevice> SyscallDriver for Lsm303dlhcI2C<'_, I> {
     }
 }
 
-impl<'a, I: i2c::I2CDevice> sensors::NineDof<'a> for Lsm303dlhcI2C<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> sensors::NineDof<'a> for Lsm303dlhcI2C<'a, I> {
     fn set_client(&self, nine_dof_client: &'a dyn sensors::NineDofClient) {
         self.nine_dof_client.replace(nine_dof_client);
     }
@@ -750,7 +741,7 @@ impl<'a, I: i2c::I2CDevice> sensors::NineDof<'a> for Lsm303dlhcI2C<'a, I> {
     }
 }
 
-impl<'a, I: i2c::I2CDevice> sensors::TemperatureDriver<'a> for Lsm303dlhcI2C<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> sensors::TemperatureDriver<'a> for Lsm303dlhcI2C<'a, I> {
     fn set_client(&self, temperature_client: &'a dyn sensors::TemperatureClient) {
         self.temperature_client.replace(temperature_client);
     }

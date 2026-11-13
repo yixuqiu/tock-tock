@@ -9,36 +9,35 @@
 
 use crate::ficr;
 use enum_primitive::cast::FromPrimitive;
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::{ReadWrite, register_bitfields, register_structs};
 
 use crate::gpio::Pin;
 
-const UICR_BASE: StaticRef<UicrRegisters> =
-    unsafe { StaticRef::new(0x10001200 as *const UicrRegisters) };
-
-#[repr(C)]
-struct UicrRegisters {
-    /// Mapping of the nRESET function (see POWER chapter for details)
-    /// - Address: 0x200 - 0x204
-    pselreset0: ReadWrite<u32, Pselreset::Register>,
-    /// Mapping of the nRESET function (see POWER chapter for details)
-    /// - Address: 0x204 - 0x208
-    pselreset1: ReadWrite<u32, Pselreset::Register>,
-    /// Access Port protection
-    /// - Address: 0x208 - 0x20c
-    approtect: ReadWrite<u32, ApProtect::Register>,
-    /// Setting of pins dedicated to NFC functionality: NFC antenna or GPIO
-    /// - Address: 0x20c - 0x210
-    nfcpins: ReadWrite<u32, NfcPins::Register>,
-    _reserved1: [u32; 60],
-    /// External circuitry to be supplied from VDD pin.
-    /// - Address: 0x300 - 0x304
-    extsupply: ReadWrite<u32, ExtSupply::Register>,
-    /// GPIO reference voltage
-    /// - Address: 0x304 - 0x308
-    regout0: ReadWrite<u32, RegOut::Register>,
+register_structs! {
+    pub UicrRegisters {
+        /// Mapping of the nRESET function (see POWER chapter for details)
+        /// - Address: 0x200 - 0x204
+        (0x00 => pselreset0: ReadWrite<u32, Pselreset::Register>),
+        /// Mapping of the nRESET function (see POWER chapter for details)
+        /// - Address: 0x204 - 0x208
+        (0x04 => pselreset1: ReadWrite<u32, Pselreset::Register>),
+        /// Access Port protection
+        /// - Address: 0x208 - 0x20c
+        (0x08 => approtect: ReadWrite<u32, ApProtect::Register>),
+        /// Setting of pins dedicated to NFC functionality: NFC antenna or GPIO
+        /// - Address: 0x20c - 0x210
+        (0x0C => nfcpins: ReadWrite<u32, NfcPins::Register>),
+        (0x10 => _reserved1),
+        /// External circuitry to be supplied from VDD pin.
+        /// - Address: 0x300 - 0x304
+        (0x100 => extsupply: ReadWrite<u32, ExtSupply::Register>),
+        /// GPIO reference voltage
+        /// - Address: 0x304 - 0x308
+        (0x104 => regout0: ReadWrite<u32, RegOut::Register>),
+        (0x108 => @END),
+    }
 }
 
 register_bitfields! [u32,
@@ -102,12 +101,14 @@ register_bitfields! [u32,
     ]
 ];
 
-pub struct Uicr {
+pub struct Uicr<'a> {
     registers: StaticRef<UicrRegisters>,
+    ficr: &'a ficr::Ficr,
 }
 
 #[derive(Copy, Clone, PartialEq)]
 /// Output voltage from REG0 regulator stage.
+///
 /// The value is board dependent (e.g. the nRF52840dk board uses 1.8V
 /// whereas the nRF52840-Dongle requires 3.0V to light its LEDs).
 /// When a chip is out of the factory or fully erased, the default value (7)
@@ -137,11 +138,9 @@ impl From<u32> for Regulator0Output {
     }
 }
 
-impl Uicr {
-    pub const fn new() -> Uicr {
-        Uicr {
-            registers: UICR_BASE,
-        }
+impl<'a> Uicr<'a> {
+    pub const fn new(registers: StaticRef<UicrRegisters>, ficr: &'a ficr::Ficr) -> Uicr<'a> {
+        Uicr { registers, ficr }
     }
 
     pub fn set_psel0_reset_pin(&self, pin: Pin) {
@@ -184,8 +183,7 @@ impl Uicr {
         // We need to understand the variant of this nRF52 chip to correctly
         // implement this function. Newer versions use a different value to
         // indicate disabled.
-        let factory_config = ficr::Ficr::new();
-        let disabled_val = if factory_config.has_updated_approtect_logic() {
+        let disabled_val = if self.ficr.has_updated_approtect_logic() {
             ApProtect::PALL::HWDISABLE
         } else {
             ApProtect::PALL::DISABLED
@@ -206,8 +204,7 @@ impl Uicr {
     pub fn disable_ap_protect(&self) {
         // We need to understand the variant of this nRF52 chip to correctly
         // implement this function.
-        let factory_config = ficr::Ficr::new();
-        if factory_config.has_updated_approtect_logic() {
+        if self.ficr.has_updated_approtect_logic() {
             // Newer revisions of the chip require setting the APPROTECT
             // register to `HwDisable`.
             self.registers.approtect.write(ApProtect::PALL::HWDISABLE);

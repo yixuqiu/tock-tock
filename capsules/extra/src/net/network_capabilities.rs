@@ -43,7 +43,7 @@ impl AddrRange {
         match self {
             AddrRange::Any => true,
             AddrRange::NoAddrs => false,
-            AddrRange::AddrSet(allowed_addrs) => allowed_addrs.iter().any(|&a| a == addr),
+            AddrRange::AddrSet(allowed_addrs) => allowed_addrs.contains(&addr),
             AddrRange::Addr(allowed_addr) => addr == *allowed_addr, //TODO: refs?
             AddrRange::Subnet(allowed_addr, prefix_len) => {
                 let full_bytes: usize = prefix_len / 8;
@@ -76,20 +76,19 @@ impl PortRange {
         match self {
             PortRange::Any => true,
             PortRange::NoPorts => false,
-            PortRange::PortSet(allowed_ports) => allowed_ports.iter().any(|&p| p == port), // TODO: check refs
+            PortRange::PortSet(allowed_ports) => allowed_ports.contains(&port), // TODO: check refs
             PortRange::Range(low, high) => *low <= port && port <= *high,
             PortRange::Port(allowed_port) => port == *allowed_port,
         }
     }
 }
 
-/// The UdpVisibilityCapability and IpVisibilityCapability has an empty private
-/// field to make it so the only way to create these structs is via a call to
-/// `new` which requires a NetworkCapabilityCreationCapability.
+/// UDP visiblity capability.
 pub struct UdpVisibilityCapability {
     _priv: (), // an empty private field
 }
 
+/// IP visiblity capability.
 pub struct IpVisibilityCapability {
     _priv: (), // an empty private field
 }
@@ -110,8 +109,10 @@ impl IpVisibilityCapability {
     }
 }
 
-/// The NetworkCapability specifies access to network resourcess across the UDP
-/// and IP layers. Access to layer-specific information is mediated by the
+/// Specifies access to network resourcess across the UDP and IP
+/// layers.
+///
+/// Access to layer-specific information is mediated by the
 /// UdpVsibilityCapability and the IpVisibilityCapability.
 pub struct NetworkCapability {
     // can potentially add more
@@ -128,9 +129,9 @@ impl NetworkCapability {
         _create_net_cap: &dyn NetworkCapabilityCreationCapability,
     ) -> NetworkCapability {
         NetworkCapability {
-            remote_addrs: remote_addrs,
-            remote_ports: remote_ports,
-            local_ports: local_ports,
+            remote_addrs,
+            remote_ports,
+            local_ports,
         }
     }
 

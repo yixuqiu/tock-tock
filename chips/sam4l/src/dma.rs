@@ -8,29 +8,34 @@ use crate::pm;
 use core::cell::Cell;
 use core::cmp;
 use core::sync::atomic;
-use kernel::utilities::cells::VolatileCell;
+use enum_primitive::cast::FromPrimitive;
+use kernel::debug;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::{OptionalCell, TakeCell};
 use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite, WriteOnly};
-use kernel::utilities::StaticRef;
+use kernel::utilities::registers::{
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
+};
 
-/// Memory registers for a DMA channel. Section 16.6.1 of the datasheet.
-#[repr(C)]
-#[allow(dead_code)]
-struct DMARegisters {
-    mar: ReadWrite<u32, MemoryAddress::Register>,
-    psr: VolatileCell<DMAPeripheral>,
-    _psr_padding: [u8; 3],
-    tcr: ReadWrite<u32, TransferCounter::Register>,
-    marr: ReadWrite<u32, MemoryAddressReload::Register>,
-    tcrr: ReadWrite<u32, TransferCounter::Register>,
-    cr: WriteOnly<u32, Control::Register>,
-    mr: ReadWrite<u32, Mode::Register>,
-    sr: ReadOnly<u32, Status::Register>,
-    ier: WriteOnly<u32, Interrupt::Register>,
-    idr: WriteOnly<u32, Interrupt::Register>,
-    imr: ReadOnly<u32, Interrupt::Register>,
-    isr: ReadOnly<u32, Interrupt::Register>,
+register_structs! {
+    /// Memory registers for a DMA channel. Section 16.6.1 of the datasheet.
+    #[allow(dead_code)]
+    DMARegisters {
+        (0x000 => mar: ReadWrite<u32, MemoryAddress::Register>),
+        (0x004 => psr: ReadWrite<u8>),
+        (0x005 => _psr_padding: [u8; 3]),
+        (0x008 => tcr: ReadWrite<u32, TransferCounter::Register>),
+        (0x00C => marr: ReadWrite<u32, MemoryAddressReload::Register>),
+        (0x010 => tcrr: ReadWrite<u32, TransferCounter::Register>),
+        (0x014 => cr: WriteOnly<u32, Control::Register>),
+        (0x018 => mr: ReadWrite<u32, Mode::Register>),
+        (0x01C => sr: ReadOnly<u32, Status::Register>),
+        (0x020 => ier: WriteOnly<u32, Interrupt::Register>),
+        (0x024 => idr: WriteOnly<u32, Interrupt::Register>),
+        (0x028 => imr: ReadOnly<u32, Interrupt::Register>),
+        (0x02C => isr: ReadOnly<u32, Interrupt::Register>),
+        (0x030 => @END),
+    }
 }
 
 register_bitfields![u32,
@@ -98,9 +103,11 @@ const DMA_CHANNEL_SIZE: usize = 0x40;
 
 /// Shared counter that Keeps track of how many DMA channels are currently
 /// active.
-static mut NUM_ENABLED: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
+static NUM_ENABLED: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
 
-/// The DMA channel number. Each channel transfers data between memory and a
+/// The DMA channel number.
+///
+/// Each channel transfers data between memory and a
 /// particular peripheral function (e.g., SPI read or SPI write, but not both
 /// simultaneously). There are 16 available channels (Section 16.7).
 #[derive(Copy, Clone)]
@@ -124,6 +131,7 @@ pub enum DMAChannelNum {
     DMAChannel15 = 15,
 }
 
+enum_primitive::enum_from_primitive! {
 /// The peripheral function a channel is assigned to (Section 16.7). `*_RX`
 /// means transfer data from peripheral to memory, `*_TX` means transfer data
 /// from memory to peripheral.
@@ -169,6 +177,7 @@ pub enum DMAPeripheral {
     AESA_TX = 36,
     LCDCA_ACMDR_TX = 37,
     LCDCA_ABMDR_TX = 38,
+}
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -219,9 +228,7 @@ impl DMAChannel {
         pm::enable_clock(pm::Clock::PBB(pm::PBBClock::PDCA));
 
         if !self.enabled.get() {
-            unsafe {
-                NUM_ENABLED.fetch_add(1, atomic::Ordering::Relaxed);
-            }
+            NUM_ENABLED.fetch_add(1, atomic::Ordering::Relaxed);
 
             // Disable all interrupts
             self.registers
@@ -234,12 +241,10 @@ impl DMAChannel {
 
     pub fn disable(&self) {
         if self.enabled.get() {
-            unsafe {
-                let num_enabled = NUM_ENABLED.fetch_sub(1, atomic::Ordering::Relaxed);
-                if num_enabled == 1 {
-                    pm::disable_clock(pm::Clock::HSB(pm::HSBClock::PDCA));
-                    pm::disable_clock(pm::Clock::PBB(pm::PBBClock::PDCA));
-                }
+            let num_enabled = NUM_ENABLED.fetch_sub(1, atomic::Ordering::Relaxed);
+            if num_enabled == 1 {
+                pm::disable_clock(pm::Clock::HSB(pm::HSBClock::PDCA));
+                pm::disable_clock(pm::Clock::PBB(pm::PBBClock::PDCA));
             }
             self.registers.cr.write(Control::TDIS::SET);
             self.enabled.set(false);
@@ -256,9 +261,19 @@ impl DMAChannel {
             .write(Interrupt::TERR::SET + Interrupt::TRC::SET + Interrupt::RCZ::SET);
         let channel = self.registers.psr.get();
 
-        self.client.map(|client| {
-            client.transfer_done(channel);
-        });
+        match DMAPeripheral::from_u8(channel) {
+            Some(channel) => {
+                self.client.map(|client| {
+                    client.transfer_done(channel);
+                });
+            }
+            None => {
+                debug!(
+                    "sam4l dma: psr read back invalid DMAPeripheral value {}",
+                    channel
+                );
+            }
+        }
     }
 
     pub fn start_transfer(&self) {
@@ -279,7 +294,7 @@ impl DMAChannel {
             .mr
             .write(Mode::SIZE.val(self.width.get() as u32));
 
-        self.registers.psr.set(pid);
+        self.registers.psr.set(pid as u8);
         self.registers
             .marr
             .write(MemoryAddressReload::MARV.val(core::ptr::from_ref::<u8>(&buf[0]) as u32));

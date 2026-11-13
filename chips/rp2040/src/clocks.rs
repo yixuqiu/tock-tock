@@ -3,9 +3,9 @@
 // Copyright Tock Contributors 2022.
 
 use core::cell::Cell;
-use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
 register_structs! {
     GpioClockRegisters {
@@ -1049,11 +1049,13 @@ impl Clocks {
             let _delay_cyc: u32 = self.get_frequency(Clock::System) / self.get_frequency(clock) + 1;
             unsafe {
                 use core::arch::asm;
-                asm! (
-                    "1:",
-                    "subs {0}, #1",
-                    "bne 1b",
-                    in (reg) _delay_cyc
+                asm!(
+                    "
+1:
+    subs {0}, #1
+    bne 1b
+                    ",
+                    in (reg) _delay_cyc,
                 );
             }
         }
@@ -1405,5 +1407,13 @@ impl Clocks {
         self.set_divider(Clock::Rtc, div);
 
         self.set_frequency(Clock::Rtc, freq);
+    }
+}
+
+/// Lets the drivers shared with the other RP2 chip reach `clk_peri` without
+/// naming this chip's `Clock` enum, which the two chips do not share.
+impl rp2xxx::PeripheralClock for Clocks {
+    fn peripheral_frequency(&self) -> u32 {
+        self.get_frequency(Clock::Peripheral)
     }
 }

@@ -18,9 +18,12 @@ pub struct Sam4l<I: InterruptService + 'static> {
 }
 
 impl<I: InterruptService + 'static> Sam4l<I> {
-    pub unsafe fn new(pm: &'static crate::pm::PowerManager, interrupt_service: &'static I) -> Self {
+    pub fn new(pm: &'static crate::pm::PowerManager, interrupt_service: &'static I) -> Self {
+        // SAFETY: All SAM4L chips are Cortex-M4 cores with valid MPU hardware.
+        let mpu = unsafe { cortexm4::mpu::new() };
+
         Self {
-            mpu: cortexm4::mpu::MPU::new(),
+            mpu,
             userspace_kernel_boundary: cortexm4::syscall::SysCall::new(),
             pm,
             interrupt_service,
@@ -29,6 +32,7 @@ impl<I: InterruptService + 'static> Sam4l<I> {
 }
 
 /// This struct, when initialized, instantiates all peripheral drivers for the apollo3.
+///
 /// If a board wishes to use only a subset of these peripherals, this
 /// should not be used or imported, and a modified version should be
 /// constructed manually in main.rs.
@@ -160,7 +164,7 @@ impl Sam4lDefaultPeripherals {
     }
 }
 impl InterruptService for Sam4lDefaultPeripherals {
-    unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
+    fn service_interrupt(&self, interrupt: u32) -> bool {
         use crate::nvic;
         match interrupt {
             nvic::ASTALARM => self.ast.handle_interrupt(),
@@ -237,27 +241,28 @@ impl InterruptService for Sam4lDefaultPeripherals {
 impl<I: InterruptService + 'static> Chip for Sam4l<I> {
     type MPU = cortexm4::mpu::MPU;
     type UserspaceKernelBoundary = cortexm4::syscall::SysCall;
+    type ThreadIdProvider = cortexm4::thread_id::CortexMThreadIdProvider;
+
+    fn init() {
+        cortexm4::nvic::disable_all();
+        cortexm4::nvic::clear_all_pending();
+        cortexm4::nvic::enable_all();
+    }
 
     fn service_pending_interrupts(&self) {
-        unsafe {
-            loop {
-                if let Some(interrupt) = cortexm4::nvic::next_pending() {
-                    match self.interrupt_service.service_interrupt(interrupt) {
-                        true => {}
-                        false => panic!("unhandled interrupt"),
-                    }
-                    let n = cortexm4::nvic::Nvic::new(interrupt);
-                    n.clear_pending();
-                    n.enable();
-                } else {
-                    break;
-                }
+        while let Some(interrupt) = cortexm4::nvic::next_pending() {
+            match self.interrupt_service.service_interrupt(interrupt) {
+                true => {}
+                false => panic!("unhandled interrupt"),
             }
+            let n = cortexm4::nvic::Nvic::new(interrupt);
+            n.clear_pending();
+            n.enable();
         }
     }
 
     fn has_pending_interrupts(&self) -> bool {
-        unsafe { cortexm4::nvic::has_pending() }
+        cortexm4::nvic::has_pending()
     }
 
     fn mpu(&self) -> &cortexm4::mpu::MPU {
@@ -269,29 +274,23 @@ impl<I: InterruptService + 'static> Chip for Sam4l<I> {
     }
 
     fn sleep(&self) {
+        let cap = kernel::create_capability!(kernel::capabilities::CpuStateControlCapability);
         if pm::deep_sleep_ready() {
-            unsafe {
-                cortexm4::scb::set_sleepdeep();
-            }
+            cortexm4::scb::set_sleepdeep(&cap);
         } else {
-            unsafe {
-                cortexm4::scb::unset_sleepdeep();
-            }
+            cortexm4::scb::unset_sleepdeep(&cap);
         }
-
-        unsafe {
-            cortexm4::support::wfi();
-        }
+        cortexm4::support::wfi(&cap);
     }
 
-    unsafe fn atomic<F, R>(&self, f: F) -> R
+    fn with_interrupts_disabled<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        cortexm4::support::atomic(f)
+        cortexm4::support::with_interrupts_disabled(f)
     }
 
-    unsafe fn print_state(&self, writer: &mut dyn Write) {
+    unsafe fn print_state(_this: Option<&Self>, writer: &mut dyn Write) {
         CortexM4::print_cortexm_state(writer);
     }
 }

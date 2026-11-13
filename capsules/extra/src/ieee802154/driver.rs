@@ -55,8 +55,7 @@
 
 use crate::ieee802154::{device, framer};
 use crate::net::ieee802154::{Header, KeyId, MacAddress, SecurityLevel};
-use crate::net::stream::{decode_bytes, decode_u8, encode_bytes, encode_u8, SResult};
-use device::RxClient;
+use crate::net::stream::{SResult, decode_bytes, decode_u8, encode_bytes, encode_u8};
 
 use core::cell::Cell;
 
@@ -215,52 +214,13 @@ impl KeyDescriptor {
         let (_, key_id) = dec_try!(buf, 1; decode_key_id);
         let mut key = [0u8; 16];
         let off = dec_consume!(buf, 11; decode_bytes, &mut key);
-        stream_done!(
-            off,
-            KeyDescriptor {
-                level: level,
-                key_id: key_id,
-                key: key,
-            }
-        );
-    }
-}
-
-/// Denotes the type of pending transmission. A `Parse(..)` PendingTX
-/// indicates that the 15.4 framer will need to form the packet header
-/// from the provided address and security level. A `Raw` PendingTX
-/// is formed by the userprocess and passes through the Framer unchanged.
-enum PendingTX {
-    Parse(u16, Option<(SecurityLevel, KeyId)>),
-    Raw,
-    Empty,
-}
-
-impl Default for PendingTX {
-    /// The default PendingTX is `Empty`
-    fn default() -> Self {
-        PendingTX::Empty
-    }
-}
-
-impl PendingTX {
-    /// Returns true if the PendingTX state is `Empty`
-    fn is_empty(&self) -> bool {
-        match self {
-            PendingTX::Empty => true,
-            _ => false,
-        }
-    }
-
-    /// Take the pending transmission, replacing it with `Empty` and return the current PendingTx
-    fn take(&mut self) -> PendingTX {
-        core::mem::replace(self, PendingTX::Empty)
+        stream_done!(off, KeyDescriptor { level, key_id, key });
     }
 }
 
 #[derive(Default)]
 pub struct App {
-    pending_tx: PendingTX,
+    pending_tx: Option<(u16, Option<(SecurityLevel, KeyId)>)>,
 }
 
 pub struct RadioDriver<'a, M: device::MacDevice<'a>> {
@@ -464,7 +424,7 @@ impl<'a, M: device::MacDevice<'a>> RadioDriver<'a, M> {
         for app in self.apps.iter() {
             let processid = app.processid();
             app.enter(|app, _| {
-                if !app.pending_tx.is_empty() {
+                if app.pending_tx.is_some() {
                     pending_app = Some(processid);
                 }
             });
@@ -494,77 +454,56 @@ impl<'a, M: device::MacDevice<'a>> RadioDriver<'a, M> {
     /// idle and the app has a pending transmission.
     #[inline]
     fn perform_tx_sync(&self, processid: ProcessId) -> Result<(), ErrorCode> {
-        self.apps.enter(processid, |app, kernel_data| {
-            // The use of this take method is somewhat overkill, but serves to ensure that
-            // this, or future, implementations do not forget to "remove" the pending_tx
-            // from the app after processing.
-            let curr_tx = app.pending_tx.take();
-
-            // Before beginning the transmission process, confirm that the PendingTX
-            // is not Empty. In the Empty case, there is nothing to transmit and we
-            // can return Ok(()) immediately as there is nothing to transmit.
-            if let PendingTX::Empty = curr_tx { return Ok(()) }
-
-            // At a high level, we must form a Frame from the provided userproceess data,
-            // place this frame into a static buffer, and then transmit the frame. This is
-            // somewhat complicated by the need to error handle each of these steps and also
-            // provide Raw and Parse sending modes (i.e. Raw mode userprocess fully forms
-            // 15.4 packet and Parse mode the 15.4 framer forms the packet from the userprocess
-            // parameters and payload). Because we first take this kernel buffer, we must
-            // replace the `kernel_tx` buffer upon handling any error.
-            self.kernel_tx.take().map_or(Err(ErrorCode::NOMEM), |kbuf| {
-                match curr_tx {
-                    PendingTX::Empty => {
-                        unreachable!("PendingTX::Empty should have been handled earlier with guard statement.")
+        self.apps.enter(processid, |app, kerel_data| {
+            let (dst_addr, security_needed) = match app.pending_tx.take() {
+                Some(pending_tx) => pending_tx,
+                None => {
+                    return Ok(());
+                }
+            };
+            let result = self.kernel_tx.take().map_or(Err(ErrorCode::NOMEM), |kbuf| {
+                // Prepare the frame headers
+                let pan = self.mac.get_pan();
+                let dst_addr = MacAddress::Short(dst_addr);
+                let src_addr = MacAddress::Short(self.mac.get_address());
+                let mut frame = match self.mac.prepare_data_frame(
+                    kbuf,
+                    pan,
+                    dst_addr,
+                    pan,
+                    src_addr,
+                    security_needed,
+                ) {
+                    Ok(frame) => frame,
+                    Err(kbuf) => {
+                        self.kernel_tx.replace(kbuf);
+                        return Err(ErrorCode::FAIL);
                     }
-                    PendingTX::Raw => {
-                        // Here we form an empty frame from the buffer to later be filled by the specified
-                        // userprocess frame data. Note, we must allocate the needed buffer for the frame,
-                        // but set the `len` field to 0 as the frame is empty.
-                        self.mac.buf_to_frame(kbuf, 0).map_err(|(err, buf)| {
-                            self.kernel_tx.replace(buf);
-                            err
-                    })},
-                    PendingTX::Parse(dst_addr, security_needed) => {
-                        // Prepare the frame headers
-                        let pan = self.mac.get_pan();
-                        let dst_addr = MacAddress::Short(dst_addr);
-                        let src_addr = MacAddress::Short(self.mac.get_address());
-                        self.mac.prepare_data_frame(
-                            kbuf,
-                            pan,
-                            dst_addr,
-                            pan,
-                            src_addr,
-                            security_needed,
-                        ).map_or_else(|err_buf| {
-                            self.kernel_tx.replace(err_buf);
-                            Err(ErrorCode::FAIL)
-                        }, | frame|
-                            Ok(frame)
-                        )
+                };
+
+                // Append the payload: there must be one
+                let result = kerel_data
+                    .get_readonly_processbuffer(ro_allow::WRITE)
+                    .and_then(|write| write.enter(|payload| frame.append_payload_process(payload)))
+                    .unwrap_or(Err(ErrorCode::INVAL));
+                if result != Ok(()) {
+                    return result;
+                }
+
+                // Finally, transmit the frame
+                match self.mac.transmit(frame) {
+                    Ok(()) => Ok(()),
+                    Err((ecode, buf)) => {
+                        self.kernel_tx.put(Some(buf));
+                        Err(ecode)
                     }
                 }
-            }).map(|mut frame| {
-
-            // Obtain the payload from the userprocess, append the "payload" to the previously formed frame
-            // and pass the frame to be transmitted. Note, the term "payload" is somewhat misleading in the
-            // case of Raw transmission as the payload is the entire 15.4 frame.
-            kernel_data
-            .get_readonly_processbuffer(ro_allow::WRITE)
-            .and_then(|write| write.enter(|payload|
-                frame.append_payload_process(payload)
-            ))?.map( |()|
-                {
-                    self.mac.transmit(frame).map_or_else(|(errorcode, error_buf)| {
-                        self.kernel_tx.replace(error_buf);
-                        Err(errorcode)
-                    }, |()| {self.current_app.set(processid); Ok(()) }
-                    )
-                }
-            )?
+            });
+            if result == Ok(()) {
+                self.current_app.set(processid);
+            }
+            result
         })?
-    })?
     }
 
     /// Schedule the next transmission if there is one pending. Performs the
@@ -599,18 +538,16 @@ impl<'a, M: device::MacDevice<'a>> DeferredCallClient for RadioDriver<'a, M> {
             .apps
             .enter(self.saved_processid.unwrap_or_panic(), |_app, upcalls| {
                 // Unwrap fail = missing processid
-                upcalls
-                    .schedule_upcall(
-                        upcall::FRAME_TRANSMITTED,
-                        (
-                            kernel::errorcode::into_statuscode(
-                                self.saved_result.unwrap_or_panic(), // Unwrap fail = missing result
-                            ),
-                            0,
-                            0,
+                let _ = upcalls.schedule_upcall(
+                    upcall::FRAME_TRANSMITTED,
+                    (
+                        kernel::errorcode::into_statuscode(
+                            self.saved_result.unwrap_or_panic(), // Unwrap fail = missing result
                         ),
-                    )
-                    .ok();
+                        0,
+                        0,
+                    ),
+                );
             });
     }
 
@@ -641,7 +578,7 @@ impl<'a, M: device::MacDevice<'a>> framer::DeviceProcedure for RadioDriver<'a, M
                     self.backup_device_procedure
                         .and_then(|procedure| procedure.lookup_addr_long(addr))
                 },
-                |res| Some(res),
+                Some,
             )
     }
 }
@@ -670,7 +607,7 @@ impl<'a, M: device::MacDevice<'a>> framer::KeyProcedure for RadioDriver<'a, M> {
                         procedure.lookup_key(SecurityLevel::EncMic32, KeyId::Index(2))
                     })
                 },
-                |res| Some(res),
+                Some,
             )
     }
 }
@@ -691,49 +628,46 @@ impl<'a, M: device::MacDevice<'a>> SyscallDriver for RadioDriver<'a, M> {
     /// - `0`: Driver existence check.
     /// - `1`: Return radio status. Ok(())/OFF = on/off.
     /// - `2`: Set short MAC address.
-    /// - `3`: Set long MAC address.
-    ///        app_cfg (in): 8 bytes: the long MAC address.
+    /// - `3`: Set long MAC address. app_cfg (in): 8 bytes: the long MAC
+    ///   address.
     /// - `4`: Set PAN ID.
     /// - `5`: Set channel.
     /// - `6`: Set transmission power.
     /// - `7`: Commit any configuration changes.
     /// - `8`: Get the short MAC address.
-    /// - `9`: Get the long MAC address.
-    ///        app_cfg (out): 8 bytes: the long MAC address.
+    /// - `9`: Get the long MAC address. app_cfg (out): 8 bytes: the long MAC
+    ///   address.
     /// - `10`: Get the PAN ID.
     /// - `11`: Get the channel.
     /// - `12`: Get the transmission power.
     /// - `13`: Get the maximum number of neighbors.
     /// - `14`: Get the current number of neighbors.
     /// - `15`: Get the short address of the neighbor at an index.
-    /// - `16`: Get the long address of the neighbor at an index.
-    ///        app_cfg (out): 8 bytes: the long MAC address.
+    /// - `16`: Get the long address of the neighbor at an index. app_cfg (out):
+    ///   8 bytes: the long MAC address.
     /// - `17`: Add a new neighbor with the given short and long address.
-    ///        app_cfg (in): 8 bytes: the long MAC address.
+    ///   app_cfg (in): 8 bytes: the long MAC address.
     /// - `18`: Remove the neighbor at an index.
     /// - `19`: Get the maximum number of keys.
     /// - `20`: Get the current number of keys.
     /// - `21`: Get the security level of the key at an index.
-    /// - `22`: Get the key id of the key at an index.
-    ///        app_cfg (out): 1 byte: the key ID mode +
-    ///                       up to 9 bytes: the key ID.
-    /// - `23`: Get the key at an index.
-    ///        app_cfg (out): 16 bytes: the key.
-    /// - `24`: Add a new key with the given description.
-    ///        app_cfg (in): 1 byte: the security level +
-    ///                      1 byte: the key ID mode +
-    ///                      9 bytes: the key ID (might not use all bytes) +
-    ///                      16 bytes: the key.
+    /// - `22`: Get the key id of the key at an index. app_cfg (out): 1 byte:
+    ///   the key ID mode + up to 9 bytes: the key ID.
+    /// - `23`: Get the key at an index. app_cfg (out): 16 bytes: the key.
+    /// - `24`: Add a new key with the given description. app_cfg (in): 1 byte:
+    ///   the security level + 1 byte: the key ID mode + 9 bytes: the key ID
+    ///   (might not use all bytes) + 16 bytes: the key.
     /// - `25`: Remove the key at an index.
     /// - `26`: Transmit a frame (parse required). Take the provided payload and
-    ///        parameters to encrypt, form headers, and transmit the frame.
-    /// - `27`: Transmit a frame (raw). Transmit preformed 15.4 frame (i.e.
-    ///        headers and security etc completed by userprocess).
+    ///   parameters to encrypt, form headers, and transmit the frame.
+    /// - `28`: Set long address.
+    /// - `29`: Get the long MAC address.
+    /// - `30`: Turn the radio on.
     fn command(
         &self,
         command_number: usize,
         arg1: usize,
-        _: usize,
+        arg2: usize,
         processid: ProcessId,
     ) -> CommandReturn {
         match command_number {
@@ -856,9 +790,10 @@ impl<'a, M: device::MacDevice<'a>> SyscallDriver for RadioDriver<'a, M> {
                                 if cfg.len() != 8 {
                                     return CommandReturn::failure(ErrorCode::SIZE);
                                 }
-                                let mut new_neighbor: DeviceDescriptor =
-                                    DeviceDescriptor::default();
-                                new_neighbor.short_addr = arg1 as u16;
+                                let mut new_neighbor = DeviceDescriptor {
+                                    short_addr: arg1 as u16,
+                                    ..Default::default()
+                                };
                                 cfg.copy_to_slice(&mut new_neighbor.long_addr);
                                 self.add_neighbor(new_neighbor)
                                     .map_or(CommandReturn::failure(ErrorCode::INVAL), |index| {
@@ -968,7 +903,7 @@ impl<'a, M: device::MacDevice<'a>> SyscallDriver for RadioDriver<'a, M> {
             26 => {
                 self.apps
                     .enter(processid, |app, kernel_data| {
-                        if !app.pending_tx.is_empty() {
+                        if app.pending_tx.is_some() {
                             // Cannot support more than one pending tx per process.
                             return Err(ErrorCode::BUSY);
                         }
@@ -1006,13 +941,7 @@ impl<'a, M: device::MacDevice<'a>> SyscallDriver for RadioDriver<'a, M> {
                         if next_tx.is_none() {
                             return Err(ErrorCode::INVAL);
                         }
-
-                        match next_tx {
-                            Some((dst_addr, sec)) => {
-                                app.pending_tx = PendingTX::Parse(dst_addr, sec)
-                            }
-                            None => app.pending_tx = PendingTX::Empty,
-                        }
+                        app.pending_tx = next_tx;
                         Ok(())
                     })
                     .map_or_else(
@@ -1023,21 +952,18 @@ impl<'a, M: device::MacDevice<'a>> SyscallDriver for RadioDriver<'a, M> {
                         },
                     )
             }
-            27 => {
-                self.apps
-                    .enter(processid, |app, _| {
-                        if !app.pending_tx.is_empty() {
-                            // Cannot support more than one pending tx per process.
-                            return Err(ErrorCode::BUSY);
-                        }
-                        app.pending_tx = PendingTX::Raw;
-                        Ok(())
-                    })
-                    .map_or_else(
-                        |err| CommandReturn::failure(err.into()),
-                        |_| self.do_next_tx_sync(processid).into(),
-                    )
+            28 => {
+                let addr_upper: u64 = arg2 as u64;
+                let addr_lower: u64 = arg1 as u64;
+                let addr = addr_upper << 32 | addr_lower;
+                self.mac.set_address_long(addr.to_be_bytes());
+                CommandReturn::success()
             }
+            29 => {
+                let addr = u64::from_be_bytes(self.mac.get_address_long());
+                CommandReturn::success_u64(addr)
+            }
+            30 => self.mac.start().into(),
             _ => CommandReturn::failure(ErrorCode::NOSUPPORT),
         }
     }
@@ -1052,35 +978,17 @@ impl<'a, M: device::MacDevice<'a>> device::TxClient for RadioDriver<'a, M> {
         self.kernel_tx.replace(spi_buf);
         self.current_app.take().map(|processid| {
             let _ = self.apps.enter(processid, |_app, upcalls| {
-                upcalls
-                    .schedule_upcall(
-                        upcall::FRAME_TRANSMITTED,
-                        (
-                            kernel::errorcode::into_statuscode(result),
-                            acked as usize,
-                            0,
-                        ),
-                    )
-                    .ok();
+                let _ = upcalls.schedule_upcall(
+                    upcall::FRAME_TRANSMITTED,
+                    (
+                        kernel::errorcode::into_statuscode(result),
+                        acked as usize,
+                        0,
+                    ),
+                );
             });
         });
         self.do_next_tx_async();
-    }
-}
-
-impl<'a, M: device::MacDevice<'a>> device::SecuredFrameNoDecryptRxClient for RadioDriver<'a, M> {
-    fn receive_secured_frame<'b>(
-        &self,
-        buf: &'b [u8],
-        header: Header<'b>,
-        lqi: u8,
-        data_offset: usize,
-        data_len: usize,
-    ) {
-        // The current 15.4 userspace receive accepts both secured and
-        // unsecured frames. As such, we can simply call the standard
-        // receive method of the RxClient trait.
-        self.receive(buf, header, lqi, data_offset, data_len)
     }
 }
 
@@ -1119,7 +1027,8 @@ impl<'a, M: device::MacDevice<'a>> device::RxClient for RadioDriver<'a, M> {
                         // invalid buffer (e.g. of length 1) may otherwise errantly pass the second
                         // conditional check (due to unsigned integer arithmetic).
                         if rbuf.len() <= RING_BUF_METADATA_SIZE
-                            || (rbuf.len() - RING_BUF_METADATA_SIZE) % USER_FRAME_MAX_SIZE != 0
+                            || !(rbuf.len() - RING_BUF_METADATA_SIZE)
+                                .is_multiple_of(USER_FRAME_MAX_SIZE)
                         {
                             // kernel::debug!("[15.4 Driver] Error - improperly formatted readwrite buffer provided");
                             return false;
@@ -1173,9 +1082,7 @@ impl<'a, M: device::MacDevice<'a>> device::RxClient for RadioDriver<'a, M> {
                 .unwrap_or(false);
             if read_present {
                 // Place lqi as argument to be included in upcall.
-                kernel_data
-                    .schedule_upcall(upcall::FRAME_RECEIVED, (lqi as usize, 0, 0))
-                    .ok();
+                let _ = kernel_data.schedule_upcall(upcall::FRAME_RECEIVED, (lqi as usize, 0, 0));
             }
         });
     }

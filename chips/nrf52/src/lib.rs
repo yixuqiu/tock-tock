@@ -3,8 +3,7 @@
 // Copyright Tock Contributors 2022.
 
 #![no_std]
-#![crate_name = "nrf52"]
-#![crate_type = "rlib"]
+#![recursion_limit = "512"]
 
 pub mod acomp;
 pub mod adc;
@@ -15,16 +14,17 @@ pub mod clock;
 pub mod crt1;
 pub mod ficr;
 pub mod i2c;
+pub mod ieee802154_radio;
 pub mod nvmc;
 pub mod power;
 pub mod ppi;
 pub mod pwm;
 pub mod spi;
 pub mod uart;
+pub mod uarte;
 pub mod uicr;
 pub mod usbd;
 
-pub use crate::crt1::init;
 pub use nrf5x::{
     aes, constants, gpio, peripheral_interrupts, pinmux, rtc, temperature, timer, trng,
 };

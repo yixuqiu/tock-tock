@@ -7,10 +7,10 @@
 use core::cell::Cell;
 use core::cmp;
 
+use kernel::ErrorCode;
 use kernel::collections::list::{List, ListLink, ListNode};
 use kernel::hil::time::{self, Alarm, Ticks, Time, Timer};
 use kernel::utilities::cells::{NumericCellExt, OptionalCell};
-use kernel::ErrorCode;
 
 use crate::virtualizers::virtual_alarm::VirtualMuxAlarm;
 
@@ -39,7 +39,7 @@ pub struct VirtualTimer<'a, A: Alarm<'a>> {
 }
 
 impl<'a, A: Alarm<'a>> ListNode<'a, VirtualTimer<'a, A>> for VirtualTimer<'a, A> {
-    fn next(&self) -> &'a ListLink<VirtualTimer<'a, A>> {
+    fn next(&self) -> &'a ListLink<'_, VirtualTimer<'a, A>> {
         &self.next
     }
 }
@@ -48,15 +48,14 @@ impl<'a, A: Alarm<'a>> VirtualTimer<'a, A> {
     /// After calling new, always call setup()
     pub fn new(mux_timer: &'a MuxTimer<'a, A>) -> VirtualTimer<'a, A> {
         let zero = A::Ticks::from(0);
-        let v = VirtualTimer {
+        VirtualTimer {
             mux: mux_timer,
             when: Cell::new(zero),
             interval: Cell::new(zero),
             mode: Cell::new(Mode::Disabled),
             next: ListLink::empty(),
             client: OptionalCell::empty(),
-        };
-        v
+        }
     }
 
     /// Call this method immediately after new() to link this to the mux, otherwise timers won't
@@ -197,7 +196,7 @@ impl<'a, A: Alarm<'a>> MuxTimer<'a, A> {
         MuxTimer {
             timers: List::new(),
             enabled: Cell::new(0),
-            alarm: alarm,
+            alarm,
         }
     }
 

@@ -8,15 +8,18 @@ contribute, and we appreciate all of them.
 * [Bug Reports](#bug-reports)
 * [Pull Requests](#pull-requests)
 * [Issue Triage](#issue-triage)
+* [AI Policy](#ai-policy)
+* [Notes](#notes)
 
 If you have questions, please make a post on the [mailing list][listserv] or
-join us on [Slack][slack].
+join us on [Matrix][matrix] or [Slack][slack].
 
 As a reminder, all contributors are expected to follow the Rust [Code of
 Conduct][coc].
 
+[matrix]: https://matrix.to/#/#tock:tockos.org
 [slack]: https://join.slack.com/t/tockos/shared_invite/enQtNDE5ODQyNDU4NTE1LWVjNTgzMTMwYzA1NDI1MjExZjljMjFmOTMxMGIwOGJlMjk0ZTI4YzY0NTYzNWM0ZmJmZGFjYmY5MTJiMDBlOTk
-[listserv]: https://groups.google.com/forum/#!forum/tock-dev
+[listserv]: https://lists.tockos.org
 [coc]: https://www.rust-lang.org/conduct.html
 
 ## What Goes Where?
@@ -85,7 +88,7 @@ out your copy locally.
 ```text
 $ git clone git@github.com:username/tock.git
 $ cd tock
-$ git remote add upstream git://github.com/tock/tock.git
+$ git remote add upstream https://github.com/tock/tock.git
 ```
 
 ### Step 2: Branch
@@ -138,7 +141,7 @@ Body of commit message is a few lines of text, explaining things
 in more detail, possibly giving some background about the issue
 being fixed, etc.
 
-If you quote a discussion or some code it should be intended:
+If you quote a discussion or some code it should be indented:
 
     Should we have an example of indentation? Yes I think so.
 
@@ -215,16 +218,13 @@ and make any required changes. PRs must pass the formatting checks before landin
 ### Step 8: Landing
 
 In order to land, a Pull Request needs to be reviewed and
-[approved](#getting-approvals-for-your-pull-request) by at least one person with
+approved by at least one person with
 commit access to the Tock repository and pass the continuous integration tests.
-After that, as long as there are no objections, the Pull Request can be merged.
-
-We use the bors-ng bot to merge PRs. In short, when someone replies `bors r+`,
-your PR has been scheduled for final tests and will be automatically merged. If
-a maintainer replies `bors delegate+`, then you have been granted the authority
-to merge your own PR (usually this will happen if there are some trivial
-changes required). For more on bors,
-[see the bors documentation](https://bors.tech/documentation/).
+[Depending on the significance of the
+PR](https://github.com/tock/tock/blob/master/doc/CodeReview.md#pull-requests),
+it may require review by multiple Core team members. Generally, trivial fixes
+should be easy to merge, and complex updates touching sensitive code may require
+consideration by several people.
 
 
 ## Issue Triage
@@ -239,6 +239,48 @@ leave a comment letting us know if it is or is not. The [least recently
 updated sort][lru] is good for finding issues like this.
 
 [lru]: https://github.com/tock/tock/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-asc
+
+## Licensing
+
+All contributions to Tock are expected to be dual-licensed under the
+[Apache 2.0](../LICENSE-APACHE) and [MIT](../LICENSE-MIT) licenses. Copyrights
+in Tock projects are retained by their contributors. Whenever possible, files
+should begin with a license header stating its license status. CI enforces
+this.
+
+    // Licensed under the Apache License, Version 2.0 or the MIT License.
+    // SPDX-License-Identifier: Apache-2.0 OR MIT
+    // Copyright Tock Contributors 2026.
+
+For full details, see the
+[Tock Reference Document on Licensing and Copyrights](../doc/reference/trd4-legal.md).
+
+## AI Policy
+
+The Tock project permits developers to use AI coding tools, however, developers
+must review any AI-generated code themselves for correctness and compatibility
+with Tock's code expectations. All AI use must be disclosed in the issue / pull request
+description, including which AI tool was used, what portion of the patch was
+created by AI, and how the AI-generated code was reviewed.
+
+For commits where AI assisted authorship, the commit message should also
+include appropriate attribution, e.g. `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`
+
+Neither the pull request description nor any subsequent PR comments are allowed
+to be written using AI (exception: tools used exclusively for accessibility or
+translation are acceptable). Large Language Models often make unverified claims
+and produce verbose output. Writing PR comments by hand reduces cognitive burden
+for reviewers, incentivizes authors to reflect on generated changes, and keeps
+communication succinct. If including AI output genuinely serves the purposes of
+the PR, include it in a [`<details>`][html-details] drawer. PRs should be
+self-contained and have sufficient documentation without any additional
+generative-AI context.
+
+Contributors remain responsible for ensuring that their contributions are
+compatible with the applicable licenses, do not infringe on any copyright
+claims, and maintain proper attribution.
+
+[html-details]: https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/details
 
 ## Notes
 

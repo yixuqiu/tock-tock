@@ -4,10 +4,10 @@
 
 // Virtualizer for the RNG
 use core::cell::Cell;
+use kernel::ErrorCode;
 use kernel::collections::list::{List, ListLink, ListNode};
 use kernel::hil::rng::{Client, Continue, Rng};
 use kernel::utilities::cells::OptionalCell;
-use kernel::ErrorCode;
 
 #[derive(Copy, Clone, PartialEq)]
 enum Op {
@@ -25,19 +25,21 @@ pub struct MuxRngMaster<'a> {
 impl<'a> MuxRngMaster<'a> {
     pub const fn new(rng: &'a dyn Rng<'a>) -> MuxRngMaster<'a> {
         MuxRngMaster {
-            rng: rng,
+            rng,
             devices: List::new(),
             inflight: OptionalCell::empty(),
         }
     }
 
+    fn get_next_node(&self) -> Option<&'a VirtualRngMasterDevice<'a>> {
+        self.devices
+            .iter()
+            .find(|node| node.operation.get() != Op::Idle)
+    }
+
     fn do_next_op(&self) -> Result<(), ErrorCode> {
         if self.inflight.is_none() {
-            let mnode = self
-                .devices
-                .iter()
-                .find(|node| node.operation.get() != Op::Idle);
-
+            let mnode = self.get_next_node();
             let return_code = mnode.map(|node| {
                 let op = node.operation.get();
                 let operation_code = match op {
@@ -70,18 +72,25 @@ impl<'a> MuxRngMaster<'a> {
     }
 }
 
-impl<'a> Client for MuxRngMaster<'a> {
+impl Client for MuxRngMaster<'_> {
     fn randomness_available(
         &self,
         _randomness: &mut dyn Iterator<Item = u32>,
         _error: Result<(), ErrorCode>,
     ) -> Continue {
         // Try find if randomness is available, or return done
-        self.inflight.take().map_or(Continue::Done, |device| {
+        let inflight = self.inflight.take();
+        inflight.map_or(Continue::Done, |device| {
             let cont_code = device.randomness_available(_randomness, _error);
-
-            if cont_code == Continue::Done {
-                let _ = self.do_next_op();
+            if let Some(mnode) = self.get_next_node() {
+                mnode.operation.set(Op::Idle);
+                self.inflight.set(mnode);
+                if cont_code == Continue::More {
+                    device.operation.set(Op::Get);
+                }
+                return Continue::More;
+            } else if cont_code == Continue::More {
+                self.inflight.set(device);
             }
 
             cont_code
@@ -102,7 +111,7 @@ pub struct VirtualRngMasterDevice<'a> {
 
 // Implement ListNode trait for virtual rng device
 impl<'a> ListNode<'a, VirtualRngMasterDevice<'a>> for VirtualRngMasterDevice<'a> {
-    fn next(&self) -> &'a ListLink<VirtualRngMasterDevice<'a>> {
+    fn next(&self) -> &'a ListLink<'_, VirtualRngMasterDevice<'a>> {
         &self.next
     }
 }
@@ -110,7 +119,7 @@ impl<'a> ListNode<'a, VirtualRngMasterDevice<'a>> for VirtualRngMasterDevice<'a>
 impl<'a> VirtualRngMasterDevice<'a> {
     pub const fn new(mux: &'a MuxRngMaster<'a>) -> VirtualRngMasterDevice<'a> {
         VirtualRngMasterDevice {
-            mux: mux,
+            mux,
             next: ListLink::empty(),
             client: OptionalCell::empty(),
             operation: Cell::new(Op::Idle),
@@ -143,7 +152,14 @@ impl<'a> Rng<'a> for VirtualRngMasterDevice<'a> {
             |current_node| {
                 // Find if current device is the one in flight or not
                 if current_node == self {
-                    self.mux.rng.cancel()
+                    self.mux.inflight.take();
+                    if let Some(node) = self.mux.get_next_node() {
+                        self.mux.inflight.set(node);
+                        node.operation.set(Op::Idle);
+                        Ok(())
+                    } else {
+                        self.mux.rng.cancel()
+                    }
                 } else {
                     Ok(())
                 }
@@ -162,7 +178,7 @@ impl<'a> Rng<'a> for VirtualRngMasterDevice<'a> {
     }
 }
 
-impl<'a> Client for VirtualRngMasterDevice<'a> {
+impl Client for VirtualRngMasterDevice<'_> {
     fn randomness_available(
         &self,
         randomness: &mut dyn Iterator<Item = u32>,

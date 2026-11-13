@@ -4,12 +4,13 @@
 
 //! Platform Level Interrupt Control peripheral driver.
 
+use core::cell::Cell;
+
 use crate::registers::top_earlgrey::RV_PLIC_BASE_ADDR;
-use kernel::utilities::cells::VolatileCell;
-use kernel::utilities::registers::interfaces::{Readable, Writeable};
-use kernel::utilities::registers::LocalRegisterCopy;
-use kernel::utilities::registers::{register_bitfields, register_structs, ReadOnly, ReadWrite};
 use kernel::utilities::StaticRef;
+use kernel::utilities::registers::LocalRegisterCopy;
+use kernel::utilities::registers::interfaces::{Readable, Writeable};
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields, register_structs};
 
 pub const PLIC_BASE: StaticRef<PlicRegisters> =
     unsafe { StaticRef::new(RV_PLIC_BASE_ADDR as *const PlicRegisters) };
@@ -51,7 +52,7 @@ register_bitfields![u32,
 
 pub struct Plic {
     registers: StaticRef<PlicRegisters>,
-    saved: [VolatileCell<LocalRegisterCopy<u32>>; PLIC_REGS],
+    saved: [Cell<LocalRegisterCopy<u32>>; PLIC_REGS],
 }
 
 impl Plic {
@@ -59,12 +60,12 @@ impl Plic {
         Plic {
             registers: base,
             saved: [
-                VolatileCell::new(LocalRegisterCopy::new(0)),
-                VolatileCell::new(LocalRegisterCopy::new(0)),
-                VolatileCell::new(LocalRegisterCopy::new(0)),
-                VolatileCell::new(LocalRegisterCopy::new(0)),
-                VolatileCell::new(LocalRegisterCopy::new(0)),
-                VolatileCell::new(LocalRegisterCopy::new(0)),
+                Cell::new(LocalRegisterCopy::new(0)),
+                Cell::new(LocalRegisterCopy::new(0)),
+                Cell::new(LocalRegisterCopy::new(0)),
+                Cell::new(LocalRegisterCopy::new(0)),
+                Cell::new(LocalRegisterCopy::new(0)),
+                Cell::new(LocalRegisterCopy::new(0)),
             ],
         }
     }
@@ -93,8 +94,8 @@ impl Plic {
     /// Disable specific interrupt.
     pub fn disable(&self, index: u32) {
         if index >= PLIC_IRQ_NUM as u32 {
-            panic!("Invalid IRQ: {}", index);
-        };
+            panic!("Invalid IRQ: {}", index)
+        }
         let offset = (index / 32) as usize;
         let mask = !(1 << (index % 32));
 
@@ -113,11 +114,7 @@ impl Plic {
     /// to grab the highest priority pending interrupt.
     pub fn next_pending(&self) -> Option<u32> {
         let claim = self.registers.claim.get();
-        if claim == 0 {
-            None
-        } else {
-            Some(claim)
-        }
+        if claim == 0 { None } else { Some(claim) }
     }
 
     /// Save the current interrupt to be handled later
@@ -127,8 +124,8 @@ impl Plic {
     /// Saved interrupts are cleared when `'complete()` is called.
     pub unsafe fn save_interrupt(&self, index: u32) {
         if index >= PLIC_IRQ_NUM as u32 {
-            panic!("Invalid IRQ: {}", index);
-        };
+            panic!("Invalid IRQ: {}", index)
+        }
         let offset = (index / 32) as usize;
         let mask = 1 << (index % 32);
 
@@ -158,8 +155,8 @@ impl Plic {
     pub unsafe fn complete(&self, index: u32) {
         self.registers.claim.set(index);
         if index >= PLIC_IRQ_NUM as u32 {
-            panic!("Invalid IRQ: {}", index);
-        };
+            panic!("Invalid IRQ: {}", index)
+        }
         let offset = (index / 32) as usize;
         let mask = !(1 << (index % 32));
 

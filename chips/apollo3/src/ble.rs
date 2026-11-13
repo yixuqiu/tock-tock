@@ -5,17 +5,18 @@
 //! BLE driver.
 
 use core::cell::Cell;
+use core::ptr::addr_of;
 use core::ptr::addr_of_mut;
+use kernel::ErrorCode;
 use kernel::hil::ble_advertising;
 use kernel::hil::ble_advertising::RadioChannel;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, register_structs, ReadOnly, ReadWrite, WriteOnly,
+    ReadOnly, ReadWrite, WriteOnly, register_bitfields, register_structs,
 };
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
 
 const BLE_BASE: StaticRef<BleRegisters> =
     unsafe { StaticRef::new(0x5000_C000 as *const BleRegisters) };
@@ -272,7 +273,7 @@ pub struct Ble<'a> {
     read_index: Cell<usize>,
 }
 
-impl<'a> Ble<'a> {
+impl Ble<'_> {
     pub fn new() -> Self {
         Self {
             registers: BLE_BASE,
@@ -336,9 +337,7 @@ impl<'a> Ble<'a> {
         //self.registers.fifothr.write(FIFOTHR::FIFORTHR::CLEAR + FIFOTHR::FIFOWTHR::CLEAR);
 
         // Setup the DMA
-        unsafe {
-            self.registers.dmatargaddr.set(PAYLOAD.as_ptr() as u32);
-        }
+        self.registers.dmatargaddr.set(addr_of!(PAYLOAD) as u32);
         self.registers.dmatocount.set(self.write_len.get() as u32);
         self.registers.dmatrigen.write(DMATRIGEN::DTHREN::SET);
         self.registers

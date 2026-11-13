@@ -2,16 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 // Copyright Tock Contributors 2022.
 
-//! Components for Console and ConsoleOrdered. These are two
-//! alternative implementations of the serial console system call
-//! interface. Console allows prints of arbitrary length but does not
-//! have ordering or atomicity guarantees. ConsoleOrdered, in
-//! contrast, has limits on the maximum lengths of prints but provides
-//! a temporal ordering and ensures a print is atomic at least up to
-//! particular length (typically 200 bytes). Console is useful when
-//! userspace is printing large messages. ConsoleOrdered is useful
-//! when you are debugging and there are inter-related messages from
-//! the kernel and userspace, whose ordering is important to maintain.
+//! Components for Console and ConsoleOrdered.
+//!
+//! These are two alternative implementations of the serial console
+//! system call interface. Console allows prints of arbitrary length
+//! but does not have ordering or atomicity
+//! guarantees. ConsoleOrdered, in contrast, has limits on the maximum
+//! lengths of prints but provides a temporal ordering and ensures a
+//! print is atomic at least up to particular length (typically 200
+//! bytes). Console is useful when userspace is printing large
+//! messages. ConsoleOrdered is useful when you are debugging and
+//! there are inter-related messages from the kernel and userspace,
+//! whose ordering is important to maintain.
 //!
 //!
 //! This provides three Components, `ConsoleComponent` and
@@ -39,9 +41,8 @@ use capsules_core::console_ordered::ConsoleOrdered;
 use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use capsules_core::virtualizers::virtual_uart::{MuxUart, UartDevice};
 use core::mem::MaybeUninit;
-use kernel::capabilities;
+use kernel::capabilities::MemoryAllocationCapability;
 use kernel::component::Component;
-use kernel::create_capability;
 use kernel::hil;
 use kernel::hil::time::{self, Alarm};
 use kernel::hil::uart;
@@ -54,15 +55,15 @@ macro_rules! uart_mux_component_static {
     ($rx_buffer_len: expr) => {{
         use capsules_core::virtualizers::virtual_uart::MuxUart;
         use kernel::static_buf;
-        let UART_MUX = static_buf!(MuxUart<'static>);
-        let RX_BUF = static_buf!([u8; $rx_buffer_len]);
-        (UART_MUX, RX_BUF)
+        let uart_mux = static_buf!(MuxUart<'static>);
+        let rx_buf = static_buf!([u8; $rx_buffer_len]);
+        (uart_mux, rx_buf)
     }};
     () => {
-        $crate::uart_mux_component_static!(capsules_core::virtualizers::virtual_uart::RX_BUF_LEN);
+        $crate::uart_mux_component_static!(capsules_core::virtualizers::virtual_uart::RX_BUF_LEN)
     };
     ($rx_buffer_len: literal) => {
-        $crate::uart_mux_component_static!($rx_buffer_len);
+        $crate::uart_mux_component_static!($rx_buffer_len)
     };
 }
 
@@ -115,35 +116,46 @@ macro_rules! console_component_static {
         (write_buf, read_buf, console_uart, console)
     }};
     () => {
-        $crate::console_component_static!(DEFAULT_BUF_SIZE, DEFAULT_BUF_SIZE);
+        $crate::console_component_static!(DEFAULT_BUF_SIZE, DEFAULT_BUF_SIZE)
     };
     ($rx_buffer_len: literal, $tx_buffer_len: literal) => {
-        $crate::console_component_static!($rx_buffer_len, $tx_buffer_len);
+        $crate::console_component_static!($rx_buffer_len, $tx_buffer_len)
     };
 }
 
-pub struct ConsoleComponent<const RX_BUF_LEN: usize, const TX_BUF_LEN: usize> {
+pub type ConsoleComponentType = console::Console<'static>;
+
+pub struct ConsoleComponent<
+    const RX_BUF_LEN: usize,
+    const TX_BUF_LEN: usize,
+    CAP: MemoryAllocationCapability + 'static,
+> {
     board_kernel: &'static kernel::Kernel,
     driver_num: usize,
     uart_mux: &'static MuxUart<'static>,
+    mem_cap: CAP,
 }
 
-impl<const RX_BUF_LEN: usize, const TX_BUF_LEN: usize> ConsoleComponent<RX_BUF_LEN, TX_BUF_LEN> {
+impl<const RX_BUF_LEN: usize, const TX_BUF_LEN: usize, CAP: MemoryAllocationCapability + 'static>
+    ConsoleComponent<RX_BUF_LEN, TX_BUF_LEN, CAP>
+{
     pub fn new(
         board_kernel: &'static kernel::Kernel,
         driver_num: usize,
         uart_mux: &'static MuxUart,
-    ) -> ConsoleComponent<RX_BUF_LEN, TX_BUF_LEN> {
+        mem_cap: CAP,
+    ) -> ConsoleComponent<RX_BUF_LEN, TX_BUF_LEN, CAP> {
         ConsoleComponent {
-            board_kernel: board_kernel,
-            driver_num: driver_num,
-            uart_mux: uart_mux,
+            board_kernel,
+            driver_num,
+            uart_mux,
+            mem_cap,
         }
     }
 }
 
-impl<const RX_BUF_LEN: usize, const TX_BUF_LEN: usize> Component
-    for ConsoleComponent<RX_BUF_LEN, TX_BUF_LEN>
+impl<const RX_BUF_LEN: usize, const TX_BUF_LEN: usize, CAP: MemoryAllocationCapability + 'static>
+    Component for ConsoleComponent<RX_BUF_LEN, TX_BUF_LEN, CAP>
 {
     type StaticInput = (
         &'static mut MaybeUninit<[u8; TX_BUF_LEN]>,
@@ -154,8 +166,6 @@ impl<const RX_BUF_LEN: usize, const TX_BUF_LEN: usize> Component
     type Output = &'static console::Console<'static>;
 
     fn finalize(self, s: Self::StaticInput) -> Self::Output {
-        let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
-
         let write_buffer = s.0.write([0; TX_BUF_LEN]);
 
         let read_buffer = s.1.write([0; RX_BUF_LEN]);
@@ -167,7 +177,8 @@ impl<const RX_BUF_LEN: usize, const TX_BUF_LEN: usize> Component
             console_uart,
             write_buffer,
             read_buffer,
-            self.board_kernel.create_grant(self.driver_num, &grant_cap),
+            self.board_kernel
+                .create_grant(self.driver_num, &self.mem_cap),
         ));
         hil::uart::Transmit::set_transmit_client(console_uart, console);
         hil::uart::Receive::set_receive_client(console_uart, console);
@@ -175,6 +186,114 @@ impl<const RX_BUF_LEN: usize, const TX_BUF_LEN: usize> Component
         console
     }
 }
+
+//////////////////////////////////////////////////////////////////////
+// Console without UART mux
+//////////////////////////////////////////////////////////////////////
+
+#[macro_export]
+macro_rules! console_no_mux_component_static {
+    // Common logic for both branches
+    ($rx_buffer_len: expr, $tx_buffer_len: expr) => {{
+        use capsules_core::console::{Console, DEFAULT_BUF_SIZE};
+        use kernel::static_buf;
+        let read_buf = static_buf!([u8; $rx_buffer_len]);
+        let write_buf = static_buf!([u8; $tx_buffer_len]);
+        let console = static_buf!(Console<'static>);
+        (write_buf, read_buf, console)
+    }};
+    () => {
+        $crate::console_no_mux_component_static!(DEFAULT_BUF_SIZE, DEFAULT_BUF_SIZE)
+    };
+    ($rx_buffer_len: literal, $tx_buffer_len: literal) => {
+        $crate::console_no_mux_component_static!($rx_buffer_len, $tx_buffer_len)
+    };
+}
+
+pub type ConsoleNoMuxComponentType = console::Console<'static>;
+
+/// Builds a `Console` directly on top of a UART, with no `MuxUart` in between.
+pub struct ConsoleNoMuxComponent<
+    U: 'static + uart::Uart<'static>,
+    const RX_BUF_LEN: usize,
+    const TX_BUF_LEN: usize,
+    CAP: MemoryAllocationCapability + 'static,
+> {
+    board_kernel: &'static kernel::Kernel,
+    driver_num: usize,
+    uart: &'static U,
+    baud_rate: u32,
+    mem_cap: CAP,
+}
+
+impl<
+    U: 'static + uart::Uart<'static>,
+    const RX_BUF_LEN: usize,
+    const TX_BUF_LEN: usize,
+    CAP: MemoryAllocationCapability + 'static,
+> ConsoleNoMuxComponent<U, RX_BUF_LEN, TX_BUF_LEN, CAP>
+{
+    pub fn new(
+        board_kernel: &'static kernel::Kernel,
+        driver_num: usize,
+        uart: &'static U,
+        baud_rate: u32,
+        mem_cap: CAP,
+    ) -> Self {
+        Self {
+            board_kernel,
+            driver_num,
+            uart,
+            baud_rate,
+            mem_cap,
+        }
+    }
+}
+
+impl<
+    U: 'static + uart::Uart<'static>,
+    const RX_BUF_LEN: usize,
+    const TX_BUF_LEN: usize,
+    CAP: MemoryAllocationCapability + 'static,
+> Component for ConsoleNoMuxComponent<U, RX_BUF_LEN, TX_BUF_LEN, CAP>
+{
+    type StaticInput = (
+        &'static mut MaybeUninit<[u8; TX_BUF_LEN]>,
+        &'static mut MaybeUninit<[u8; RX_BUF_LEN]>,
+        &'static mut MaybeUninit<console::Console<'static>>,
+    );
+    type Output = &'static console::Console<'static>;
+
+    fn finalize(self, s: Self::StaticInput) -> Self::Output {
+        let write_buffer = s.0.write([0; TX_BUF_LEN]);
+        let read_buffer = s.1.write([0; RX_BUF_LEN]);
+
+        let _ = self.uart.configure(uart::Parameters {
+            baud_rate: self.baud_rate,
+            width: uart::Width::Eight,
+            stop_bits: uart::StopBits::One,
+            parity: uart::Parity::None,
+            hw_flow_control: false,
+        });
+
+        let console = s.2.write(console::Console::new(
+            self.uart,
+            write_buffer,
+            read_buffer,
+            self.board_kernel
+                .create_grant(self.driver_num, &self.mem_cap),
+        ));
+        hil::uart::Transmit::set_transmit_client(self.uart, console);
+        hil::uart::Receive::set_receive_client(self.uart, console);
+
+        console
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+// Ordered Console
+//////////////////////////////////////////////////////////////////////
+
 #[macro_export]
 macro_rules! console_ordered_component_static {
     ($A:ty $(,)?) => {{
@@ -184,10 +303,13 @@ macro_rules! console_ordered_component_static {
             kernel::static_buf!(capsules_core::virtualizers::virtual_uart::UartDevice);
         let console = kernel::static_buf!(ConsoleOrdered<'static, VirtualMuxAlarm<'static, $A>>);
         (mux_alarm, read_buf, console_uart, console)
-    };};
+    }};
 }
 
-pub struct ConsoleOrderedComponent<A: 'static + time::Alarm<'static>> {
+pub struct ConsoleOrderedComponent<
+    A: 'static + time::Alarm<'static>,
+    CAP: MemoryAllocationCapability + 'static,
+> {
     board_kernel: &'static kernel::Kernel,
     driver_num: usize,
     uart_mux: &'static MuxUart<'static>,
@@ -195,9 +317,12 @@ pub struct ConsoleOrderedComponent<A: 'static + time::Alarm<'static>> {
     atomic_size: usize,
     retry_timer: u32,
     write_timer: u32,
+    mem_cap: CAP,
 }
 
-impl<A: 'static + time::Alarm<'static>> ConsoleOrderedComponent<A> {
+impl<A: 'static + time::Alarm<'static>, CAP: MemoryAllocationCapability + 'static>
+    ConsoleOrderedComponent<A, CAP>
+{
     pub fn new(
         board_kernel: &'static kernel::Kernel,
         driver_num: usize,
@@ -206,20 +331,24 @@ impl<A: 'static + time::Alarm<'static>> ConsoleOrderedComponent<A> {
         atomic_size: usize,
         retry_timer: u32,
         write_timer: u32,
-    ) -> ConsoleOrderedComponent<A> {
+        mem_cap: CAP,
+    ) -> ConsoleOrderedComponent<A, CAP> {
         ConsoleOrderedComponent {
-            board_kernel: board_kernel,
-            driver_num: driver_num,
-            uart_mux: uart_mux,
-            alarm_mux: alarm_mux,
-            atomic_size: atomic_size,
-            retry_timer: retry_timer,
-            write_timer: write_timer,
+            board_kernel,
+            driver_num,
+            uart_mux,
+            alarm_mux,
+            atomic_size,
+            retry_timer,
+            write_timer,
+            mem_cap,
         }
     }
 }
 
-impl<A: 'static + time::Alarm<'static>> Component for ConsoleOrderedComponent<A> {
+impl<A: 'static + time::Alarm<'static>, CAP: MemoryAllocationCapability + 'static> Component
+    for ConsoleOrderedComponent<A, CAP>
+{
     type StaticInput = (
         &'static mut MaybeUninit<VirtualMuxAlarm<'static, A>>,
         &'static mut MaybeUninit<[u8; DEFAULT_BUF_SIZE]>,
@@ -229,8 +358,6 @@ impl<A: 'static + time::Alarm<'static>> Component for ConsoleOrderedComponent<A>
     type Output = &'static ConsoleOrdered<'static, VirtualMuxAlarm<'static, A>>;
 
     fn finalize(self, static_buffer: Self::StaticInput) -> Self::Output {
-        let grant_cap = create_capability!(capabilities::MemoryAllocationCapability);
-
         let virtual_alarm1 = static_buffer.0.write(VirtualMuxAlarm::new(self.alarm_mux));
         virtual_alarm1.setup();
 
@@ -243,7 +370,8 @@ impl<A: 'static + time::Alarm<'static>> Component for ConsoleOrderedComponent<A>
             console_uart,
             virtual_alarm1,
             read_buffer,
-            self.board_kernel.create_grant(self.driver_num, &grant_cap),
+            self.board_kernel
+                .create_grant(self.driver_num, &self.mem_cap),
             self.atomic_size,
             self.retry_timer,
             self.write_timer,

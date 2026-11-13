@@ -7,24 +7,24 @@
 //! It is based on RP2040SoC SoC (Cortex M0+).
 
 #![no_std]
-// Disable this attribute when documenting, as a workaround for
-// https://github.com/rust-lang/rust/issues/62184.
-#![cfg_attr(not(doc), no_main)]
+#![no_main]
 #![deny(missing_docs)]
 
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::addr_of_mut;
 
 use capsules_core::virtualizers::virtual_alarm::VirtualMuxAlarm;
 use components::gpio::GpioComponent;
 use components::led::LedsComponent;
 use enum_primitive::cast::FromPrimitive;
 use kernel::component::Component;
-use kernel::debug;
+use kernel::debug::PanicResources;
 use kernel::hil::led::LedHigh;
 use kernel::hil::usb::Client;
+use kernel::platform::chip::Chip;
 use kernel::platform::{KernelResources, SyscallDriverLookup};
-use kernel::scheduler::round_robin::RoundRobinSched;
-use kernel::{capabilities, create_capability, static_init, Kernel};
+use kernel::utilities::single_thread_value::SingleThreadValue;
+use kernel::{capabilities, create_capability, static_init};
+use kernel::{debug, hil};
 
 use rp2040::adc::{Adc, Channel};
 use rp2040::chip::{Rp2040, Rp2040DefaultPeripherals};
@@ -34,6 +34,8 @@ use rp2040::clocks::{
     SystemAuxiliaryClockSource, SystemClockSource, UsbAuxiliaryClockSource,
 };
 use rp2040::gpio::{GpioFunction, RPGpio, RPGpioPin};
+use rp2040::pio::Pio;
+use rp2040::pio_pwm::PioPwm;
 use rp2040::resets::Peripheral;
 use rp2040::spi::Spi;
 use rp2040::sysinfo;
@@ -43,33 +45,40 @@ mod io;
 
 mod flash_bootloader;
 
-/// Allocate memory for the stack
-#[no_mangle]
-#[link_section = ".stack_buffer"]
-pub static mut STACK_MEMORY: [u8; 0x1500] = [0; 0x1500];
+kernel::stack_size! {0x1500}
 
 // Manually setting the boot header section that contains the FCB header
+//
+// This section attribute is only applied when targeting bare-metal
+// (`target_os = "none"`). Host builds (e.g. tests, clippy, doc) use object
+// formats (Mach-O, PE, ...) that reject a bare section name like this,
+// yielding errors such as: `mach-o section specifier requires a segment and
+// section separated by a comma`.
+#[cfg_attr(target_os = "none", link_section = ".flash_bootloader")]
 #[used]
-#[link_section = ".flash_bootloader"]
 static FLASH_BOOTLOADER: [u8; 256] = flash_bootloader::FLASH_BOOTLOADER;
 
 // State for loading and holding applications.
 // How should the kernel respond when a process faults.
-const FAULT_RESPONSE: kernel::process::PanicFaultPolicy = kernel::process::PanicFaultPolicy {};
+const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
+    capsules_system::process_policies::PanicFaultPolicy {};
 
 // Number of concurrent processes this platform supports.
 const NUM_PROCS: usize = 4;
 
-static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
-    [None; NUM_PROCS];
+type ChipHw = Rp2040<'static, Rp2040DefaultPeripherals<'static>>;
+type ProcessPrinterInUse = capsules_system::process_printer::ProcessPrinterText;
 
-static mut CHIP: Option<&'static Rp2040<Rp2040DefaultPeripherals>> = None;
-static mut PROCESS_PRINTER: Option<&'static kernel::process::ProcessPrinterText> = None;
+/// Resources for when a board panics used by io.rs.
+static PANIC_RESOURCES: SingleThreadValue<PanicResources<ChipHw, ProcessPrinterInUse>> =
+    SingleThreadValue::new();
 
 type TemperatureRp2040Sensor = components::temperature_rp2040::TemperatureRp2040ComponentType<
     capsules_core::virtualizers::virtual_adc::AdcDevice<'static, rp2040::adc::Adc<'static>>,
 >;
 type TemperatureDriver = components::temperature::TemperatureComponentType<TemperatureRp2040Sensor>;
+
+type SchedulerInUse = components::sched::round_robin::RoundRobinComponentType;
 
 /// Supported drivers by the platform
 pub struct PicoExplorerBase {
@@ -98,9 +107,9 @@ pub struct PicoExplorerBase {
         >,
     >,
     button: &'static capsules_core::button::Button<'static, RPGpioPin<'static>>,
-    screen: &'static capsules_extra::screen::Screen<'static>,
+    screen: &'static capsules_extra::screen::screen::Screen<'static>,
 
-    scheduler: &'static RoundRobinSched<'static>,
+    scheduler: &'static SchedulerInUse,
     systick: cortexm0p::systick::SysTick,
 }
 
@@ -119,7 +128,7 @@ impl SyscallDriverLookup for PicoExplorerBase {
             capsules_extra::temperature::DRIVER_NUM => f(Some(self.temperature)),
             capsules_extra::buzzer_driver::DRIVER_NUM => f(Some(self.buzzer_driver)),
             capsules_core::button::DRIVER_NUM => f(Some(self.button)),
-            capsules_extra::screen::DRIVER_NUM => f(Some(self.screen)),
+            capsules_extra::screen::screen::DRIVER_NUM => f(Some(self.screen)),
             _ => f(None),
         }
     }
@@ -129,7 +138,7 @@ impl KernelResources<Rp2040<'static, Rp2040DefaultPeripherals<'static>>> for Pic
     type SyscallDriverLookup = Self;
     type SyscallFilter = ();
     type ProcessFault = ();
-    type Scheduler = RoundRobinSched<'static>;
+    type Scheduler = SchedulerInUse;
     type SchedulerTimer = cortexm0p::systick::SysTick;
     type WatchDog = ();
     type ContextSwitchCallback = ();
@@ -157,57 +166,52 @@ impl KernelResources<Rp2040<'static, Rp2040DefaultPeripherals<'static>>> for Pic
     }
 }
 
-#[allow(dead_code)]
-extern "C" {
-    /// Entry point used for debugger
-    ///
-    /// When loaded using gdb, the Raspberry Pi Pico is not reset
-    /// by default. Without this function, gdb sets the PC to the
-    /// beginning of the flash. This is not correct, as the RP2040
-    /// has a more complex boot process.
-    ///
-    /// This function is set to be the entry point for gdb and is used
-    /// to send the RP2040 back in the bootloader so that all the boot
-    /// sequence is performed.
-    fn jump_to_bootloader();
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-core::arch::global_asm!(
-    "
-    .section .jump_to_bootloader, \"ax\"
-    .global jump_to_bootloader
-    .thumb_func
-  jump_to_bootloader:
+/// Entry point used for debugger.
+///
+/// When loaded using gdb, the Raspberry Pi Pico is not reset
+/// by default. Without this function, gdb sets the PC to the
+/// beginning of the flash. This is not correct, as the RP2040
+/// has a more complex boot process.
+///
+/// This function is set to be the entry point for gdb and is used
+/// to send the RP2040 back in the bootloader so that all the boot
+/// sequence is performed.
+#[no_mangle]
+#[unsafe(naked)]
+pub unsafe extern "C" fn jump_to_bootloader() {
+    use core::arch::naked_asm;
+    naked_asm!(
+        "
     movs r0, #0
     ldr r1, =(0xe0000000 + 0x0000ed08)
     str r0, [r1]
     ldmia r0!, {{r1, r2}}
     msr msp, r1
     bx r2
-    "
-);
+        "
+    );
+}
 
-fn init_clocks(peripherals: &Rp2040DefaultPeripherals) {
+fn init_clocks(
+    peripherals: &Rp2040DefaultPeripherals,
+    clocks: &'static rp2040::clocks::Clocks,
+    resets: &'static rp2040::resets::Resets,
+) {
     // Start tick in watchdog
     peripherals.watchdog.start_tick(12);
 
     // Disable the Resus clock
-    peripherals.clocks.disable_resus();
+    clocks.disable_resus();
 
     // Setup the external Oscillator
     peripherals.xosc.init();
 
     // disable ref and sys clock aux sources
-    peripherals.clocks.disable_sys_aux();
-    peripherals.clocks.disable_ref_aux();
+    clocks.disable_sys_aux();
+    clocks.disable_ref_aux();
 
-    peripherals
-        .resets
-        .reset(&[Peripheral::PllSys, Peripheral::PllUsb]);
-    peripherals
-        .resets
-        .unreset(&[Peripheral::PllSys, Peripheral::PllUsb], true);
+    resets.reset(&[Peripheral::PllSys, Peripheral::PllUsb]);
+    resets.unreset(&[Peripheral::PllSys, Peripheral::PllUsb], true);
 
     // Configure PLLs (from Pico SDK)
     //                   REF     FBDIV VCO            POSTDIV
@@ -216,45 +220,33 @@ fn init_clocks(peripherals: &Rp2040DefaultPeripherals) {
 
     // It seems that the external osciallator is clocked at 12 MHz
 
-    peripherals
-        .clocks
-        .pll_init(PllClock::Sys, 12, 1, 1500 * 1000000, 6, 2);
-    peripherals
-        .clocks
-        .pll_init(PllClock::Usb, 12, 1, 480 * 1000000, 5, 2);
+    clocks.pll_init(PllClock::Sys, 12, 1, 1500 * 1000000, 6, 2);
+    clocks.pll_init(PllClock::Usb, 12, 1, 480 * 1000000, 5, 2);
 
     // pico-sdk: // CLK_REF = XOSC (12MHz) / 1 = 12MHz
-    peripherals.clocks.configure_reference(
+    clocks.configure_reference(
         ReferenceClockSource::Xosc,
         ReferenceAuxiliaryClockSource::PllUsb,
         12000000,
         12000000,
     );
     // pico-sdk: CLK SYS = PLL SYS (125MHz) / 1 = 125MHz
-    peripherals.clocks.configure_system(
+    clocks.configure_system(
         SystemClockSource::Auxiliary,
         SystemAuxiliaryClockSource::PllSys,
         125000000,
         125000000,
     );
     // pico-sdk: CLK USB = PLL USB (48MHz) / 1 = 48MHz
-    peripherals
-        .clocks
-        .configure_usb(UsbAuxiliaryClockSource::PllSys, 48000000, 48000000);
+    clocks.configure_usb(UsbAuxiliaryClockSource::PllSys, 48000000, 48000000);
     // pico-sdk: CLK ADC = PLL USB (48MHZ) / 1 = 48MHz
-    peripherals
-        .clocks
-        .configure_adc(AdcAuxiliaryClockSource::PllUsb, 48000000, 48000000);
+    clocks.configure_adc(AdcAuxiliaryClockSource::PllUsb, 48000000, 48000000);
     // pico-sdk: CLK RTC = PLL USB (48MHz) / 1024 = 46875Hz
-    peripherals
-        .clocks
-        .configure_rtc(RtcAuxiliaryClockSource::PllSys, 48000000, 46875);
+    clocks.configure_rtc(RtcAuxiliaryClockSource::PllSys, 48000000, 46875);
     // pico-sdk:
     // CLK PERI = clk_sys. Used as reference clock for Peripherals. No dividers so just select and enable
     // Normally choose clk_sys or clk_usb
-    peripherals
-        .clocks
-        .configure_peripheral(PeripheralAuxiliaryClockSource::System, 125000000);
+    clocks.configure_peripheral(PeripheralAuxiliaryClockSource::System, 125000000);
 }
 
 /// This is in a separate, inline(never) function so that its stack frame is
@@ -267,13 +259,29 @@ pub unsafe fn start() -> (
     &'static rp2040::chip::Rp2040<'static, Rp2040DefaultPeripherals<'static>>,
 ) {
     // Loads relocations and clears BSS
-    rp2040::init();
+    ChipHw::init();
 
-    let peripherals = static_init!(Rp2040DefaultPeripherals, Rp2040DefaultPeripherals::new());
-    peripherals.resolve_dependencies();
+    // Initialize deferred calls very early.
+    kernel::deferred_call::initialize_deferred_call_state_unsafe::<
+        <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+    >();
+
+    // Bind global variables to this thread.
+    let _ = PANIC_RESOURCES
+        .bind_to_thread_unsafe::<<ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider>(
+            PanicResources::new(),
+        );
+
+    let clocks = static_init!(rp2040::clocks::Clocks, rp2040::clocks::Clocks::new());
+    let resets = static_init!(rp2040::resets::Resets, rp2040::resets::Resets::new());
+    let peripherals = static_init!(
+        Rp2040DefaultPeripherals,
+        Rp2040DefaultPeripherals::new(clocks, resets)
+    );
+    peripherals.init();
 
     // Reset all peripherals except QSPI (we might be booting from Flash), PLL USB and PLL SYS
-    peripherals.resets.reset_all_except(&[
+    resets.reset_all_except(&[
         Peripheral::IOQSpi,
         Peripheral::PadsQSpi,
         Peripheral::PllUsb,
@@ -282,7 +290,7 @@ pub unsafe fn start() -> (
 
     // Unreset all the peripherals that do not require clock setup as they run using the sys_clk or ref_clk
     // Wait for the peripherals to reset
-    peripherals.resets.unreset_all_except(
+    resets.unreset_all_except(
         &[
             Peripheral::Adc,
             Peripheral::Rtc,
@@ -295,13 +303,10 @@ pub unsafe fn start() -> (
         true,
     );
 
-    init_clocks(peripherals);
+    init_clocks(peripherals, clocks, resets);
 
     // Unreset all peripherals
-    peripherals.resets.unreset_all_except(&[], true);
-
-    // Set the UART used for panic
-    io::WRITER.set_uart(&peripherals.uart0);
+    resets.unreset_all_except(&[], true);
 
     //set RX and TX pins in UART mode
     let gpio_tx = peripherals.pins.get_pin(RPGpio::GPIO0);
@@ -310,7 +315,7 @@ pub unsafe fn start() -> (
     gpio_tx.set_function(GpioFunction::UART);
 
     // Set the UART used for panic
-    io::WRITER.set_uart(&peripherals.uart0);
+    (*addr_of_mut!(io::WRITER)).set_uart(&peripherals.uart0);
 
     // Disable IE for pads 26-29 (the Pico SDK runtime does this, not sure why)
     for pin in 26..30 {
@@ -324,10 +329,19 @@ pub unsafe fn start() -> (
         Rp2040<Rp2040DefaultPeripherals>,
         Rp2040::new(peripherals, &peripherals.sio)
     );
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.chip.put(chip);
+    });
 
-    CHIP = Some(chip);
+    // Create an array to hold process references.
+    let processes = components::process_array::ProcessArrayComponent::new()
+        .finalize(components::process_array_component_static!(NUM_PROCS));
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.processes.put(processes.as_slice());
+    });
 
-    let board_kernel = static_init!(Kernel, Kernel::new(&*addr_of!(PROCESSES)));
+    // Setup space to store the core kernel data structure.
+    let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(processes.as_slice()));
 
     let process_management_capability =
         create_capability!(capabilities::ProcessManagementCapability);
@@ -340,6 +354,7 @@ pub unsafe fn start() -> (
         board_kernel,
         capsules_core::alarm::DRIVER_NUM,
         mux_alarm,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::alarm_component_static!(RPTimer));
 
@@ -374,22 +389,28 @@ pub unsafe fn start() -> (
         .finalize(components::uart_mux_component_static!());
 
     // Uncomment this to use UART as an output
-    // let uart_mux = components::console::UartMuxComponent::new(
-    //     &peripherals.uart0,
-    //     115200,
-    // )
-    // .finalize(components::uart_mux_component_static!());
+    // let uart_mux = components::console::UartMuxComponent::new(&peripherals.uart0, 115200)
+    //     .finalize(components::uart_mux_component_static!());
 
     // Setup the console.
     let console = components::console::ConsoleComponent::new(
         board_kernel,
         capsules_core::console::DRIVER_NUM,
         uart_mux,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::console_component_static!());
     // Create the debugger object that handles calls to `debug!()`.
-    components::debug_writer::DebugWriterComponent::new(uart_mux)
-        .finalize(components::debug_writer_component_static!());
+    components::debug_writer::DebugWriterComponent::new_unsafe(
+        uart_mux,
+        create_capability!(capabilities::SetDebugWriterCapability),
+        || unsafe {
+            kernel::debug::initialize_debug_writer_wrapper_unsafe::<
+                <ChipHw as kernel::platform::chip::Chip>::ThreadIdProvider,
+            >();
+        },
+    )
+    .finalize(components::debug_writer_component_static!());
 
     cdc.enable();
     cdc.attach();
@@ -412,9 +433,8 @@ pub unsafe fn start() -> (
             20 => peripherals.pins.get_pin(RPGpio::GPIO20),
             21 => peripherals.pins.get_pin(RPGpio::GPIO21),
             22 => peripherals.pins.get_pin(RPGpio::GPIO22),
-            23 => peripherals.pins.get_pin(RPGpio::GPIO23),
-            24 => peripherals.pins.get_pin(RPGpio::GPIO24),
         ),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::gpio_component_static!(RPGpioPin<'static>));
 
@@ -448,6 +468,7 @@ pub unsafe fn start() -> (
         board_kernel,
         capsules_extra::temperature::DRIVER_NUM,
         temp_sensor,
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::temperature_component_static!(
         TemperatureRp2040Sensor
@@ -465,7 +486,9 @@ pub unsafe fn start() -> (
 
     let bus = components::bus::SpiMasterBusComponent::new(
         mux_spi,
-        peripherals.pins.get_pin(RPGpio::GPIO17),
+        hil::spi::cs::IntoChipSelect::<_, hil::spi::cs::ActiveLow>::into_cs(
+            peripherals.pins.get_pin(RPGpio::GPIO17),
+        ),
         20_000_000,
         kernel::hil::spi::ClockPhase::SampleLeading,
         kernel::hil::spi::ClockPolarity::IdleLow,
@@ -519,14 +542,16 @@ pub unsafe fn start() -> (
                 kernel::hil::gpio::FloatingState::PullUp
             ), // Y
         ),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::button_component_static!(RPGpioPin));
 
     let screen = components::screen::ScreenComponent::new(
         board_kernel,
-        capsules_extra::screen::DRIVER_NUM,
+        capsules_extra::screen::screen::DRIVER_NUM,
         tft,
         Some(tft),
+        create_capability!(capabilities::MemoryAllocationCapability),
     )
     .finalize(components::screen_component_static!(57600));
 
@@ -539,29 +564,47 @@ pub unsafe fn start() -> (
     let adc_channel_2 = components::adc::AdcComponent::new(adc_mux, Channel::Channel2)
         .finalize(components::adc_component_static!(Adc));
 
-    let adc_syscall =
-        components::adc::AdcVirtualComponent::new(board_kernel, capsules_core::adc::DRIVER_NUM)
-            .finalize(components::adc_syscall_component_helper!(
-                adc_channel_0,
-                adc_channel_1,
-                adc_channel_2,
-            ));
+    let adc_syscall = components::adc::AdcVirtualComponent::new(
+        board_kernel,
+        capsules_core::adc::DRIVER_NUM,
+        create_capability!(capabilities::MemoryAllocationCapability),
+    )
+    .finalize(components::adc_syscall_component_helper!(
+        adc_channel_0,
+        adc_channel_1,
+        adc_channel_2,
+    ));
 
     let process_printer = components::process_printer::ProcessPrinterTextComponent::new()
         .finalize(components::process_printer_text_component_static!());
-    PROCESS_PRINTER = Some(process_printer);
+    PANIC_RESOURCES.get().map(|resources| {
+        resources.printer.put(process_printer);
+    });
+
     // PROCESS CONSOLE
+    kernel::create_typed_capability!(process_console_cap, ProcessConsoleCap:
+        kernel::capabilities::ProcessManagementCapability,
+        kernel::capabilities::ProcessStartCapability
+    );
     let process_console = components::process_console::ProcessConsoleComponent::new(
         board_kernel,
         uart_mux,
         mux_alarm,
         process_printer,
-        Some(cortexm0p::support::reset),
+        Some(|| {
+            cortexm0p::support::reset(&kernel::create_capability!(
+                kernel::capabilities::CpuStateControlCapability
+            ))
+        }),
+        process_console_cap,
     )
-    .finalize(components::process_console_component_static!(RPTimer));
+    .finalize(components::process_console_component_static!(
+        RPTimer,
+        ProcessConsoleCap
+    ));
     let _ = process_console.start();
 
-    let scheduler = components::sched::round_robin::RoundRobinComponent::new(&*addr_of!(PROCESSES))
+    let scheduler = components::sched::round_robin::RoundRobinComponent::new(processes)
         .finalize(components::round_robin_component_static!(NUM_PROCS));
 
     //--------------------------------------------------------------------------
@@ -683,7 +726,6 @@ pub unsafe fn start() -> (
             core::ptr::addr_of_mut!(_sappmem),
             core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
         ),
-        &mut *addr_of_mut!(PROCESSES),
         &FAULT_RESPONSE,
         &process_management_capability,
     )
@@ -692,11 +734,37 @@ pub unsafe fn start() -> (
         debug!("{:?}", err);
     });
 
+    //--------------------------------------------------------------------------
+    // PIO
+    //--------------------------------------------------------------------------
+
+    let mut pio: Pio = Pio::new_pio0();
+
+    let _pio_pwm = PioPwm::new(&mut pio, clocks);
+    // This will start a PWM with PIO with the set frequency and duty cycle on the specified pin.
+    // pio_pwm
+    //     .start(
+    //         &RPGpio::GPIO7,
+    //         pio_pwm.get_maximum_frequency_hz() / 125000, /*1_000*/
+    //         pio_pwm.get_maximum_duty_cycle() / 2,
+    //     )
+    //     .unwrap();
+
     (board_kernel, pico_explorer_base, chip)
 }
 
 /// Main function called after RAM initialized.
-#[no_mangle]
+///
+/// # Safety
+///
+/// ## `no_mangle`
+///
+/// We use `main` as a symbol in the arch crate's initialization routine to jump
+/// here. We guarantee no other symbol has the same name.
+///
+/// Note: this requires a global/uniqueness guarantee.
+/// See <https://github.com/tock/tock/issues/5250>.
+#[unsafe(no_mangle)]
 pub unsafe fn main() {
     let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
 

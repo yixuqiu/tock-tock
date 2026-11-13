@@ -5,16 +5,16 @@
 //! Universal Serial Bus Device with EasyDMA (USBD)
 
 use core::cell::Cell;
-use cortexm4::support::atomic;
+use cortexm4f::support::with_interrupts_disabled;
 use kernel::hil;
 use kernel::hil::usb::TransferType;
-use kernel::utilities::cells::{OptionalCell, VolatileCell};
+use kernel::utilities::StaticRef;
+use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 use kernel::utilities::registers::{
-    register_bitfields, register_structs, Field, InMemoryRegister, LocalRegisterCopy, ReadOnly,
-    ReadWrite, WriteOnly,
+    Field, InMemoryRegister, LocalRegisterCopy, ReadOnly, ReadWrite, WriteOnly, register_bitfields,
+    register_structs,
 };
-use kernel::utilities::StaticRef;
 
 use crate::power;
 
@@ -57,19 +57,10 @@ macro_rules! internal_err {
     };
 }
 
-const CHIPINFO_BASE: StaticRef<ChipInfoRegisters> =
-    unsafe { StaticRef::new(0x10000130 as *const ChipInfoRegisters) };
-
-const USBD_BASE: StaticRef<UsbdRegisters<'static>> =
-    unsafe { StaticRef::new(0x40027000 as *const UsbdRegisters<'static>) };
-
-const USBERRATA_BASE: StaticRef<UsbErrataRegisters> =
-    unsafe { StaticRef::new(0x4006E000 as *const UsbErrataRegisters) };
-
 const NUM_ENDPOINTS: usize = 8;
 
 register_structs! {
-    ChipInfoRegisters {
+    pub ChipInfoRegisters {
         /// Undocumented register indicating the model of the chip
         (0x000 => chip_model: ReadOnly<u32, ChipModel::Register>),
         /// Undocumented register indicating the revision of the chip
@@ -78,7 +69,7 @@ register_structs! {
         (0x008 => @END),
     },
 
-    UsbErrataRegisters {
+    pub UsbErrataRegisters {
         (0x000 => _reserved0),
         /// Undocumented register - Errata 171
         (0xC00 => reg_c00: ReadWrite<u32>),
@@ -93,7 +84,7 @@ register_structs! {
 }
 
 #[repr(C)]
-struct UsbdRegisters<'a> {
+pub struct UsbdRegisters<'a> {
     _reserved1: [u32; 1],
     /// Captures the EPIN\[n\].PTR, EPIN\[n\].MAXCNT and EPIN\[n\].CONFIG
     /// registers values and enables endpoint IN not respond to traffic
@@ -309,13 +300,13 @@ struct UsbdRegisters<'a> {
 mod detail {
     use super::{Amount, Count};
     use core::marker::PhantomData;
-    use kernel::utilities::cells::VolatileCell;
+    use kernel::utilities::registers::InMemoryRegister;
     use kernel::utilities::registers::interfaces::Writeable;
     use kernel::utilities::registers::{ReadOnly, ReadWrite};
 
     #[repr(C)]
     pub struct EndpointRegisters<'a> {
-        ptr: VolatileCell<*const u8>,
+        ptr: ReadWrite<u32>,
         maxcnt: ReadWrite<u32, Count::Register>,
         amount: ReadOnly<u32, Amount::Register>,
         // padding
@@ -325,8 +316,8 @@ mod detail {
     }
 
     impl<'a> EndpointRegisters<'a> {
-        pub fn set_buffer(&self, slice: &'a [VolatileCell<u8>]) {
-            self.ptr.set(slice.as_ptr().cast::<u8>());
+        pub fn set_buffer(&self, slice: &'a [InMemoryRegister<u8>]) {
+            self.ptr.set(slice.as_ptr().cast::<u8>() as u32);
             self.maxcnt.write(Count::MAXCNT.val(slice.len() as u32));
         }
     }
@@ -688,8 +679,8 @@ pub enum BulkOutState {
 }
 
 pub struct Endpoint<'a> {
-    slice_in: OptionalCell<&'a [VolatileCell<u8>]>,
-    slice_out: OptionalCell<&'a [VolatileCell<u8>]>,
+    slice_in: OptionalCell<&'a [InMemoryRegister<u8>]>,
+    slice_out: OptionalCell<&'a [InMemoryRegister<u8>]>,
     state: Cell<EndpointState>,
     // The USB controller can only process one DMA transfer at a time (over all endpoints). The
     // request_transmit_* bits allow to queue transfers until the DMA becomes available again.
@@ -713,6 +704,8 @@ impl Endpoint<'_> {
 
 pub struct Usbd<'a> {
     registers: StaticRef<UsbdRegisters<'a>>,
+    registers_chip_info: StaticRef<ChipInfoRegisters>,
+    registers_errata: StaticRef<UsbErrataRegisters>,
     state: OptionalCell<UsbState>,
     dma_pending: Cell<bool>,
     client: OptionalCell<&'a dyn hil::usb::Client<'a>>,
@@ -721,9 +714,15 @@ pub struct Usbd<'a> {
 }
 
 impl<'a> Usbd<'a> {
-    pub const fn new() -> Self {
+    pub const fn new(
+        registers: StaticRef<UsbdRegisters<'a>>,
+        registers_chip_info: StaticRef<ChipInfoRegisters>,
+        registers_errata: StaticRef<UsbErrataRegisters>,
+    ) -> Self {
         Usbd {
-            registers: USBD_BASE,
+            registers,
+            registers_chip_info,
+            registers_errata,
             client: OptionalCell::empty(),
             state: OptionalCell::new(UsbState::Disabled),
             dma_pending: Cell::new(false),
@@ -763,10 +762,14 @@ impl<'a> Usbd<'a> {
     }
 
     fn has_errata_187(&self) -> bool {
-        CHIPINFO_BASE
+        self.registers_chip_info
             .chip_model
             .matches_all(ChipModel::MODEL::NRF52840)
-            && match CHIPINFO_BASE.chip_revision.read_as_enum(ChipRevision::REV) {
+            && match self
+                .registers_chip_info
+                .chip_revision
+                .read_as_enum(ChipRevision::REV)
+            {
                 Some(ChipRevision::REV::Value::REVB)
                 | Some(ChipRevision::REV::Value::REVC)
                 | Some(ChipRevision::REV::Value::REVD)
@@ -791,34 +794,30 @@ impl<'a> Usbd<'a> {
     /// USBD might not reach its active state.
     fn apply_errata_171(&self, val: u32) {
         if self.has_errata_171() {
-            unsafe {
-                atomic(|| {
-                    if USBERRATA_BASE.reg_c00.get() == 0 {
-                        USBERRATA_BASE.reg_c00.set(0x9375);
-                        USBERRATA_BASE.reg_c14.set(val);
-                        USBERRATA_BASE.reg_c00.set(0x9375);
-                    } else {
-                        USBERRATA_BASE.reg_c14.set(val);
-                    }
-                });
-            }
+            with_interrupts_disabled(|| {
+                if self.registers_errata.reg_c00.get() == 0 {
+                    self.registers_errata.reg_c00.set(0x9375);
+                    self.registers_errata.reg_c14.set(val);
+                    self.registers_errata.reg_c00.set(0x9375);
+                } else {
+                    self.registers_errata.reg_c14.set(val);
+                }
+            });
         }
     }
 
     /// USB cannot be enabled
     fn apply_errata_187(&self, val: u32) {
         if self.has_errata_187() {
-            unsafe {
-                atomic(|| {
-                    if USBERRATA_BASE.reg_c00.get() == 0 {
-                        USBERRATA_BASE.reg_c00.set(0x9375);
-                        USBERRATA_BASE.reg_d14.set(val);
-                        USBERRATA_BASE.reg_c00.set(0x9375);
-                    } else {
-                        USBERRATA_BASE.reg_d14.set(val);
-                    }
-                });
-            }
+            with_interrupts_disabled(|| {
+                if self.registers_errata.reg_c00.get() == 0 {
+                    self.registers_errata.reg_c00.set(0x9375);
+                    self.registers_errata.reg_d14.set(val);
+                    self.registers_errata.reg_c00.set(0x9375);
+                } else {
+                    self.registers_errata.reg_d14.set(val);
+                }
+            });
         }
     }
 
@@ -914,14 +913,14 @@ impl<'a> Usbd<'a> {
         // If your chip isn't one of these, you will be alerted by these panics. You can disable
         // them but will likely need to add the relevant errata to this implementation (errata 104,
         // 154, 200).
-        let chip_model = CHIPINFO_BASE.chip_model.get();
+        let chip_model = self.registers_chip_info.chip_model.get();
         if chip_model != u32::from(ChipModel::MODEL::NRF52840) {
             panic!(
                 "USB was only tested on NRF52840. Your chip model is {}.",
                 chip_model
             );
         }
-        let chip_revision = CHIPINFO_BASE.chip_revision.extract();
+        let chip_revision = self.registers_chip_info.chip_revision.extract();
         match chip_revision.read_as_enum(ChipRevision::REV) {
             Some(ChipRevision::REV::Value::REVA) | Some(ChipRevision::REV::Value::REVB) => {
                 panic!(
@@ -1209,8 +1208,8 @@ impl<'a> Usbd<'a> {
     fn active_events(
         &self,
         _saved_inter: &LocalRegisterCopy<u32, Interrupt::Register>,
-    ) -> InMemoryRegister<u32, Interrupt::Register> {
-        let result = InMemoryRegister::new(0);
+    ) -> LocalRegisterCopy<u32, Interrupt::Register> {
+        let mut result = LocalRegisterCopy::new(0);
         if Usbd::take_event(&self.registers.event_usbreset) {
             debug_events!(
                 "- event: usbreset{}",
@@ -1335,7 +1334,7 @@ impl<'a> Usbd<'a> {
         // ms), but then the EPDATA event on the very first IN transfer
         // immediately after the `client.bus_reset()` call below never occurs.
         for _ in 0..800000 {
-            cortexm4::support::nop();
+            cortexm4f::support::nop();
         }
 
         // TODO: reset controller stack
@@ -1450,7 +1449,7 @@ impl<'a> Usbd<'a> {
                                 .state
                                 .set(EndpointState::Ctrl(CtrlState::Init));
                         }
-                    };
+                    }
                 });
             }
             1..=7 => {
@@ -1796,7 +1795,7 @@ impl<'a> Usbd<'a> {
                     debug_tasks!("- task: ep0stall");
                     self.registers.task_ep0stall.write(Task::ENABLE::SET);
                 }
-            };
+            }
         });
     }
 
@@ -1923,7 +1922,7 @@ impl<'a> Usbd<'a> {
     }
 }
 
-impl<'a> power::PowerClient for Usbd<'a> {
+impl power::PowerClient for Usbd<'_> {
     fn handle_power_event(&self, event: power::PowerEvent) {
         match event {
             power::PowerEvent::UsbPluggedIn => self.enable(),
@@ -1939,7 +1938,7 @@ impl<'a> hil::usb::UsbController<'a> for Usbd<'a> {
         self.client.set(client);
     }
 
-    fn endpoint_set_ctrl_buffer(&self, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_ctrl_buffer(&self, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             panic!("Endpoint buffer must be at least 8 bytes");
         }
@@ -1950,7 +1949,7 @@ impl<'a> hil::usb::UsbController<'a> for Usbd<'a> {
         self.descriptors[0].slice_out.set(buf);
     }
 
-    fn endpoint_set_in_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_in_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             panic!("Endpoint buffer must be at least 8 bytes");
         }
@@ -1963,7 +1962,7 @@ impl<'a> hil::usb::UsbController<'a> for Usbd<'a> {
         self.descriptors[endpoint].slice_in.set(buf);
     }
 
-    fn endpoint_set_out_buffer(&self, endpoint: usize, buf: &'a [VolatileCell<u8>]) {
+    fn endpoint_set_out_buffer(&self, endpoint: usize, buf: &'a [InMemoryRegister<u8>]) {
         if buf.len() < 8 {
             panic!("Endpoint buffer must be at least 8 bytes");
         }
@@ -2179,13 +2178,9 @@ fn inter_endepout(ep: usize) -> Field<u32, Interrupt::Register> {
 }
 
 // Debugging functions.
-fn packet_to_hex(packet: &[VolatileCell<u8>], packet_hex: &mut [u8]) {
+fn packet_to_hex(packet: &[InMemoryRegister<u8>], packet_hex: &mut [u8]) {
     let hex_char = |x: u8| {
-        if x < 10 {
-            b'0' + x
-        } else {
-            b'a' + x - 10
-        }
+        if x < 10 { b'0' + x } else { b'a' + x - 10 }
     };
 
     for (i, x) in packet.iter().enumerate() {

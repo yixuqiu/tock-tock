@@ -211,7 +211,7 @@ enum State {
 #[derive(Default)]
 pub struct App {}
 
-pub struct TSL2561<'a, I: i2c::I2CDevice> {
+pub struct TSL2561<'a, I: i2c::I2CDevice<'a>> {
     i2c: &'a I,
     interrupt_pin: &'a dyn gpio::InterruptPin<'a>,
     state: Cell<State>,
@@ -220,7 +220,7 @@ pub struct TSL2561<'a, I: i2c::I2CDevice> {
     owning_process: OptionalCell<ProcessId>,
 }
 
-impl<'a, I: i2c::I2CDevice> TSL2561<'a, I> {
+impl<'a, I: i2c::I2CDevice<'a>> TSL2561<'a, I> {
     pub fn new(
         i2c: &'a I,
         interrupt_pin: &'a dyn gpio::InterruptPin<'a>,
@@ -229,8 +229,8 @@ impl<'a, I: i2c::I2CDevice> TSL2561<'a, I> {
     ) -> Self {
         // setup and return struct
         Self {
-            i2c: i2c,
-            interrupt_pin: interrupt_pin,
+            i2c,
+            interrupt_pin,
             state: Cell::new(State::Idle),
             buffer: TakeCell::new(buffer),
             apps,
@@ -274,7 +274,7 @@ impl<'a, I: i2c::I2CDevice> TSL2561<'a, I> {
         // time. 16X, 402mS is nominal. Scale if integration time is NOT 402 msec.
         // let mut ch_scale = CHSCALE_TINT0 as usize; // 13.7ms
         let mut ch_scale = CHSCALE_TINT1 as usize; // 101ms
-                                                   // let mut ch_scale: usize = 1 << CH_SCALE; // Default
+        // let mut ch_scale: usize = 1 << CH_SCALE; // Default
 
         // Scale if gain is NOT 16X
         ch_scale <<= 4; // scale 1X to 16X
@@ -285,10 +285,9 @@ impl<'a, I: i2c::I2CDevice> TSL2561<'a, I> {
 
         // Find the ratio of the channel values (Channel1/Channel0).
         // Protect against divide by zero.
-        let mut ratio1 = 0;
-        if channel0 != 0 {
-            ratio1 = (channel1 << (RATIO_SCALE + 1)) / channel0;
-        }
+        let ratio1 = (channel1 << (RATIO_SCALE + 1))
+            .checked_div(channel0)
+            .unwrap_or(0);
 
         // round the ratio value
         let ratio = (ratio1 + 1) >> 1;
@@ -360,7 +359,7 @@ impl<'a, I: i2c::I2CDevice> TSL2561<'a, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> i2c::I2CClient for TSL2561<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> i2c::I2CClient for TSL2561<'a, I> {
     fn command_complete(&self, buffer: &'static mut [u8], _status: Result<(), i2c::Error>) {
         match self.state.get() {
             State::SelectId => {
@@ -429,7 +428,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for TSL2561<'_, I> {
 
                 self.owning_process.map(|pid| {
                     let _ = self.apps.enter(pid, |_, upcalls| {
-                        upcalls.schedule_upcall(0, (0, lux, 0)).ok();
+                        let _ = upcalls.schedule_upcall(0, (0, lux, 0));
                     });
                 });
 
@@ -450,7 +449,7 @@ impl<I: i2c::I2CDevice> i2c::I2CClient for TSL2561<'_, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> gpio::Client for TSL2561<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> gpio::Client for TSL2561<'a, I> {
     fn fired(&self) {
         self.buffer.take().map(|buffer| {
             // turn on i2c to send commands
@@ -465,7 +464,7 @@ impl<I: i2c::I2CDevice> gpio::Client for TSL2561<'_, I> {
     }
 }
 
-impl<I: i2c::I2CDevice> SyscallDriver for TSL2561<'_, I> {
+impl<'a, I: i2c::I2CDevice<'a>> SyscallDriver for TSL2561<'a, I> {
     fn command(
         &self,
         command_num: usize,

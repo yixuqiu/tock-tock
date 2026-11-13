@@ -6,9 +6,9 @@
 
 //! Main phase-locked loop (PLL) clock driver for the STM32F4xx family. [^doc_ref]
 //!
-//! Many boards of the STM32F4xx family provide several PLL clocks. However, all of them have a
-//! main PLL clock. This driver is designed for the main PLL clock. It will be simply referred as
-//! the PLL clock.
+//! Many boards of the STM32F4xx family provide several PLL clocks. However, all
+//! of them have a main PLL clock. This driver is designed for the main PLL
+//! clock. It will be simply referred as the PLL clock.
 //!
 //! The PLL clock is composed of two outputs:
 //!
@@ -30,8 +30,8 @@
 //!
 //! # Usage
 //!
-//! For the purposes of brevity, any error checking has been removed. In real applications, always
-//! check the return values of the [Pll] methods.
+//! For the purposes of brevity, any error checking has been removed. In real
+//! applications, always check the return values of the [Pll] methods.
 //!
 //! First, get a reference to the [Pll] struct:
 //! ```rust,ignore
@@ -41,7 +41,7 @@
 //! ## Start the clock with a given frequency
 //!
 //! ```rust,ignore
-//! pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 100); // 100MHz
+//! pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 100); // 100MHz
 //! pll.enable();
 //! ```
 //!
@@ -63,7 +63,7 @@
 //! ## Check the clock frequency
 //!
 //! ```rust,ignore
-//! let optional_pll_frequency = pll.get_frequency();
+//! let optional_pll_frequency = pll.get_frequency_mhz();
 //! if let None = optional_pll_frequency {
 //!     /* Clock stopped */
 //! }
@@ -75,7 +75,7 @@
 //!
 //! ```rust,ignore
 //! pll.disable(); // The PLL clock can't be configured while running
-//! pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 50); // 50MHz
+//! pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 50); // 50MHz
 //! pll.enable();
 //! ```
 //!
@@ -83,7 +83,7 @@
 //! ```rust,ignore
 //! // The frequency of the PLL clock must be 1, 1.5, 2, 2.5, 3, 3.5 or 4 x 48MHz in order to get
 //! // 48MHz output. Otherwise, the driver will attempt to get the closest frequency lower than 48MHz
-//! pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 72); // 72MHz = 48MHz * 1.5
+//! pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 72); // 72MHz = 48MHz * 1.5
 //! pll.enable();
 //! ```
 //!
@@ -97,7 +97,7 @@
 //! ## Get the frequency of the PLL48CLK output
 //!
 //! ```rust,ignore
-//! let optional_pll48_frequency = pll.get_frequency();
+//! let optional_pll48_frequency = pll.get_frequency_mhz();
 //! if let None = optional_pll48_frequency {
 //!     /* Clock stopped */
 //! }
@@ -110,12 +110,12 @@ use crate::chip_specific::clock_constants;
 use crate::clocks::hsi::HSI_FREQUENCY_MHZ;
 use crate::rcc::Rcc;
 use crate::rcc::SysClockSource;
-use crate::rcc::{PllSource, PLLM, PLLP, PLLQ};
 use crate::rcc::{DEFAULT_PLLM_VALUE, DEFAULT_PLLN_VALUE, DEFAULT_PLLP_VALUE, DEFAULT_PLLQ_VALUE};
+use crate::rcc::{PLLM, PLLP, PLLQ, PllSource};
 
+use kernel::ErrorCode;
 use kernel::debug;
 use kernel::utilities::cells::OptionalCell;
-use kernel::ErrorCode;
 
 use core::cell::Cell;
 use core::marker::PhantomData;
@@ -123,25 +123,25 @@ use core::marker::PhantomData;
 /// Main PLL clock structure.
 pub struct Pll<'a, PllConstants> {
     rcc: &'a Rcc,
-    frequency: OptionalCell<usize>,
-    pll48_frequency: OptionalCell<usize>,
+    frequency_mhz: OptionalCell<usize>,
+    pll48_frequency_mhz: OptionalCell<usize>,
     pll48_calibrated: Cell<bool>,
     _marker: PhantomData<PllConstants>,
 }
 
 impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
-    // Create a new instance of the PLL clock.
-    //
-    // The instance of the PLL clock is configured to run at 96MHz and with minimal PLL jitter
-    // effects.
-    //
-    // # Parameters
-    //
-    // + rcc: an instance of [crate::rcc]
-    //
-    // # Returns
-    //
-    // An instance of the PLL clock.
+    /// Create a new instance of the PLL clock.
+    ///
+    /// The instance of the PLL clock is configured to run at 96MHz and with
+    /// minimal PLL jitter effects.
+    ///
+    /// # Parameters
+    ///
+    /// + rcc: an instance of [crate::rcc]
+    ///
+    /// # Returns
+    ///
+    /// An instance of the PLL clock.
     pub(in crate::clocks) fn new(rcc: &'a Rcc) -> Self {
         const PLLP: usize = match DEFAULT_PLLP_VALUE {
             PLLP::DivideBy2 => 2,
@@ -153,8 +153,8 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
         const PLLQ: usize = DEFAULT_PLLQ_VALUE as usize;
         Self {
             rcc,
-            frequency: OptionalCell::new(HSI_FREQUENCY_MHZ / PLLM * DEFAULT_PLLN_VALUE / PLLP),
-            pll48_frequency: OptionalCell::new(
+            frequency_mhz: OptionalCell::new(HSI_FREQUENCY_MHZ / PLLM * DEFAULT_PLLN_VALUE / PLLP),
+            pll48_frequency_mhz: OptionalCell::new(
                 HSI_FREQUENCY_MHZ / PLLM * DEFAULT_PLLN_VALUE / PLLQ,
             ),
             pll48_calibrated: Cell::new(true),
@@ -162,8 +162,8 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
         }
     }
 
-    // The caller must ensure the desired frequency lies between MIN_FREQ_MHZ and
-    // MAX_FREQ_MHZ.  Otherwise, the return value makes no sense.
+    /// The caller must ensure the desired frequency lies between MIN_FREQ_MHZ
+    /// and MAX_FREQ_MHZ. Otherwise, the return value makes no sense.
     fn compute_pllp(desired_frequency_mhz: usize) -> PLLP {
         if desired_frequency_mhz < 55 {
             PLLP::DivideBy8
@@ -176,8 +176,8 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
         }
     }
 
-    // The caller must ensure the desired frequency lies between MIN_FREQ_MHZ and
-    // MAX_FREQ_MHZ. Otherwise, the return value makes no sense.
+    /// The caller must ensure the desired frequency lies between MIN_FREQ_MHZ
+    /// and MAX_FREQ_MHZ. Otherwise, the return value makes no sense.
     fn compute_plln(
         desired_frequency_mhz: usize,
         pll_source_clock_freq: usize,
@@ -187,8 +187,8 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
         desired_frequency_mhz * Into::<usize>::into(pllp) / vco_input_frequency
     }
 
-    // The caller must ensure the VCO output frequency lies between 100 and 432MHz. Otherwise, the
-    // return value makes no sense.
+    /// The caller must ensure the VCO output frequency lies between 100 and
+    /// 432MHz. Otherwise, the return value makes no sense.
     fn compute_pllq(vco_output_frequency_mhz: usize) -> PLLQ {
         for pllq in 3..10 {
             if 48 * pllq >= vco_output_frequency_mhz {
@@ -220,8 +220,8 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
     ///
     /// # Errors
     ///
-    /// + [Err]\([ErrorCode::BUSY]\): if enabling the PLL clock took too long. Recall this method to
-    /// ensure the PLL clock is running.
+    /// + [Err]\([ErrorCode::BUSY]\): if enabling the PLL clock took too long.
+    ///   Recall this method to ensure the PLL clock is running.
     pub fn enable(&self) -> Result<(), ErrorCode> {
         // Enable the PLL clock
         self.rcc.enable_pll_clock();
@@ -242,9 +242,10 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
     ///
     /// # Errors
     ///
-    /// + [Err]\([ErrorCode::FAIL]\): if the PLL clock is configured as the system clock.
-    /// + [Err]\([ErrorCode::BUSY]\): disabling the PLL clock took to long. Retry to ensure it is
-    /// not running.
+    /// + [Err]\([ErrorCode::FAIL]\): if the PLL clock is configured as the
+    ///   system clock.
+    /// + [Err]\([ErrorCode::BUSY]\): disabling the PLL clock took to long.
+    ///   Retry to ensure it is not running.
     pub fn disable(&self) -> Result<(), ErrorCode> {
         // Can't disable the PLL clock when it is used as the system clock
         if self.rcc.get_sys_clock_source() == SysClockSource::PLL {
@@ -281,31 +282,33 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
     /// The PLL clock has two outputs:
     ///
     /// + main output used for configuring the system clock
-    /// + a second output called PLL48CLK used by OTG USB FS (48MHz), the random number generator
-    /// (≤ 48MHz) and the SDIO (≤ 48MHz) clocks.
+    /// + a second output called PLL48CLK used by OTG USB FS (48MHz), the random
+    ///   number generator(≤ 48MHz) and the SDIO (≤ 48MHz) clocks.
     ///
-    /// When calling this method, the given frequency is set for the main output. The method will
-    /// attempt to configure the PLL48CLK output to 48MHz, or to the highest value less than 48MHz
-    /// if it is not possible to get a precise 48MHz. In order to obtain a precise 48MHz frequency
-    /// (for the OTG USB FS peripheral), one should call this method with a frequency of 1, 1.5, 2,
-    /// 2.5 ... 4 x 48MHz.
+    /// When calling this method, the given frequency is set for the main
+    /// output. The method will attempt to configure the PLL48CLK output to
+    /// 48MHz, or to the highest value less than 48MHz if it is not possible to
+    /// get a precise 48MHz. In order to obtain a precise 48MHz frequency
+    /// (for the OTG USB FS peripheral), one should call this method with a
+    /// frequency of 1, 1.5, 2, 2.5 ... 4 x 48MHz.
     ///
     /// # Parameters
     ///
     /// + pll_source: PLL source clock (HSI or HSE)
     ///
-    /// + source_frequency: the frequency of the PLL source clock in MHz. For the HSI the frequency
-    /// is fixed to 16MHz. For the HSE, the frequency is hardware-dependent
+    /// + source_frequency: the frequency of the PLL source clock in MHz. For
+    ///   the HSI the frequency is fixed to 16MHz. For the HSE, the frequency
+    ///   is hardware-dependent
     ///
-    /// + desired_frequency_mhz: the desired frequency in MHz. Supported values: 24-216MHz for
-    /// STM32F401 and 13-216MHz for all the other chips
+    /// + desired_frequency_mhz: the desired frequency in MHz. Supported values:
+    ///   24-216MHz for STM32F401 and 13-216MHz for all the other chips
     ///
     /// # Errors
     ///
     /// + [Err]\([ErrorCode::INVAL]\): if the desired frequency can't be achieved
-    /// + [Err]\([ErrorCode::FAIL]\): if the PLL clock is already enabled. It must be disabled before
-    /// configuring it.
-    pub(super) fn set_frequency(
+    /// + [Err]\([ErrorCode::FAIL]\): if the PLL clock is already enabled. It must be
+    ///   disabled before configuring it.
+    pub(super) fn set_frequency_mhz(
         &self,
         pll_source: PllSource,
         source_frequency: usize,
@@ -349,11 +352,11 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
         // Check if PLL48CLK is calibrated, e.g. its frequency is exactly 48MHz
         let pll48_frequency = vco_output_frequency / pllq as usize;
         self.pll48_calibrated
-            .set(pll48_frequency == 48 && vco_output_frequency % pllq as usize == 0);
+            .set(pll48_frequency == 48 && vco_output_frequency.is_multiple_of(pllq as usize));
 
         // Cache the frequency so it is not computed every time a get method is called
-        self.frequency.set(desired_frequency_mhz);
-        self.pll48_frequency.set(pll48_frequency);
+        self.frequency_mhz.set(desired_frequency_mhz);
+        self.pll48_frequency_mhz.set(pll48_frequency);
 
         Ok(())
     }
@@ -364,9 +367,27 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
     ///
     /// + [Some]\(frequency_mhz\): if the PLL clock is enabled.
     /// + [None]: if the PLL clock is disabled.
-    pub fn get_frequency(&self) -> Option<usize> {
+    pub fn get_frequency_mhz(&self) -> Option<usize> {
         if self.is_enabled() {
-            self.frequency.get()
+            self.frequency_mhz.get()
+        } else {
+            None
+        }
+    }
+
+    /// Get the frequency in MHz of the PLL clock from RCC registers instead of
+    /// using the cached value.
+    ///
+    /// # Returns
+    ///
+    /// + [Some]\(frequency_mhz\): if the PLL clock is enabled.
+    /// + [None]: if the PLL clock is disabled.
+    pub fn get_frequency_mhz_no_cache(&self, source_frequency: usize) -> Option<usize> {
+        if self.is_enabled() {
+            let pllm = self.rcc.get_pll_clocks_m_divider() as usize;
+            let plln = self.rcc.get_pll_clock_n_multiplier();
+            let pllp: usize = self.rcc.get_pll_clock_p_divider().into();
+            Some(source_frequency / pllm * plln / pllp)
         } else {
             None
         }
@@ -374,16 +395,16 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
 
     /// Get the frequency in MHz of the PLL48 clock.
     ///
-    /// **NOTE:** If the PLL clock was not configured with a frequency multiple of 48MHz, the
-    /// returned value is inaccurate.
+    /// **NOTE:** If the PLL clock was not configured with a frequency multiple
+    /// of 48MHz, the returned value is inaccurate.
     ///
     /// # Returns
     ///
     /// + [Some]\(frequency_mhz\): if the PLL clock is enabled.
     /// + [None]: if the PLL clock is disabled.
-    pub fn get_frequency_pll48(&self) -> Option<usize> {
+    pub fn get_frequency_mhz_pll48(&self) -> Option<usize> {
         if self.is_enabled() {
-            self.pll48_frequency.get()
+            self.pll48_frequency_mhz.get()
         } else {
             None
         }
@@ -404,8 +425,9 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
 
 /// Tests for the PLL clock
 ///
-/// This module ensures that the PLL clock works as expected. If changes are brought to the PLL
-/// clock, ensure to run all the tests to see if anything is broken.
+/// This module ensures that the PLL clock works as expected. If changes are
+/// brought to the PLL clock, ensure to run all the tests to see if anything is
+/// broken.
 ///
 /// # Usage
 ///
@@ -414,13 +436,16 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
 /// ```rust,ignore
 /// use stm32f429zi::pll;
 /// ```
-/// To run all the available tests, add this line before **kernel::process::load_processes()**:
+///
+/// To run all the available tests, add this line before
+/// `kernel::process::load_processes()`:
 ///
 /// ```rust,ignore
 /// pll::tests::run(&peripherals.stm32f4.clocks.pll);
 /// ```
 ///
-/// If everything works as expected, the following message should be printed on the kernel console:
+/// If everything works as expected, the following message should be printed on
+/// the kernel console:
 ///
 /// ```text
 /// ===============================================
@@ -436,15 +461,19 @@ impl<'a, PllConstants: clock_constants::PllConstants> Pll<'a, PllConstants> {
 /// ===============================================
 /// ```
 ///
-/// There is also the possibility to run a part of the test suite. Check the functions present in
-/// this module for more details.
+/// There is also the possibility to run a part of the test suite. Check the
+/// functions present in this module for more details.
 ///
 /// # Errors
 ///
-/// If there are any errors, open an issue ticket at <https://github.com/tock/tock>. Please provide the
-/// output of the test execution.
+/// If there are any errors, open an issue ticket at
+/// <https://github.com/tock/tock>. Please provide the output of the test
+/// execution.
 pub mod tests {
-    use super::*;
+    use super::{
+        DEFAULT_PLLM_VALUE, ErrorCode, HSI_FREQUENCY_MHZ, PLLM, PLLP, PLLQ, Pll, PllSource,
+        clock_constants, debug,
+    };
 
     // Depending on the default PLLM value, the computed PLLN value changes.
     const MULTIPLIER: usize = match DEFAULT_PLLM_VALUE {
@@ -617,11 +646,11 @@ pub mod tests {
         // Attempting to configure the PLL with either too high or too low frequency
         assert_eq!(
             Err(ErrorCode::INVAL),
-            pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 12)
+            pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 12)
         );
         assert_eq!(
             Err(ErrorCode::INVAL),
-            pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 217)
+            pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 217)
         );
 
         // Start the PLL with the default configuration.
@@ -631,7 +660,7 @@ pub mod tests {
         assert!(pll.is_enabled());
 
         // By default, the PLL clock is set to 96MHz
-        assert_eq!(Some(96), pll.get_frequency());
+        assert_eq!(Some(96), pll.get_frequency_mhz());
 
         // By default, the PLL48 clock is correctly calibrated
         assert!(pll.is_pll48_calibrated());
@@ -639,7 +668,7 @@ pub mod tests {
         // Impossible to configure the PLL clock once it is enabled.
         assert_eq!(
             Err(ErrorCode::FAIL),
-            pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 50)
+            pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 50)
         );
 
         // Stop the PLL in order to reconfigure it.
@@ -648,68 +677,68 @@ pub mod tests {
         // Configure the PLL clock to run at 25MHz
         assert_eq!(
             Ok(()),
-            pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 25)
+            pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 25)
         );
 
         // Start the PLL with the new configuration
         assert_eq!(Ok(()), pll.enable());
 
         // get_frequency() method should reflect the new change
-        assert_eq!(Some(25), pll.get_frequency());
+        assert_eq!(Some(25), pll.get_frequency_mhz());
 
         // Since 25 is not a multiple of 48, the PLL48 clock is not correctly calibrated
         assert!(!pll.is_pll48_calibrated());
 
         // The expected PLL48 clock value in this case should be approximately 40 MHz.
         // It is actually exactly 40MHz in this particular case.
-        assert_eq!(Some(40), pll.get_frequency_pll48());
+        assert_eq!(Some(40), pll.get_frequency_mhz_pll48());
 
         // Stop the PLL clock
         assert_eq!(Ok(()), pll.disable());
 
         // Attempting to get the frequency of the PLL clock when it is disabled should return None.
-        assert_eq!(None, pll.get_frequency());
+        assert_eq!(None, pll.get_frequency_mhz());
         // Same for PLL48 clock
-        assert_eq!(None, pll.get_frequency_pll48());
+        assert_eq!(None, pll.get_frequency_mhz_pll48());
 
         // Attempting to configure the PLL clock with a frequency multiple of 48MHz
         assert_eq!(
             Ok(()),
-            pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 144)
+            pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 144)
         );
         assert_eq!(Ok(()), pll.enable());
-        assert_eq!(Some(144), pll.get_frequency());
+        assert_eq!(Some(144), pll.get_frequency_mhz());
 
         // PLL48 clock output should be correctly calibrated
         assert!(pll.is_pll48_calibrated());
-        assert_eq!(Some(48), pll.get_frequency_pll48());
+        assert_eq!(Some(48), pll.get_frequency_mhz_pll48());
 
         // Reconfigure the clock for 100MHz
         assert_eq!(Ok(()), pll.disable());
         assert_eq!(
             Ok(()),
-            pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 100)
+            pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 100)
         );
         assert_eq!(Ok(()), pll.enable());
-        assert_eq!(Some(100), pll.get_frequency());
+        assert_eq!(Some(100), pll.get_frequency_mhz());
 
         // In this case, the PLL48 clock is not correctly calibrated. Its frequency is
         // approximately 44MHz.
         assert!(!pll.is_pll48_calibrated());
-        assert_eq!(Some(44), pll.get_frequency_pll48());
+        assert_eq!(Some(44), pll.get_frequency_mhz_pll48());
 
         // Configure the clock to 72MHz = 48MHz * 1.5
         assert_eq!(Ok(()), pll.disable());
         assert_eq!(
             Ok(()),
-            pll.set_frequency(PllSource::HSI, HSI_FREQUENCY_MHZ, 72)
+            pll.set_frequency_mhz(PllSource::HSI, HSI_FREQUENCY_MHZ, 72)
         );
         assert_eq!(Ok(()), pll.enable());
-        assert_eq!(Some(72), pll.get_frequency());
+        assert_eq!(Some(72), pll.get_frequency_mhz());
 
         // In this case, the PLL48 clock is correctly calibrated
         assert!(pll.is_pll48_calibrated());
-        assert_eq!(Some(48), pll.get_frequency_pll48());
+        assert_eq!(Some(48), pll.get_frequency_mhz_pll48());
 
         // Turn off the PLL clock
         assert_eq!(Ok(()), pll.disable());

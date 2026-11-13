@@ -3,15 +3,15 @@
 // Copyright Tock Contributors 2022.
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use cortexm7::support::atomic;
+use cortexm7::support::with_interrupts_disabled;
+use kernel::ErrorCode;
 use kernel::hil;
 use kernel::hil::time::{Ticks, Ticks32, Time};
 use kernel::platform::chip::ClockInterface;
+use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
-use kernel::utilities::registers::{register_bitfields, ReadOnly, ReadWrite};
-use kernel::utilities::StaticRef;
-use kernel::ErrorCode;
+use kernel::utilities::registers::{ReadOnly, ReadWrite, register_bitfields};
 
 use crate::ccm;
 use crate::nvic;
@@ -392,13 +392,11 @@ impl<'a, F: hil::time::Frequency> hil::time::Alarm<'a> for Gpt<'a, F> {
     }
 
     fn disarm(&self) -> Result<(), ErrorCode> {
-        unsafe {
-            atomic(|| {
-                // Disable counter
-                self.registers.ir.modify(IR::OF1IE::CLEAR);
-                cortexm7::nvic::Nvic::new(self.irqn).clear_pending();
-            });
-        }
+        with_interrupts_disabled(|| {
+            // Disable counter
+            self.registers.ir.modify(IR::OF1IE::CLEAR);
+            cortexm7::nvic::Nvic::new(self.irqn).clear_pending();
+        });
         Ok(())
     }
 

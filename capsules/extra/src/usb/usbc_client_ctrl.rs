@@ -9,7 +9,7 @@
 //!
 //! Right now, the stack looks like this:
 //!
-//! ```
+//! ```text
 //!                  Client
 //!                  |   ^
 //!             |-----   |
@@ -39,6 +39,7 @@ use core::cmp::min;
 
 use kernel::hil;
 use kernel::hil::usb::TransferType;
+use kernel::utilities::registers::interfaces::Writeable;
 
 const DESCRIPTOR_BUFLEN: usize = 128;
 
@@ -111,7 +112,7 @@ impl<'a, 'b, U: hil::usb::UsbController<'a>> ClientCtrl<'a, 'b, U> {
         strings: &'b [&'b str],
     ) -> Self {
         ClientCtrl {
-            controller: controller,
+            controller,
             state: Default::default(),
             // For the moment, the Default trait is not implemented for arrays
             // of length > 32, and the Cell type is not Copy, so we have to
@@ -417,12 +418,9 @@ impl<'a, 'b, U: hil::usb::UsbController<'a>> ClientCtrl<'a, 'b, U> {
         // Control Read: IN request acknowledged
         // Control Write: status sent
 
-        match self.state[endpoint].get() {
-            State::SetAddress => {
-                self.controller.enable_address();
-            }
-            _ => {}
-        };
+        if let State::SetAddress = self.state[endpoint].get() {
+            self.controller.enable_address();
+        }
         self.state[endpoint].set(State::Init);
     }
 }

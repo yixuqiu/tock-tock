@@ -72,6 +72,10 @@ impl<'a, I: i2c::I2CMaster<'a>> I2CMasterDriver<'a, I> {
             .and_then(|buffer| {
                 buffer.enter(|app_buffer| {
                     self.buf.take().map_or(Err(ErrorCode::NOMEM), |buffer| {
+                        if wlen > app_buffer.len() || wlen > buffer.len() || rlen > buffer.len() {
+                            self.buf.put(Some(buffer));
+                            return Err(ErrorCode::SIZE);
+                        }
                         app_buffer[..wlen].copy_to_slice(&mut buffer[..wlen]);
 
                         let read_len = if rlen == 0 {
@@ -120,11 +124,11 @@ pub enum Cmd {
 }
 
 impl<'a, I: i2c::I2CMaster<'a>> SyscallDriver for I2CMasterDriver<'a, I> {
-    /// Setup shared buffers.
-    ///
-    /// ### `allow_num`
-    ///
-    /// - `1`: buffer for command
+    // Setup shared buffers.
+    //
+    // ### `allow_num`
+    //
+    // - `1`: buffer for command
 
     // Setup callbacks.
     //
@@ -199,22 +203,22 @@ impl<'a, I: i2c::I2CMaster<'a>> i2c::I2CHwMasterClient for I2CMasterDriver<'a, I
                         .get_readwrite_processbuffer(rw_allow::BUFFER)
                         .and_then(|app_buffer| {
                             app_buffer.mut_enter(|app_buffer| {
-                                app_buffer[..read_len].copy_from_slice(&buffer[..read_len]);
+                                // The app may have swapped in a smaller buffer since the command.
+                                let len = read_len.min(app_buffer.len());
+                                app_buffer[..len].copy_from_slice(&buffer[..len]);
                             })
                         });
                 }
 
                 // signal to driver that tx complete
-                kernel_data
-                    .schedule_upcall(
+                let _ = kernel_data.schedule_upcall(
+                    0,
+                    (
+                        kernel::errorcode::into_statuscode(status.map_err(|e| e.into())),
                         0,
-                        (
-                            kernel::errorcode::into_statuscode(status.map_err(|e| e.into())),
-                            0,
-                            0,
-                        ),
-                    )
-                    .ok();
+                        0,
+                    ),
+                );
             })
         });
 
